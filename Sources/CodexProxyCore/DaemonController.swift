@@ -1,0 +1,6474 @@
+import Foundation
+
+public struct ProxyHTTPResponse: Sendable {
+    public enum Body: Sendable {
+        case bytes(Data)
+        case stream(AsyncThrowingStream<Data, Error>)
+    }
+
+    public var statusCode: Int
+    public var headers: [String: String]
+    public var body: Body
+
+    public init(statusCode: Int, headers: [String: String], body: Body) {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.body = body
+    }
+}
+
+public struct GeminiUpstreamError: Error, LocalizedError, Sendable {
+    public var httpStatus: Int
+    public var statusText: String
+    public var message: String
+    public var reasonCode: String?
+    public var responseBody: Data
+    public var rawText: String
+
+    public init(
+        httpStatus: Int,
+        statusText: String,
+        message: String,
+        reasonCode: String? = nil,
+        responseBody: Data = Data(),
+        rawText: String = ""
+    ) {
+        self.httpStatus = httpStatus
+        self.statusText = statusText.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.reasonCode = reasonCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.responseBody = responseBody
+        self.rawText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public var summary: String {
+        var prefix = "Gemini upstream error \(self.httpStatus)"
+        if self.statusText.isEmpty == false {
+            prefix += " \(self.statusText)"
+        }
+        if let reasonCode = self.reasonCode, reasonCode.isEmpty == false {
+            prefix += " [\(reasonCode)]"
+        }
+        let message = self.message.isEmpty ? "Request failed." : self.message
+        return "\(prefix): \(message)"
+    }
+
+    public var errorDescription: String? {
+        self.summary
+    }
+
+    public var responseData: Data {
+        guard self.responseBody.isEmpty == false,
+              (try? JSONSerialization.jsonObject(with: self.responseBody)) != nil
+        else {
+            let payload: [String: Any] = [
+                "error": [
+                    "code": self.httpStatus,
+                    "message": self.message,
+                    "status": self.statusText,
+                ],
+            ]
+            return (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+                ?? Data("{\"error\":{\"code\":\(self.httpStatus),\"message\":\"\(self.message)\",\"status\":\"\(self.statusText)\"}}".utf8)
+        }
+        return self.responseBody
+    }
+
+    static func fromHTTPResponse(statusCode: Int, body: Data) -> GeminiUpstreamError {
+        let rawText = String(decoding: body, as: UTF8.self)
+        guard let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let error = self.fromGeminiEvent(object, fallbackStatusCode: statusCode)
+        else {
+            return GeminiUpstreamError(
+                httpStatus: statusCode,
+                statusText: self.defaultStatusText(for: statusCode),
+                message: rawText.isEmpty ? "Gemini upstream request failed." : Helpers.truncate(rawText),
+                responseBody: body,
+                rawText: rawText
+            )
+        }
+        return GeminiUpstreamError(
+            httpStatus: error.httpStatus,
+            statusText: error.statusText,
+            message: error.message,
+            reasonCode: error.reasonCode,
+            responseBody: body,
+            rawText: rawText.isEmpty ? error.summary : rawText
+        )
+    }
+
+    static func fromGeminiEvent(
+        _ object: [String: Any],
+        fallbackStatusCode: Int = 500
+    ) -> GeminiUpstreamError? {
+        guard let error = object["error"] as? [String: Any] else {
+            return nil
+        }
+
+        let bodyCode = self.intValue(error["code"])
+        let httpStatus = fallbackStatusCode == 200 || fallbackStatusCode == 0
+            ? (bodyCode ?? 500)
+            : fallbackStatusCode
+        let statusText = self.nonEmptyString(error["status"]) ?? self.defaultStatusText(for: httpStatus)
+        let message = self.nonEmptyString(error["message"])
+            ?? "Gemini upstream request failed."
+        let reasonCode = ((error["details"] as? [Any]) ?? [])
+            .compactMap { detail -> String? in
+                guard let detail = detail as? [String: Any] else {
+                    return nil
+                }
+                return self.nonEmptyString(detail["reason"])
+            }
+            .first
+        let responseBody = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+        let rawText = String(decoding: responseBody, as: UTF8.self)
+        return GeminiUpstreamError(
+            httpStatus: httpStatus,
+            statusText: statusText,
+            message: message,
+            reasonCode: reasonCode,
+            responseBody: responseBody,
+            rawText: rawText
+        )
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else {
+            return nil
+        }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let intValue as Int:
+            return intValue
+        case let int64Value as Int64:
+            return Int(int64Value)
+        case let number as NSNumber:
+            return number.intValue
+        case let string as String:
+            return Int(string)
+        default:
+            return nil
+        }
+    }
+
+    private static func defaultStatusText(for statusCode: Int) -> String {
+        switch statusCode {
+        case 400:
+            return "INVALID_ARGUMENT"
+        case 401:
+            return "UNAUTHENTICATED"
+        case 403:
+            return "PERMISSION_DENIED"
+        case 429:
+            return "RESOURCE_EXHAUSTED"
+        default:
+            return "INTERNAL"
+        }
+    }
+}
+
+public actor RuntimeState {
+    public var activeAccountKey: String?
+    public var activeAccountID: String?
+    public var activeAccountLabel: String?
+    public var lastError: String?
+    public var pendingOAuthLogin: PendingOAuthLogin?
+    public var oauthCallbackListener: OAuthCallbackListener?
+
+    public init() {}
+
+    public func setActive(accountKey: String?, accountID: String?, label: String?) {
+        self.activeAccountKey = accountKey
+        self.activeAccountID = accountID
+        self.activeAccountLabel = label
+        self.lastError = nil
+    }
+
+    public func clearActiveIfMatches(accountKey: String) {
+        guard self.activeAccountKey == accountKey else { return }
+        self.activeAccountKey = nil
+        self.activeAccountID = nil
+        self.activeAccountLabel = nil
+    }
+
+    public func setActiveLabelIfMatches(accountKey: String, label: String?) {
+        guard self.activeAccountKey == accountKey else { return }
+        self.activeAccountLabel = label
+    }
+
+    public func setLastError(_ error: String?) {
+        self.lastError = error
+    }
+
+    public func setPendingOAuthLogin(_ pending: PendingOAuthLogin?) {
+        self.pendingOAuthLogin = pending
+    }
+
+    public func setOAuthCallbackListener(_ listener: OAuthCallbackListener?) {
+        self.oauthCallbackListener = listener
+    }
+
+    public func clearOAuthSessionIfMatches(state: String) -> OAuthCallbackListener? {
+        guard self.pendingOAuthLogin?.state == state else {
+            return nil
+        }
+        self.pendingOAuthLogin = nil
+        let listener = self.oauthCallbackListener
+        self.oauthCallbackListener = nil
+        return listener
+    }
+
+    public func takeOAuthCallbackListener() -> OAuthCallbackListener? {
+        let listener = self.oauthCallbackListener
+        self.oauthCallbackListener = nil
+        return listener
+    }
+}
+
+private actor AnthropicStreamKeepaliveState {
+    private var lastEmissionMS: Int64
+    private var finished: Bool
+
+    init(lastEmissionMS: Int64 = Helpers.nowMilliseconds(), finished: Bool = false) {
+        self.lastEmissionMS = lastEmissionMS
+        self.finished = finished
+    }
+
+    func noteDownstreamActivity() {
+        self.lastEmissionMS = Helpers.nowMilliseconds()
+    }
+
+    func finish() {
+        self.finished = true
+    }
+
+    func shouldEmitPing(intervalMS: Int64) -> Bool {
+        guard !self.finished else {
+            return false
+        }
+        let now = Helpers.nowMilliseconds()
+        guard now - self.lastEmissionMS >= intervalMS else {
+            return false
+        }
+        self.lastEmissionMS = now
+        return true
+    }
+}
+
+private actor AccountModelDiscoveryCache {
+    private struct Entry {
+        var updatedAt: Int64
+        var expiresAt: Int64
+        var models: [String]
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    func models(
+        for accountKey: String,
+        updatedAt: Int64,
+        now: Int64 = Helpers.now()
+    ) -> [String]? {
+        guard let entry = self.entries[accountKey] else {
+            return nil
+        }
+        guard entry.updatedAt == updatedAt, entry.expiresAt > now else {
+            self.entries.removeValue(forKey: accountKey)
+            return nil
+        }
+        return entry.models
+    }
+
+    func store(
+        _ models: [String],
+        for accountKey: String,
+        updatedAt: Int64,
+        ttlSeconds: Int64,
+        now: Int64 = Helpers.now()
+    ) {
+        self.entries[accountKey] = Entry(
+            updatedAt: updatedAt,
+            expiresAt: now + ttlSeconds,
+            models: models
+        )
+    }
+}
+
+private struct ResponsesStreamTerminalState {
+    var responseID: String?
+    var createdAt: Int64?
+    var sawCreated = false
+    var sawCompleted = false
+    var sawFailed = false
+    var errorMessage: String?
+
+    mutating func observe(sseChunk: String) {
+        for event in ProxyTranscoder.decodeSSE(Data(sseChunk.utf8)) {
+            self.observe(event: event)
+        }
+    }
+
+    mutating func ensureSyntheticIdentity() -> (responseID: String, createdAt: Int64) {
+        if self.responseID == nil {
+            self.responseID = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        }
+        if self.createdAt == nil {
+            self.createdAt = Helpers.now()
+        }
+        return (self.responseID!, self.createdAt!)
+    }
+
+    mutating func observe(event: SSEEvent) {
+        guard let json = ProxyTranscoder.jsonObject(from: event) else {
+            return
+        }
+        let response = json["response"] as? [String: Any]
+        if let id = Self.nonEmptyString(response?["id"]) {
+            self.responseID = id
+        }
+        if let createdAt = Self.int64Value(response?["created_at"]) {
+            self.createdAt = createdAt
+        }
+
+        switch ProxyTranscoder.responseEventType(from: json) {
+        case "response.created":
+            self.sawCreated = true
+        case "response.completed":
+            self.sawCompleted = true
+        case "response.failed":
+            self.sawFailed = true
+            self.errorMessage = Self.errorMessage(from: json, response: response)
+        default:
+            break
+        }
+    }
+
+    private static func errorMessage(from json: [String: Any], response: [String: Any]?) -> String? {
+        if let error = response?["error"] as? [String: Any],
+           let message = self.nonEmptyString(error["message"])
+        {
+            return message
+        }
+        if let error = json["error"] as? [String: Any],
+           let message = self.nonEmptyString(error["message"])
+        {
+            return message
+        }
+        if let message = self.nonEmptyString(response?["message"]) {
+            return message
+        }
+        return self.nonEmptyString(json["message"])
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else {
+            return nil
+        }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64? {
+        switch value {
+        case let intValue as Int64:
+            return intValue
+        case let intValue as Int:
+            return Int64(intValue)
+        case let number as NSNumber:
+            return number.int64Value
+        case let string as String:
+            return Int64(string)
+        default:
+            return nil
+        }
+    }
+}
+
+private struct GeminiStreamTerminalState {
+    var sawFinishReason = false
+    var sawError = false
+    var errorMessage: String?
+    var upstreamError: GeminiUpstreamError?
+
+    mutating func observe(sseChunk: String) {
+        for event in ProxyTranscoder.decodeSSE(Data(sseChunk.utf8)) {
+            self.observe(event: event)
+        }
+    }
+
+    private mutating func observe(event: SSEEvent) {
+        guard let json = ProxyTranscoder.jsonObject(from: event) else {
+            return
+        }
+        if let upstreamError = GeminiUpstreamError.fromGeminiEvent(json, fallbackStatusCode: 0) {
+            self.sawError = true
+            self.upstreamError = upstreamError
+            self.errorMessage = upstreamError.summary
+        }
+
+        let candidates = json["candidates"] as? [[String: Any]] ?? []
+        if candidates.contains(where: {
+            Self.nonEmptyString($0["finishReason"]) != nil
+        }) {
+            self.sawFinishReason = true
+        }
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else {
+            return nil
+        }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct AnthropicMessagesTerminalState {
+    var sawMessageStop = false
+
+    mutating func observe(sseChunk: String) {
+        for event in ProxyTranscoder.decodeSSE(Data(sseChunk.utf8)) {
+            self.observe(event: event)
+        }
+    }
+
+    private mutating func observe(event: SSEEvent) {
+        if event.event == "message_stop" {
+            self.sawMessageStop = true
+            return
+        }
+        guard let json = ProxyTranscoder.jsonObject(from: event) else {
+            return
+        }
+        if (json["type"] as? String) == "message_stop" {
+            self.sawMessageStop = true
+        }
+    }
+}
+
+private enum StreamEndReason: String, Sendable {
+    case completed = "completed"
+    case protocolFailed = "protocol_failed"
+    case prematureEOF = "premature_eof"
+    case scannerError = "scanner_error"
+    case writerError = "writer_error"
+    case clientCancelled = "client_cancelled"
+}
+
+private actor StreamTerminalTraceCoordinator {
+    enum Outcome {
+        case success
+        case failure
+        case cancelled
+    }
+
+    private var outcome: Outcome?
+
+    func begin(_ outcome: Outcome) -> Bool {
+        guard self.outcome == nil else {
+            return false
+        }
+        self.outcome = outcome
+        return true
+    }
+}
+
+private actor ManagedProxyNodeCoordinator {
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard self.isLocked else {
+            self.isLocked = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            self.waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard self.waiters.isEmpty == false else {
+            self.isLocked = false
+            return
+        }
+        let continuation = self.waiters.removeFirst()
+        continuation.resume()
+    }
+}
+
+private func summarizedUpstreamError(_ rawText: String) -> String {
+    let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.isEmpty == false else {
+        return "上游请求失败，但未返回错误详情。"
+    }
+    guard
+        let data = trimmed.data(using: .utf8),
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return Helpers.truncate(trimmed)
+    }
+
+    if let error = object["error"] as? [String: Any],
+       let message = error["message"] as? String,
+       message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    {
+        return Helpers.truncate(message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    if let message = object["error"] as? String,
+       message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    {
+        return Helpers.truncate(message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    if let message = object["message"] as? String,
+       message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    {
+        return Helpers.truncate(message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return Helpers.truncate(trimmed)
+}
+
+private struct RecordedCandidateFailure: LocalizedError {
+    var rawText: String
+    var shouldContinue: Bool
+    var response: ProxyHTTPResponse?
+
+    var errorDescription: String? {
+        summarizedUpstreamError(self.rawText)
+    }
+}
+
+private enum OpenAIUpstreamAdapter: String, Sendable {
+    case responses = "responses"
+    case chatCompletions = "chat_completions"
+
+    var diagnosticLabel: String { self.rawValue }
+}
+
+private struct OpenAIAdapterAttemptContext: Sendable {
+    var fallbackReason: String?
+
+    init(fallbackReason: String? = nil) {
+        self.fallbackReason = fallbackReason?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+public final class DaemonController: @unchecked Sendable {
+    private static let apiKeyFailureCooldownThreshold: Int64 = 3
+    private static let apiKeyFailureCooldownSeconds: Int64 = 3_600
+    private static let accountModelDiscoveryCacheTTLSeconds: Int64 = 300
+
+    public let dataDirectory: URL
+    public let secretStore: SecretStore
+    public let store: SQLiteStore
+    public let accountService: AccountService
+    public let runtimeState: RuntimeState
+    public let publicBaseURLProvider: @Sendable () async throws -> String
+    public let adminBaseURLProvider: @Sendable () async throws -> String
+    private let manageManagedProxyRuntime: Bool
+    private let managedProxyRuntime: (any ManagedProxyRuntimeControlling)?
+    private let stickySessionBindings: StickySessionBindingStore
+    private let managedProxyNodeCoordinator: ManagedProxyNodeCoordinator
+    private let accountModelDiscoveryCache: AccountModelDiscoveryCache
+    private let chatCompletionsReasoningContentCache: ChatCompletionsReasoningContentCache
+
+    public convenience init(
+        dataDirectory: URL = Paths.defaultDataDirectory(),
+        manageManagedProxyRuntime: Bool = true,
+        publicBaseURLProvider: @escaping @Sendable () async throws -> String,
+        adminBaseURLProvider: @escaping @Sendable () async throws -> String
+    ) throws {
+        try self.init(
+            dataDirectory: dataDirectory,
+            manageManagedProxyRuntime: manageManagedProxyRuntime,
+            publicBaseURLProvider: publicBaseURLProvider,
+            adminBaseURLProvider: adminBaseURLProvider,
+            secretStore: nil,
+            managedProxyRuntimeOverride: nil
+        )
+    }
+
+    init(
+        dataDirectory: URL = Paths.defaultDataDirectory(),
+        manageManagedProxyRuntime: Bool = true,
+        publicBaseURLProvider: @escaping @Sendable () async throws -> String,
+        adminBaseURLProvider: @escaping @Sendable () async throws -> String,
+        secretStore: SecretStore?,
+        managedProxyRuntimeOverride: (any ManagedProxyRuntimeControlling)?
+    ) throws {
+        self.dataDirectory = dataDirectory
+        self.secretStore = secretStore ?? SecretStore(dataDirectory: dataDirectory)
+        self.store = try SQLiteStore(dataDirectory: dataDirectory, secretStore: self.secretStore)
+        self.accountService = AccountService(store: self.store, secretStore: self.secretStore)
+        self.runtimeState = RuntimeState()
+        self.publicBaseURLProvider = publicBaseURLProvider
+        self.adminBaseURLProvider = adminBaseURLProvider
+        self.manageManagedProxyRuntime = manageManagedProxyRuntime
+        self.stickySessionBindings = StickySessionBindingStore()
+        self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
+        self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
+        self.chatCompletionsReasoningContentCache = ChatCompletionsReasoningContentCache(dataDirectory: dataDirectory)
+        self.managedProxyRuntime = manageManagedProxyRuntime
+            ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
+            : nil
+    }
+
+    public func bootstrap() async throws {
+        try await self.importBootstrapSettingsIfNeeded()
+        var config = try self.store.loadConfig()
+        if config.adminToken.isEmpty {
+            config.adminToken = try self.secretStore.adminToken()
+        }
+        let normalizedConfig = try self.configWithManagedProxySummary(
+            self.configWithDefaultProxyAPIKeys(config).normalizedModelRoutingConfig()
+        )
+        try self.store.saveConfig(normalizedConfig)
+        try self.persistConfigSecretMirrors(for: normalizedConfig)
+        try await self.syncManagedProxyRuntime(for: normalizedConfig)
+        let importConfig = try await self.loadConfigForNetworkRequests()
+        try await self.importBootstrapAccountsIfNeeded(config: importConfig)
+        try self.accountService.repairStoredManualAccountsIfNeeded()
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners(config: normalizedConfig)
+        try self.store.pruneStats(retentionDays: config.statsRetentionDays)
+    }
+
+    public func loadConfig() async throws -> AppConfig {
+        try self.configWithManagedProxySummary(
+            self.configWithDefaultProxyAPIKeys(self.store.loadConfig()).normalizedModelRoutingConfig()
+        )
+    }
+
+    public func saveConfig(_ config: AppConfig) async throws -> AppConfig {
+        var updated = config
+        if updated.adminToken.isEmpty {
+            updated.adminToken = try self.secretStore.adminToken()
+        }
+        let normalized = try self.configWithManagedProxySummary(
+            self.configWithDefaultProxyAPIKeys(updated).normalizedModelRoutingConfig()
+        )
+        try self.store.saveConfig(normalized)
+        try self.persistConfigSecretMirrors(for: normalized)
+        try await self.syncManagedProxyRuntime(for: normalized)
+        return try self.configWithManagedProxySummary(normalized)
+    }
+
+    public func shutdown() async {
+        if let listener = await self.runtimeState.takeOAuthCallbackListener() {
+            await listener.stop()
+        }
+        if let managedProxyRuntime, self.manageManagedProxyRuntime {
+            await managedProxyRuntime.stop()
+        }
+    }
+
+    public func status() async throws -> ProxyStatus {
+        let config = try await self.loadConfig()
+        let publicBaseURL = try await self.publicBaseURLProvider()
+        let adminBaseURL = try await self.adminBaseURLProvider()
+        return ProxyStatus(
+            running: true,
+            publicBaseURL: publicBaseURL,
+            anthropicBaseURL: Self.anthropicBaseURL(from: publicBaseURL),
+            geminiBaseURL: Self.geminiBaseURL(from: publicBaseURL),
+            adminBaseURL: adminBaseURL,
+            apiKey: config.primaryProxyAPIKeyRecord?.key ?? config.proxyAPIKey,
+            activeAccountKey: await self.runtimeState.activeAccountKey,
+            activeAccountID: await self.runtimeState.activeAccountID,
+            activeAccountLabel: await self.runtimeState.activeAccountLabel,
+            lastError: await self.runtimeState.lastError,
+            daemonVersion: RuntimeInfo.displayVersion,
+            proxyTestAdminTransportMode: .full
+        )
+    }
+
+    public func authenticateProxyAPIKey(_ candidate: String) async throws -> AuthenticatedProxyKeyContext {
+        let config = try await self.loadConfig()
+        guard let matched = config.proxyAPIKeys.first(where: {
+            $0.enabled && $0.key == candidate
+        }) ?? (config.proxyAPIKey == candidate ? config.primaryProxyAPIKeyRecord : nil) else {
+            throw ProxyError.message("Invalid proxy api key.")
+        }
+        return AuthenticatedProxyKeyContext(
+            apiKeyHash: Helpers.sha256(matched.key),
+            proxyKeyID: matched.id,
+            dataSource: matched.dataSource,
+            allowedAccountKeys: matched.allowedAccountKeys
+        )
+    }
+
+    public func authenticateAdminToken(_ candidate: String) async throws {
+        let config = try await self.loadConfig()
+        guard candidate == config.adminToken else {
+            throw ProxyError.message("Invalid admin token.")
+        }
+    }
+
+    public func rotateProxyAPIKey() async throws -> ProxyStatus {
+        var config = try await self.loadConfig()
+        let rotatedValue = try self.secretStore.rotateProxyAPIKey()
+        if let primaryID = config.primaryProxyAPIKeyID,
+           let index = config.proxyAPIKeys.firstIndex(where: { $0.id == primaryID })
+        {
+            config.proxyAPIKeys[index].key = rotatedValue
+        } else if config.proxyAPIKeys.isEmpty == false {
+            config.proxyAPIKeys[0].key = rotatedValue
+            config.primaryProxyAPIKeyID = config.proxyAPIKeys[0].id
+        } else {
+            config.proxyAPIKeys = [
+                ProxyAPIKeyRecord(
+                    label: AppConfig.defaultProxyAPIKeyLabel,
+                    key: rotatedValue,
+                    dataSource: .all,
+                    enabled: true
+                ),
+            ]
+            config.primaryProxyAPIKeyID = config.proxyAPIKeys.first?.id
+        }
+        config.proxyAPIKey = rotatedValue
+        let normalized = try self.configWithManagedProxySummary(
+            self.configWithDefaultProxyAPIKeys(config).normalizedModelRoutingConfig()
+        )
+        try self.store.saveConfig(normalized)
+        return try await self.status()
+    }
+
+    public func listAccounts() async throws -> [AccountSummary] {
+        try await self.accountService.listAccounts()
+    }
+
+    public func importCurrentAuth(label: String?) async throws -> AccountSummary {
+        let summary = try await self.withNetworkConfig {
+            try await self.accountService.importCurrentAuth(label: label, config: $0)
+        }
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return summary
+    }
+
+    public func importAuthJSONAccounts(_ items: [AuthJsonImportInput]) async throws -> ImportAccountsResult {
+        let result = try await self.withNetworkConfig {
+            try await self.accountService.importAuthJSONAccounts(items: items, config: $0)
+        }
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return result
+    }
+
+    public func manualAddAPIKeyAccount(_ input: ManualAPIKeyAccountInput) async throws -> AccountSummary {
+        let summary = try await self.withNetworkConfig {
+            try await self.accountService.manualAddAPIKeyAccount(input, config: $0)
+        }
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return summary
+    }
+
+    public func manualAPIKeyAccountDetails(id: String) async throws -> ManualAPIKeyAccountDetails {
+        try self.accountService.manualAPIKeyAccountDetails(id: id)
+    }
+
+    public func updateManualAPIKeyAccount(id: String, input: UpdateManualAPIKeyAccountRequest) async throws -> AccountSummary {
+        let accounts = try await self.accountService.listAccounts()
+        let previous = accounts.first(where: { $0.id == id })
+        guard let previous else {
+            throw ProxyError.message("未找到要更新的账号")
+        }
+
+        let existingRecord = try self.store.loadAccountRecord(id: id)
+        let updated = try await self.withNetworkConfig(for: existingRecord) {
+            try await self.accountService.updateManualAPIKeyAccount(id: id, input: input, config: $0)
+        }
+
+        if previous.accountKey != updated.accountKey || !updated.enabled {
+            await self.runtimeState.clearActiveIfMatches(accountKey: previous.accountKey)
+        }
+        await self.runtimeState.setActiveLabelIfMatches(accountKey: updated.accountKey, label: updated.label)
+
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return updated
+    }
+
+    public func updateAccountLabel(id: String, input: UpdateAccountLabelRequest) async throws -> AccountSummary {
+        let updated = try await self.accountService.updateAccountLabel(id: id, input: input)
+        await self.runtimeState.setActiveLabelIfMatches(accountKey: updated.accountKey, label: updated.label)
+        return updated
+    }
+
+    public func updateAccountManagedProxyNode(id: String, input: UpdateAccountManagedProxyNodeRequest) async throws -> AccountSummary {
+        let normalizedNodeName = AccountSummary.normalizedManagedProxyNodeName(input.managedProxyNodeName)
+        if let normalizedNodeName {
+            try await self.validateManagedProxyNodeSelection(normalizedNodeName)
+        }
+        let summary = try await self.accountService.updateAccountManagedProxyNode(
+            id: id,
+            input: .init(managedProxyNodeName: normalizedNodeName)
+        )
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return summary
+    }
+
+    public func clearAccountManagedProxyNodes() async throws -> ClearAccountManagedProxyNodesResult {
+        let result = try self.accountService.clearAccountManagedProxyNodes()
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return result
+    }
+
+    public func updateAccountModelRouting(id: String, input: UpdateAccountModelRoutingRequest) async throws -> AccountSummary {
+        try await self.accountService.updateAccountModelRouting(
+            id: id,
+            input: UpdateAccountModelRoutingRequest(
+                defaultTargetModel: input.modelRouting?.defaultTargetModel,
+                mappings: input.modelRouting?.mappings ?? []
+            )
+        )
+    }
+
+    public func exportAccounts() async throws -> Data {
+        try await self.accountService.exportAccounts()
+    }
+
+    public func refreshAllUsage(forceRefresh: Bool = true) async throws -> [AccountSummary] {
+        let records = try self.store.listAccountRecords()
+        for record in records {
+            _ = try await self.withNetworkConfig(for: record) {
+                try await self.accountService.refreshUsage(id: record.id, config: $0, forceRefresh: forceRefresh)
+            }
+        }
+        return try await self.accountService.listAccounts()
+    }
+
+    public func refreshAccountUsage(id: String, forceRefresh: Bool = true) async throws -> AccountSummary {
+        let record = try self.store.loadAccountRecord(id: id)
+        return try await self.withNetworkConfig(for: record) {
+            try await self.accountService.refreshUsage(id: id, config: $0, forceRefresh: forceRefresh)
+        }
+    }
+
+    public func setAccountEnabled(id: String, enabled: Bool) async throws -> AccountSummary {
+        let summary = try await self.accountService.setAccountEnabled(id: id, enabled: enabled)
+        if !enabled {
+            await self.runtimeState.clearActiveIfMatches(accountKey: summary.accountKey)
+            await self.stickySessionBindings.clear(accountKey: summary.accountKey)
+        }
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return summary
+    }
+
+    public func reorderAccounts(ids: [String]) async throws -> [AccountSummary] {
+        try await self.accountService.reorderAccounts(ids: ids)
+    }
+
+    public func removeAccount(id: String) async throws -> DeleteAccountResult {
+        let result = try await self.accountService.removeAccount(id: id)
+        await self.runtimeState.clearActiveIfMatches(accountKey: result.accountKey)
+        await self.stickySessionBindings.clear(accountKey: result.accountKey)
+        try await self.reconcileManagedProxyAccountNodeListeners()
+        return result
+    }
+
+    public func statsSummary() async throws -> AdminStatsSummary {
+        try self.store.loadStatsSummary()
+    }
+
+    public func proxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {
+        let timeOnly = query.timeRangeOnly().normalized()
+        let bounds = timeOnly.effectiveTimeBounds()
+        let aggregates = try self.store.loadProxyAPIKeyUsage(query: timeOnly)
+        let config = try await self.loadConfig()
+        let configuredByHash = Dictionary(
+            uniqueKeysWithValues: config.proxyAPIKeys.map { (Helpers.sha256($0.key), $0) }
+        )
+        let primaryHash = config.primaryProxyAPIKeyRecord.map { Helpers.sha256($0.key) }
+
+        var seenHashes = Set<String>()
+        var entries = aggregates.map { aggregate in
+            seenHashes.insert(aggregate.apiKeyHash)
+            let configured = configuredByHash[aggregate.apiKeyHash]
+            return ProxyAPIKeyUsageEntry(
+                apiKeyHash: aggregate.apiKeyHash,
+                apiKey: aggregate.apiKey,
+                label: configured?.label,
+                dataSource: configured?.dataSource ?? .openAI,
+                enabled: configured?.enabled,
+                isPrimary: aggregate.apiKeyHash == primaryHash,
+                requestCount: aggregate.requestCount,
+                failureCount: aggregate.failureCount,
+                authFailureCount: aggregate.authFailureCount,
+                rateLimitCount: aggregate.rateLimitCount,
+                quotaFailureCount: aggregate.quotaFailureCount,
+                averageLatencyMS: aggregate.averageLatencyMS,
+                totalInputTokens: aggregate.totalInputTokens,
+                totalOutputTokens: aggregate.totalOutputTokens,
+                totalTokens: aggregate.totalTokens,
+                lastUsedAt: aggregate.lastUsedAt
+            )
+        }
+
+        for configured in config.proxyAPIKeys where seenHashes.contains(Helpers.sha256(configured.key)) == false {
+            entries.append(
+                ProxyAPIKeyUsageEntry(
+                    apiKeyHash: Helpers.sha256(configured.key),
+                    apiKey: configured.key,
+                    label: configured.label,
+                    dataSource: configured.dataSource,
+                    enabled: configured.enabled,
+                    isPrimary: configured.id == config.primaryProxyAPIKeyID,
+                    lastUsedAt: nil
+                )
+            )
+        }
+
+        entries.sort {
+            if $0.isPrimary != $1.isPrimary {
+                return $0.isPrimary && !$1.isPrimary
+            }
+            if $0.totalTokens != $1.totalTokens {
+                return $0.totalTokens > $1.totalTokens
+            }
+            if $0.requestCount != $1.requestCount {
+                return $0.requestCount > $1.requestCount
+            }
+            return ($0.lastUsedAt ?? 0) > ($1.lastUsedAt ?? 0)
+        }
+
+        return ProxyAPIKeyUsageReport(
+            from: bounds.from,
+            to: bounds.to,
+            totalRequests: entries.map(\.requestCount).reduce(0, +),
+            totalFailures: entries.map(\.failureCount).reduce(0, +),
+            totalInputTokens: entries.map(\.totalInputTokens).reduce(0, +),
+            totalOutputTokens: entries.map(\.totalOutputTokens).reduce(0, +),
+            totalTokens: entries.map(\.totalTokens).reduce(0, +),
+            entries: entries
+        )
+    }
+
+    public func requestLogs(query: RequestLogQuery) async throws -> RequestLogPage {
+        try self.store.loadRequestLogs(query: query)
+    }
+
+    public func requestLogFilters(query: RequestLogQuery) async throws -> RequestLogFilterOptions {
+        try self.store.loadRequestLogFilterOptions(query: query)
+    }
+
+    public func exportRequestLogs(query: RequestLogQuery) async throws -> Data {
+        let entries = try self.store.loadAllRequestLogs(query: query)
+        return RequestLogCSVExport.data(entries: entries, maskAPIKeys: true)
+    }
+
+    public func managedProxySnapshot() async throws -> ManagedProxySnapshot {
+        let loadedConfig = try await self.loadConfig()
+        let config = try self.configWithManagedProxySummary(loadedConfig.normalizedModelRoutingConfig())
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+
+        guard let managedProxyRuntime else {
+            return ManagedProxySnapshot(
+                mode: config.outboundProxyMode,
+                subscriptionConfigured: config.managedProxySummary.subscriptionConfigured,
+                subscriptionURL: subscriptionURL,
+                providerName: config.managedProxySummary.providerName,
+                autoUpdateIntervalHours: config.managedProxySummary.autoUpdateIntervalHours,
+                healthcheckURL: config.managedProxySummary.healthcheckURL,
+                runtimeState: .stopped,
+                controllerReachable: false,
+                mixedPort: nil,
+                controllerPort: nil,
+                currentNodeName: nil,
+                pinnedNodeName: config.managedProxySummary.selectedNodeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? nil
+                    : config.managedProxySummary.selectedNodeName,
+                pinnedNodeAvailable: false,
+                providerUpdatedAt: nil,
+                nodes: [],
+                lastError: config.outboundProxyMode == .subscription && config.managedProxySummary.subscriptionConfigured
+                    ? "本地服务未运行，启动服务后可加载订阅节点并测速。"
+                    : nil,
+                subscriptionUserinfo: nil
+            )
+        }
+
+        return try await managedProxyRuntime.snapshot(config: config, subscriptionURL: subscriptionURL)
+    }
+
+    public func saveManagedProxyConfig(_ payload: ManagedProxyConfigPayload) async throws -> ManagedProxySnapshot {
+        let normalizedURL = try ManagedProxyRuntime.validatedSubscriptionURL(payload.subscriptionURL)
+        var config = try await self.loadConfig()
+        config.managedProxySummary.providerName = ManagedProxyConfigSummary.defaultProviderName
+        config.managedProxySummary.autoUpdateIntervalHours = ManagedProxyConfigSummary.defaultAutoUpdateIntervalHours
+
+        if let normalizedURL {
+            try self.secretStore.setMihomoSubscriptionURL(normalizedURL)
+            config.managedProxySummary.subscriptionConfigured = true
+        } else {
+            try self.secretStore.setMihomoSubscriptionURL(nil)
+            config.managedProxySummary.subscriptionConfigured = false
+            if config.outboundProxyMode == .subscription {
+                config.outboundProxyMode = .disabled
+            }
+        }
+
+        let normalized = try self.configWithManagedProxySummary(config.normalizedModelRoutingConfig())
+        try self.store.saveConfig(normalized)
+        try await self.syncManagedProxyRuntime(for: normalized)
+        return try await self.managedProxySnapshot()
+    }
+
+    public func saveManagedProxyHealthcheckConfig(
+        _ payload: ManagedProxyHealthcheckConfigPayload
+    ) async throws -> ManagedProxySnapshot {
+        let normalizedURL = try ManagedProxyRuntime.validatedHealthcheckURL(payload.healthcheckURL)
+        var config = try await self.loadConfig()
+        config.managedProxySummary.healthcheckURL = normalizedURL
+        let normalized = try self.configWithManagedProxySummary(config.normalizedModelRoutingConfig())
+        try self.store.saveConfig(normalized)
+        try await self.syncManagedProxyRuntime(for: normalized)
+        return try await self.managedProxySnapshot()
+    }
+
+    public func updateManagedProxySubscription() async throws -> ManagedProxySnapshot {
+        guard let managedProxyRuntime else {
+            throw ProxyError.message("本地服务未运行，无法更新订阅。")
+        }
+        let loadedConfig = try await self.loadConfig()
+        let config = try self.configWithManagedProxySummary(loadedConfig.normalizedModelRoutingConfig())
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        return try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.updateSubscription(config: config, subscriptionURL: subscriptionURL)
+        }
+    }
+
+    public func switchManagedProxyCurrentNode(name: String) async throws -> ManagedProxySnapshot {
+        guard let managedProxyRuntime else {
+            throw ProxyError.message("本地服务未运行，无法切换当前节点。")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else {
+            throw ProxyError.message("请选择一个可用节点。")
+        }
+
+        let loadedConfig = try await self.loadConfig()
+        let config = try self.configWithManagedProxySummary(loadedConfig.normalizedModelRoutingConfig())
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        return try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.selectNode(
+                name: trimmedName,
+                config: config,
+                subscriptionURL: subscriptionURL
+            )
+        }
+    }
+
+    public func updateManagedProxyPinnedNode(name: String?) async throws -> ManagedProxySnapshot {
+        let normalizedNodeName = AccountSummary.normalizedManagedProxyNodeName(name)
+        if let normalizedNodeName {
+            try await self.validateManagedProxyNodeSelection(normalizedNodeName)
+        }
+
+        var config = try await self.loadConfig()
+        config.managedProxySummary.selectedNodeName = normalizedNodeName ?? ""
+        let normalized = try self.configWithManagedProxySummary(config.normalizedModelRoutingConfig())
+        try self.store.saveConfig(normalized)
+        return try await self.managedProxySnapshot()
+    }
+
+    public func selectManagedProxyNode(name: String) async throws -> ManagedProxySnapshot {
+        guard let managedProxyRuntime else {
+            throw ProxyError.message("本地服务未运行，无法切换节点。")
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedName.isEmpty == false else {
+            throw ProxyError.message("请选择一个可用节点。")
+        }
+
+        var config = try await self.loadConfig()
+        config.managedProxySummary.selectedNodeName = trimmedName
+        let normalized = try self.configWithManagedProxySummary(config.normalizedModelRoutingConfig())
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        let snapshot = try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.selectNode(
+                name: trimmedName,
+                config: normalized,
+                subscriptionURL: subscriptionURL
+            )
+        }
+        try self.store.saveConfig(normalized)
+        return snapshot
+    }
+
+    public func healthcheckManagedProxy(nodeName: String?) async throws -> ManagedProxySnapshot {
+        guard let managedProxyRuntime else {
+            throw ProxyError.message("本地服务未运行，无法执行节点测速。")
+        }
+        let loadedConfig = try await self.loadConfig()
+        let config = try self.configWithManagedProxySummary(loadedConfig.normalizedModelRoutingConfig())
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        return try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.healthcheck(nodeName: nodeName, config: config, subscriptionURL: subscriptionURL)
+        }
+    }
+
+    public func prepareOAuthLogin(providerFamily: AccountProviderFamily = .openAI) async throws -> PreparedOAuthLogin {
+        if let existing = await self.runtimeState.takeOAuthCallbackListener() {
+            self.logOAuthEvent("Replacing pending OAuth session before starting a new \(providerFamily.rawValue) authorization.")
+            await existing.stop()
+        }
+        await self.runtimeState.setPendingOAuthLogin(nil)
+
+        let listener = try OAuthCallbackListener.bind(preferredPort: AuthService.defaultOAuthRedirectPort)
+        let prepared: (PendingOAuthLogin, PreparedOAuthLogin)
+        switch providerFamily {
+        case .openAI:
+            prepared = try AuthService.prepareOAuthLogin(callbackPort: listener.port)
+        case .anthropic:
+            prepared = try await self.withNetworkConfig {
+                try await AnthropicAuthService.prepareOAuthLogin(callbackPort: listener.port, config: $0)
+            }
+        case .gemini:
+            prepared = try await self.withNetworkConfig {
+                try GeminiAuthService.prepareOAuthLogin(callbackPort: listener.port, config: $0)
+            }
+        }
+        let pending = prepared.0
+
+        await self.runtimeState.setPendingOAuthLogin(pending)
+        await self.runtimeState.setOAuthCallbackListener(listener)
+
+        listener.start(
+            expiresAt: pending.expiresAt,
+            onCallback: { [weak self] callbackURL, preferredLanguage in
+                guard let self else {
+                    return OAuthCallbackPageRenderer.failure(
+                        detail: "The local OAuth controller is no longer available. Start the authorization again from AI Coding Proxy.",
+                        preferredLanguage: preferredLanguage
+                    )
+                }
+                return await self.handleOAuthBrowserCallback(
+                    url: callbackURL,
+                    expectedState: pending.state,
+                    preferredLanguage: preferredLanguage
+                )
+            },
+            onCancel: { [weak self] in
+                await self?.cancelOAuthLogin(expectedState: pending.state)
+            },
+            onTimeout: { [weak self] in
+                await self?.expireOAuthLogin(expectedState: pending.state)
+            }
+        )
+        return prepared.1
+    }
+
+    public func completeOAuthCallback(
+        providerFamily: AccountProviderFamily? = nil,
+        url: String
+    ) async throws -> AccountSummary {
+        let pendingProviderFamily = await self.runtimeState.pendingOAuthLogin?.providerFamily
+        let resolvedProviderFamily = providerFamily ?? pendingProviderFamily ?? .openAI
+        return try await self.completeOAuthCallback(
+            providerFamily: resolvedProviderFamily,
+            url: url,
+            expectedState: nil,
+            stopListener: true
+        )
+    }
+
+    public func modelsResponse(
+        proxyKey: AuthenticatedProxyKeyContext,
+        selectedAccountKey: String? = nil
+    ) async throws -> Data {
+        let models = try await self.discoveredPublicRouteModels(
+            proxyKey: proxyKey,
+            selectedAccountKey: selectedAccountKey
+        )
+        let payload: [String: Any] = [
+            "object": "list",
+            "data": models.map {
+                [
+                    "id": $0,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "openai",
+                ]
+            },
+        ]
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    public func proxyTestModelsCatalog(selectedAccountKey: String? = nil) async throws -> ProxyTestModelCatalog {
+        let trimmedSelectedAccountKey = self.trimmed(selectedAccountKey)
+        guard let trimmedSelectedAccountKey else {
+            return .defaultCatalog
+        }
+
+        let records = try self.store.listAccountRecords()
+        guard let record = records.first(where: { $0.accountKey == trimmedSelectedAccountKey }) else {
+            throw ProxyError.message("指定的测试账号不存在。")
+        }
+
+        let config = try await self.loadConfigForNetworkRequests()
+        let models = await self.discoveredModels(
+            for: record,
+            config: config
+        )
+        return self.proxyTestCatalog(
+            for: record,
+            discoveredModels: models
+        )
+    }
+
+    private func discoveredPublicRouteModels(
+        proxyKey: AuthenticatedProxyKeyContext,
+        selectedAccountKey: String?
+    ) async throws -> [String] {
+        let trimmedSelectedAccountKey = self.trimmed(selectedAccountKey)
+        let candidates: [ProxyCandidate]
+        do {
+            candidates = try await self.loadCandidates(
+                selectedAccountKey: trimmedSelectedAccountKey,
+                dataSource: proxyKey.dataSource,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.openAI, .anthropic]
+            )
+        } catch {
+            if trimmedSelectedAccountKey != nil {
+                throw error
+            }
+            return self.defaultPublicRouteModels(for: proxyKey.dataSource)
+        }
+
+        guard !candidates.isEmpty else {
+            return self.defaultPublicRouteModels(for: proxyKey.dataSource)
+        }
+
+        let config = try await self.loadConfigForNetworkRequests()
+        var merged: [String] = []
+        for candidate in candidates {
+            merged = Self.mergeDiscoveredModels(
+                merged,
+                adding: await self.discoveredModels(for: candidate, config: config)
+            )
+        }
+
+        if merged.isEmpty {
+            return self.defaultPublicRouteModels(for: proxyKey.dataSource)
+        }
+        return merged
+    }
+
+    private func discoveredModels(
+        for candidate: ProxyCandidate,
+        config: AppConfig
+    ) async -> [String] {
+        await self.discoveredModels(
+            for: candidate.record,
+            auth: candidate.auth,
+            config: config
+        )
+    }
+
+    private func discoveredModels(
+        for record: AccountRecord,
+        config: AppConfig
+    ) async -> [String] {
+        let auth = try? AuthService.extractAuth(from: record.authJSON, secretStore: self.secretStore)
+        return await self.discoveredModels(
+            for: record,
+            auth: auth,
+            config: config
+        )
+    }
+
+    private func discoveredModels(
+        for record: AccountRecord,
+        auth: ExtractedAuth?,
+        config: AppConfig
+    ) async -> [String] {
+        if let cached = await self.accountModelDiscoveryCache.models(
+            for: record.accountKey,
+            updatedAt: record.updatedAt
+        ) {
+            return cached
+        }
+
+        let fallbackModels = self.fallbackDiscoveredModels(for: record, auth: auth)
+        guard record.authMode.isManualAPIKey, let auth else {
+            await self.accountModelDiscoveryCache.store(
+                fallbackModels,
+                for: record.accountKey,
+                updatedAt: record.updatedAt,
+                ttlSeconds: Self.accountModelDiscoveryCacheTTLSeconds
+            )
+            return fallbackModels
+        }
+
+        let resolvedBaseURL = auth.upstreamBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty == false
+            ? auth.upstreamBaseURL!.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : (record.upstreamBaseURL?.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty == false
+                ? record.upstreamBaseURL!.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                : auth.providerPreset.defaultBaseURL)
+
+        let resolvedModels: [String]
+        do {
+            resolvedModels = try await OpenAICompatibleUpstream.probeModels(
+                config: config,
+                baseURL: resolvedBaseURL,
+                apiKey: auth.accessToken,
+                providerPreset: auth.providerPreset,
+                baseURLMode: auth.baseURLMode
+            )
+        } catch {
+            resolvedModels = fallbackModels
+        }
+
+        let normalizedModels = Self.normalizedDiscoveredModels(
+            resolvedModels,
+            fallback: fallbackModels
+        )
+        await self.accountModelDiscoveryCache.store(
+            normalizedModels,
+            for: record.accountKey,
+            updatedAt: record.updatedAt,
+            ttlSeconds: Self.accountModelDiscoveryCacheTTLSeconds
+        )
+        return normalizedModels
+    }
+
+    private func fallbackDiscoveredModels(
+        for record: AccountRecord,
+        auth: ExtractedAuth?
+    ) -> [String] {
+        let effectiveAuthMode = auth?.authMode ?? record.authMode
+        let effectiveProviderPreset = auth?.providerPreset ?? record.providerPreset
+        switch effectiveAuthMode.primaryPinnedProxyTestDataSource {
+        case .openAI:
+            let presetDefaults = effectiveAuthMode.isManualAPIKey
+                ? effectiveProviderPreset.defaultValidationModelCandidates
+                : []
+            return presetDefaults.isEmpty ? ProxyTranscoder.supportedModels : presetDefaults
+        case .anthropic:
+            return ProxyTestModelCatalog.defaultCatalog.anthropicMessages.models
+        case .gemini:
+            return ProxyTestModelCatalog.defaultCatalog.geminiGenerateContent.models
+        case .all:
+            return self.defaultPublicRouteModels(for: .all)
+        }
+    }
+
+    private func proxyTestCatalog(
+        for record: AccountRecord,
+        discoveredModels: [String]
+    ) -> ProxyTestModelCatalog {
+        var catalog = ProxyTestModelCatalog.defaultCatalog
+        switch record.authMode.primaryPinnedProxyTestDataSource {
+        case .openAI:
+            catalog.chatCompletions = Self.proxyTestModelGroup(
+                from: catalog.chatCompletions,
+                models: discoveredModels
+            )
+            catalog.responses = Self.proxyTestModelGroup(
+                from: catalog.responses,
+                models: discoveredModels
+            )
+        case .anthropic:
+            catalog.anthropicMessages = Self.proxyTestModelGroup(
+                from: catalog.anthropicMessages,
+                models: discoveredModels
+            )
+        case .gemini:
+            catalog.geminiGenerateContent = Self.proxyTestModelGroup(
+                from: catalog.geminiGenerateContent,
+                models: discoveredModels
+            )
+        case .all:
+            break
+        }
+        return catalog
+    }
+
+    private func defaultPublicRouteModels(for dataSource: ProxyDataSource) -> [String] {
+        switch dataSource {
+        case .all:
+            return Self.mergeDiscoveredModels(
+                ProxyTranscoder.supportedModels,
+                adding: ProxyTestModelCatalog.defaultCatalog.anthropicMessages.models
+            )
+        case .openAI:
+            return ProxyTranscoder.supportedModels
+        case .anthropic:
+            return ProxyTestModelCatalog.defaultCatalog.anthropicMessages.models
+        case .gemini:
+            return []
+        }
+    }
+
+    private static func normalizedDiscoveredModels(
+        _ models: [String],
+        fallback: [String]
+    ) -> [String] {
+        let normalized = self.mergeDiscoveredModels([], adding: models)
+        return normalized.isEmpty ? self.mergeDiscoveredModels([], adding: fallback) : normalized
+    }
+
+    private static func mergeDiscoveredModels(
+        _ current: [String],
+        adding models: [String]
+    ) -> [String] {
+        var merged = current
+        var seen = Set(current.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+        for model in models {
+            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else {
+                continue
+            }
+            merged.append(trimmed)
+        }
+        return merged
+    }
+
+    private static func proxyTestModelGroup(
+        from group: ProxyTestModelGroup,
+        models: [String]
+    ) -> ProxyTestModelGroup {
+        let normalizedModels = self.normalizedDiscoveredModels(models, fallback: group.models)
+        let defaultModel = normalizedModels.contains(group.defaultModel)
+            ? group.defaultModel
+            : (normalizedModels.first ?? group.defaultModel)
+        return ProxyTestModelGroup(
+            family: group.family,
+            models: normalizedModels,
+            defaultModel: defaultModel
+        )
+    }
+
+    public func proxyChatCompletions(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        let reasoningEffort = self.reasoningEffort(fromChatCompletionsBody: body)
+        let dynamicallySupportedModels = Set(
+            try await self.discoveredPublicRouteModels(
+                proxyKey: proxyKey,
+                selectedAccountKey: selectedAccountKey
+            )
+        )
+        let allowCustomModelPassthrough = self.isProxyTestConsoleRequest(headers: headers)
+        let request = try ProxyTranscoder.convertChatCompletionsRequest(
+            object,
+            allowCustomModelPassthrough: allowCustomModelPassthrough,
+            additionalSupportedModels: dynamicallySupportedModels
+        )
+        let preserveRequestedCustomModel = (
+            allowCustomModelPassthrough
+            || ProxyTranscoder.isSupportedClientModel(
+                request.model,
+                additionalSupportedModels: dynamicallySupportedModels
+            )
+        ) && !ProxyTranscoder.isSupportedClientModel(request.model)
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request.request,
+            requestedModel: request.model,
+            proxyKey: proxyKey
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: false
+        )
+        if proxyKey.dataSource == .anthropic {
+            return try await self.forwardToAnthropicProvider(
+                endpoint: "/v1/chat/completions",
+                proxyKey: proxyKey,
+                apiKeyValue: apiKeyValue,
+                clientSource: clientSource,
+                promptCacheContext: promptCacheContext,
+                selectedAccountKey: selectedAccountKey,
+                requestedModel: request.model,
+                reasoningEffort: reasoningEffort,
+                downstreamStream: request.downstreamStream,
+                normalizedRequest: request.request,
+                responseMode: .chatCompletions
+            )
+        }
+        return try await self.forwardToCodex(
+            endpoint: "/v1/chat/completions",
+            proxyKey: proxyKey,
+            apiKeyValue: apiKeyValue,
+            clientSource: clientSource,
+            promptCacheContext: promptCacheContext,
+            selectedAccountKey: selectedAccountKey,
+            requestedModel: request.model,
+            reasoningEffort: reasoningEffort,
+            downstreamStream: request.downstreamStream,
+            codexRequest: request.request,
+            responseMode: .chatCompletions,
+            explicitProxyTestCustomModel: preserveRequestedCustomModel
+        )
+    }
+
+    public func proxyResponses(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        let reasoningEffort = self.reasoningEffort(fromResponsesBody: body)
+        let dynamicallySupportedModels = Set(
+            try await self.discoveredPublicRouteModels(
+                proxyKey: proxyKey,
+                selectedAccountKey: selectedAccountKey
+            )
+        )
+        let allowCustomModelPassthrough = self.isProxyTestConsoleRequest(headers: headers)
+        let request = try ProxyTranscoder.normalizeResponsesRequest(
+            object,
+            allowCustomModelPassthrough: allowCustomModelPassthrough,
+            additionalSupportedModels: dynamicallySupportedModels
+        )
+        let model = request["model"] as? String ?? ProxyTranscoder.defaultModel
+        let preserveRequestedCustomModel = (
+            allowCustomModelPassthrough
+            || ProxyTranscoder.isSupportedClientModel(
+                model,
+                additionalSupportedModels: dynamicallySupportedModels
+            )
+        ) && !ProxyTranscoder.isSupportedClientModel(model)
+        let downstreamStream = (object["stream"] as? Bool) ?? false
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request,
+            requestedModel: model,
+            proxyKey: proxyKey
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: false
+        )
+        if proxyKey.dataSource == .anthropic {
+            return try await self.forwardToAnthropicProvider(
+                endpoint: "/v1/responses",
+                proxyKey: proxyKey,
+                apiKeyValue: apiKeyValue,
+                clientSource: clientSource,
+                promptCacheContext: promptCacheContext,
+                selectedAccountKey: selectedAccountKey,
+                requestedModel: model,
+                reasoningEffort: reasoningEffort,
+                downstreamStream: downstreamStream,
+                normalizedRequest: request,
+                responseMode: .responses
+            )
+        }
+        return try await self.forwardToCodex(
+            endpoint: "/v1/responses",
+            proxyKey: proxyKey,
+            apiKeyValue: apiKeyValue,
+            clientSource: clientSource,
+            promptCacheContext: promptCacheContext,
+            selectedAccountKey: selectedAccountKey,
+            requestedModel: model,
+            reasoningEffort: reasoningEffort,
+            downstreamStream: downstreamStream,
+            codexRequest: request,
+            responseMode: .responses,
+            explicitProxyTestCustomModel: preserveRequestedCustomModel
+        )
+    }
+
+    public func proxyAnthropicMessages(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil,
+        anthropicVersion: String,
+        anthropicBeta: String?
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        let request = try AnthropicTranscoder.normalizeMessagesRequest(object)
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request.request,
+            requestedModel: request.responseModel,
+            proxyKey: proxyKey,
+            sourceAnthropicPayload: object
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: false
+        )
+        if proxyKey.dataSource == .anthropic {
+            var response = try await self.forwardToAnthropicProvider(
+                endpoint: "/v1/messages",
+                proxyKey: proxyKey,
+                apiKeyValue: apiKeyValue,
+                clientSource: clientSource,
+                promptCacheContext: promptCacheContext,
+                selectedAccountKey: selectedAccountKey,
+                requestedModel: request.responseModel,
+                downstreamStream: request.downstreamStream,
+                normalizedRequest: request.request,
+                responseMode: .anthropicMessages,
+                sourceAnthropicModel: request.responseModel,
+                rawAnthropicRequest: object,
+                anthropicVersion: anthropicVersion,
+                anthropicBeta: anthropicBeta
+            )
+            response.headers.merge(
+                self.anthropicResponseHeaders(
+                    version: anthropicVersion,
+                    beta: anthropicBeta,
+                    contentType: request.downstreamStream
+                        ? "text/event-stream; charset=utf-8"
+                        : "application/json; charset=utf-8"
+                ),
+                uniquingKeysWith: { _, new in new }
+            )
+            return response
+        }
+        var response = try await self.forwardToCodex(
+            endpoint: "/v1/messages",
+            proxyKey: proxyKey,
+            apiKeyValue: apiKeyValue,
+            clientSource: clientSource,
+            promptCacheContext: promptCacheContext,
+            selectedAccountKey: selectedAccountKey,
+            requestedModel: request.responseModel,
+            downstreamStream: request.downstreamStream,
+            codexRequest: request.request,
+            responseMode: .anthropicMessages,
+            sourceAnthropicModel: request.responseModel
+        )
+        response.headers.merge(
+            self.anthropicResponseHeaders(
+                version: anthropicVersion,
+                beta: anthropicBeta,
+                contentType: request.downstreamStream
+                    ? "text/event-stream; charset=utf-8"
+                    : "application/json; charset=utf-8"
+            ),
+            uniquingKeysWith: { _, new in new }
+        )
+        return response
+    }
+
+    public func geminiModelsResponse() async throws -> Data {
+        let payload: [String: Any] = [
+            "models": self.geminiSourceModels().map { self.geminiModelObject(for: $0) },
+        ]
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    public func geminiModelResponse(model: String) async throws -> Data {
+        let normalizedModel = self.normalizedGeminiSourceModel(model)
+        return try JSONSerialization.data(withJSONObject: self.geminiModelObject(for: normalizedModel))
+    }
+
+    public func proxyGeminiGenerateContent(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil,
+        model: String,
+        downstreamStream: Bool
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        var request = try GeminiTranscoder.normalizeGenerateContentRequest(object, model: model)
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request.request,
+            requestedModel: request.responseModel,
+            proxyKey: proxyKey,
+            preferGeminiCLIStickySession: true,
+            allowManualAPIKeyStickyBinding: true
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: true
+        )
+        request.context.isGeminiCLISession = promptCacheContext.isGeminiCLISession
+        try self.ensureGeminiPublicRouteCLISession(promptCacheContext)
+        return try await self.forwardGeminiGenerateContent(
+            body: body,
+            rawGeminiRequest: object,
+            proxyKey: proxyKey,
+            apiKeyValue: apiKeyValue,
+            clientSource: clientSource,
+            promptCacheContext: promptCacheContext,
+            selectedAccountKey: selectedAccountKey,
+            requestedModel: request.responseModel,
+            downstreamStream: downstreamStream,
+            normalizedRequest: request.request,
+            context: request.context
+        )
+    }
+
+    public func countGeminiTokens(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil,
+        model: String
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        var request = try GeminiTranscoder.normalizeCountTokensRequest(object, model: model)
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request.request,
+            requestedModel: request.responseModel,
+            proxyKey: proxyKey,
+            preferGeminiCLIStickySession: true,
+            allowManualAPIKeyStickyBinding: true
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: true
+        )
+        request.context.isGeminiCLISession = promptCacheContext.isGeminiCLISession
+        try self.ensureGeminiPublicRouteCLISession(promptCacheContext)
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: proxyKey.dataSource,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.gemini]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(self.geminiPublicRouteRequiresGoogleGeminiLoginMessage())
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                guard candidate.record.authMode == .geminiOAuth else {
+                    errors.append(self.geminiPublicRouteRequiresGoogleGeminiLoginMessage())
+                    continue
+                }
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+
+                return try await self.countGeminiTokensViaGeminiProvider(
+                    rawGeminiRequest: object,
+                    proxyKey: proxyKey,
+                    apiKeyValue: apiKeyValue,
+                    clientSource: clientSource,
+                    promptCacheContext: promptCacheContext,
+                    candidate: candidate,
+                    requestedModel: request.responseModel,
+                    startMS: startMS
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+
+        throw ProxyError.message(errors.isEmpty ? "没有可用账号完成请求" : errors.joined(separator: " | "))
+    }
+
+    private func reasoningEffort(fromChatCompletionsBody body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? NSDictionary else {
+            return nil
+        }
+        return self.trimmedReasoningEffort(object["reasoning_effort"])
+    }
+
+    private func reasoningEffort(fromResponsesBody body: Data) -> String? {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: body) as? NSDictionary,
+            let reasoning = object["reasoning"] as? NSDictionary
+        else {
+            return nil
+        }
+        return self.trimmedReasoningEffort(reasoning["effort"])
+    }
+
+    private func trimmedReasoningEffort(_ rawValue: Any?) -> String? {
+        guard let value = rawValue as? String else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func requestLogClientSource(
+        headers: [String: String],
+        promptCacheContext: PromptCacheContext,
+        isGeminiPublicRoute: Bool
+    ) -> RequestLogClientSource {
+        if self.trimmedHeader("x-claude-code-session-id", in: headers) != nil {
+            return .claudeCode
+        }
+        if isGeminiPublicRoute || self.trimmedHeader("x-gemini-api-privileged-user-id", in: headers) != nil {
+            return .gemini
+        }
+        if promptCacheContext.sessionIdentifier != nil {
+            return .codex
+        }
+        return .other
+    }
+
+    private func trimmedHeader(_ name: String, in headers: [String: String]) -> String? {
+        let alternateName = name.contains("_")
+            ? name.replacingOccurrences(of: "_", with: "-")
+            : name.replacingOccurrences(of: "-", with: "_")
+        let value = headers[name]
+            ?? headers[name.lowercased()]
+            ?? headers[alternateName]
+            ?? headers[alternateName.lowercased()]
+            ?? headers.first(where: {
+                let key = $0.key.lowercased()
+                return key == name.lowercased() || key == alternateName.lowercased()
+            })?.value
+            ?? ""
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public func adminProxyTestRun(_ input: AdminProxyTestRunRequest) async throws -> ProxyHTTPResponse {
+        guard let body = input.payloadJSON.data(using: .utf8) else {
+            throw ProxyError.message("Admin proxy test payload must be valid UTF-8 JSON.")
+        }
+        let selectedAccountKey = self.trimmed(input.selectedAccountKey)
+        let proxyAPIKey = self.trimmed(input.proxyAPIKey)
+        if input.endpoint == .geminiGenerateContent, proxyAPIKey == nil {
+            return try await self.adminProxyTestRunForGeminiOAuth(
+                payload: input,
+                body: body,
+                selectedAccountKey: selectedAccountKey
+            )
+        }
+
+        guard let proxyAPIKey else {
+            throw ProxyError.message("Admin proxy test route requires `proxyAPIKey` for this endpoint.")
+        }
+
+        let headers = self.adminProxyTestHeaders(
+            selectedAccountKey: selectedAccountKey,
+            anthropicVersion: input.anthropicVersion,
+            anthropicBeta: input.anthropicBeta
+        )
+        let proxyKey = try await self.authenticateProxyAPIKey(proxyAPIKey)
+
+        switch input.endpoint {
+        case .chatCompletions:
+            return try await self.proxyChatCompletions(
+                body: body,
+                proxyKey: proxyKey,
+                apiKeyValue: proxyAPIKey,
+                headers: headers,
+                selectedAccountKey: selectedAccountKey
+            )
+        case .responses:
+            return try await self.proxyResponses(
+                body: body,
+                proxyKey: proxyKey,
+                apiKeyValue: proxyAPIKey,
+                headers: headers,
+                selectedAccountKey: selectedAccountKey
+            )
+        case .anthropicMessages:
+            return try await self.proxyAnthropicMessages(
+                body: body,
+                proxyKey: proxyKey,
+                apiKeyValue: proxyAPIKey,
+                headers: headers,
+                selectedAccountKey: selectedAccountKey,
+                anthropicVersion: self.trimmed(input.anthropicVersion) ?? AnthropicTranscoder.defaultAnthropicVersion,
+                anthropicBeta: self.trimmed(input.anthropicBeta)
+            )
+        case .geminiGenerateContent:
+            let model = self.normalizedGeminiSourceModel(input.model)
+            guard model.isEmpty == false else {
+                throw ProxyError.message("Admin proxy test route requires a Gemini model.")
+            }
+            return try await self.proxyGeminiGenerateContent(
+                body: body,
+                proxyKey: proxyKey,
+                apiKeyValue: proxyAPIKey,
+                headers: headers,
+                selectedAccountKey: selectedAccountKey,
+                model: model,
+                downstreamStream: input.stream
+            )
+        }
+    }
+
+    private func adminProxyTestRunForGeminiOAuth(
+        payload input: AdminProxyTestRunRequest,
+        body: Data,
+        selectedAccountKey: String?
+    ) async throws -> ProxyHTTPResponse {
+        guard let selectedAccountKey else {
+            throw ProxyError.message("Admin proxy test route requires `selectedAccountKey`.")
+        }
+
+        let model = self.normalizedGeminiSourceModel(input.model)
+        guard model.isEmpty == false else {
+            throw ProxyError.message("Admin proxy test route requires a Gemini model.")
+        }
+
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        var request = try GeminiTranscoder.normalizeGenerateContentRequest(object, model: model)
+        request.context.isGeminiCLISession = false
+
+        let records = try self.store.listAccountRecords()
+        let selectedCandidate = try self.selectedCandidate(
+            accountKey: selectedAccountKey,
+            records: records,
+            now: Helpers.now(),
+            dataSource: .gemini,
+            allowedProviderFamilies: [.gemini]
+        )
+        guard selectedCandidate.record.authMode == .geminiOAuth else {
+            throw ProxyError.message(self.adminGeminiProxyTestRequiresGoogleGeminiLoginMessage())
+        }
+
+        let proxyKey = AuthenticatedProxyKeyContext(
+            apiKeyHash: "admin-proxy-test",
+            proxyKeyID: "admin-proxy-test",
+            dataSource: .gemini,
+            allowedAccountKeys: [selectedAccountKey]
+        )
+        let promptCacheContext = PromptCacheContext(
+            sourcePromptCacheKey: nil,
+            sessionIdentifier: nil,
+            metadataUserID: nil,
+            claudeCodeSessionID: nil,
+            seedMaterial: nil,
+            geminiCLIStickySessionKey: nil,
+            isGeminiCLISession: false,
+            upstreamPromptCacheKey: nil,
+            upstreamSessionID: nil,
+            allowManualAPIKeyStickyBinding: false
+        )
+
+        return try await self.forwardGeminiGenerateContent(
+            body: body,
+            rawGeminiRequest: object,
+            proxyKey: proxyKey,
+            apiKeyValue: "admin-proxy-test",
+            clientSource: .other,
+            promptCacheContext: promptCacheContext,
+            selectedAccountKey: selectedAccountKey,
+            requestedModel: request.responseModel,
+            downstreamStream: input.stream,
+            normalizedRequest: request.request,
+            context: request.context
+        )
+    }
+
+    private func forwardGeminiGenerateContent(
+        body: Data,
+        rawGeminiRequest: [String: Any],
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        selectedAccountKey: String?,
+        requestedModel: String,
+        downstreamStream: Bool,
+        normalizedRequest: [String: Any],
+        context: GeminiRequestContext
+    ) async throws -> ProxyHTTPResponse {
+        let endpoint = downstreamStream
+            ? "/v1beta/models/\(requestedModel):streamGenerateContent"
+            : "/v1beta/models/\(requestedModel):generateContent"
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: proxyKey.dataSource,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.gemini]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(self.geminiPublicRouteRequiresGoogleGeminiLoginMessage())
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                guard candidate.record.authMode == .geminiOAuth else {
+                    errors.append(self.geminiPublicRouteRequiresGoogleGeminiLoginMessage())
+                    continue
+                }
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+                let modelResolution = self.resolveProxyRequestModel(
+                    requestedModel: requestedModel,
+                    sourceAnthropicModel: nil,
+                    record: candidate.record,
+                    config: AppConfig(),
+                    auth: candidate.auth
+                )
+                let resolvedUpstreamModel = modelResolution.resolvedRequestModel
+
+                let upstream = GeminiAuthService.apiRequest(
+                    auth: candidate.auth,
+                    method: downstreamStream ? "streamGenerateContent" : "generateContent",
+                    accept: downstreamStream ? "text/event-stream" : "application/json",
+                    streaming: downstreamStream
+                )
+                let upstreamURL = upstream.url
+                let preparedGeminiRequest = await self.preparedGeminiNativeRequestPayload(
+                    rawRequest: rawGeminiRequest,
+                    candidate: candidate,
+                    context: promptCacheContext
+                )
+                let upstreamBody = try GeminiAuthService.generateContentRequestBody(
+                    rawRequest: preparedGeminiRequest,
+                    model: resolvedUpstreamModel,
+                    authJSON: candidate.record.authJSON,
+                    sessionID: promptCacheContext.upstreamSessionID
+                )
+
+                if downstreamStream {
+                    let response = try await self.withNetworkConfig(for: candidate.record) {
+                        try await HTTPClientFactory.stream(
+                            config: $0,
+                            url: upstream.url,
+                            method: .POST,
+                            headers: upstream.headers,
+                            body: upstreamBody
+                        )
+                    }
+
+                    if (200..<300).contains(response.statusCode) == false {
+                        let failureData = try await self.collectBody(from: response.body)
+                        let upstreamError = GeminiUpstreamError.fromHTTPResponse(
+                            statusCode: response.statusCode,
+                            body: failureData
+                        )
+                        let category = self.classifyFailure(
+                            status: upstreamError.httpStatus,
+                            text: upstreamError.rawText
+                        )
+                        let publicMessage = self.publicFacingCandidateFailureMessage(
+                            candidate: candidate,
+                            rawText: upstreamError.summary
+                        )
+                        errors.append(publicMessage)
+                        let latency = Helpers.nowMilliseconds() - startMS
+                        try self.store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: proxyKey.apiKeyHash,
+                                accountKey: candidate.record.accountKey,
+                                accountLabel: candidate.record.label,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: resolvedUpstreamModel,
+                                success: false,
+                                latencyMS: latency,
+                                failureCategory: category,
+                                lastError: Helpers.truncate(upstreamError.summary),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                        await self.setLastError(publicMessage)
+                        let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                            category: category,
+                            candidate: candidate,
+                            recordUsage: candidate.record.usage,
+                            usageError: candidate.record.usageError,
+                            text: upstreamError.rawText
+                        )
+                        try self.noteCandidateAttemptFailure(candidate)
+                        if shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                            continue
+                        }
+                        return self.geminiUpstreamProxyResponse(
+                            for: upstreamError,
+                            contentType: response.headers["content-type"]
+                        )
+                    }
+
+                    await self.setActive(candidate)
+                    return self.makeGeminiPassthroughStreamingResponse(
+                        upstreamBody: response.body,
+                        statusCode: response.statusCode,
+                        headers: response.headers,
+                        endpoint: endpoint,
+                        upstreamURL: upstream.url,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        requestedModel: requestedModel,
+                        actualModel: resolvedUpstreamModel,
+                        candidate: candidate,
+                        startMS: startMS,
+                        promptCacheContext: promptCacheContext
+                    )
+                }
+
+                let response = try await self.withNetworkConfig(for: candidate.record) {
+                    try await HTTPClientFactory.request(
+                        config: $0,
+                        url: upstream.url,
+                        method: .POST,
+                        headers: upstream.headers,
+                        body: upstreamBody
+                    )
+                }
+
+                if (200..<300).contains(response.statusCode) == false {
+                    let upstreamError = GeminiUpstreamError.fromHTTPResponse(
+                        statusCode: response.statusCode,
+                        body: response.body
+                    )
+                    let category = self.classifyFailure(
+                        status: upstreamError.httpStatus,
+                        text: upstreamError.rawText
+                    )
+                    let publicMessage = self.publicFacingCandidateFailureMessage(
+                        candidate: candidate,
+                        rawText: upstreamError.summary
+                    )
+                    errors.append(publicMessage)
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: resolvedUpstreamModel,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(upstreamError.summary),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError(publicMessage)
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: upstreamError.rawText
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    if shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                        continue
+                    }
+                    return self.geminiUpstreamProxyResponse(
+                        for: upstreamError,
+                        contentType: response.headers["content-type"]
+                    )
+                }
+
+                let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                let unwrappedPayload = try GeminiAuthService.unwrappedGenerateContentResponse(from: payload)
+                let usage = self.geminiUsage(from: payload)
+                let latency = Helpers.nowMilliseconds() - startMS
+                await self.setActive(candidate)
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: requestedModel,
+                        actualModel: resolvedUpstreamModel,
+                        success: true,
+                        latencyMS: latency,
+                        usage: usage,
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                try self.noteCandidateAttemptSuccess(candidate)
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return ProxyHTTPResponse(
+                    statusCode: response.statusCode,
+                    headers: [
+                        "content-type": response.headers["content-type"] ?? "application/json; charset=utf-8",
+                    ],
+                    body: .bytes(try JSONSerialization.data(withJSONObject: unwrappedPayload))
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+
+        throw ProxyError.message(errors.isEmpty ? "没有可用账号完成请求" : errors.joined(separator: " | "))
+    }
+
+    private func countGeminiTokensViaGeminiProvider(
+        rawGeminiRequest: [String: Any],
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        candidate: ProxyCandidate,
+        requestedModel: String,
+        startMS: Int64
+    ) async throws -> ProxyHTTPResponse {
+        let modelResolution = self.resolveProxyRequestModel(
+            requestedModel: requestedModel,
+            sourceAnthropicModel: nil,
+            record: candidate.record,
+            config: AppConfig(),
+            auth: candidate.auth
+        )
+        let resolvedUpstreamModel = modelResolution.resolvedRequestModel
+        let upstream = GeminiAuthService.apiRequest(
+            auth: candidate.auth,
+            method: "countTokens",
+            accept: "application/json"
+        )
+        let upstreamURL = upstream.url
+        let requestBody = try GeminiAuthService.countTokensRequestBody(
+            rawRequest: rawGeminiRequest,
+            model: resolvedUpstreamModel
+        )
+        let response = try await self.withNetworkConfig(for: candidate.record) {
+            try await HTTPClientFactory.request(
+                config: $0,
+                url: upstream.url,
+                method: .POST,
+                headers: upstream.headers,
+                body: requestBody
+            )
+        }
+
+        if (200..<300).contains(response.statusCode) == false {
+            let upstreamError = GeminiUpstreamError.fromHTTPResponse(
+                statusCode: response.statusCode,
+                body: response.body
+            )
+            let category = self.classifyFailure(
+                status: upstreamError.httpStatus,
+                text: upstreamError.rawText
+            )
+            let latency = Helpers.nowMilliseconds() - startMS
+            try self.store.recordTrace(
+                ProxyRequestTrace(
+                    endpoint: "/v1beta/models/\(requestedModel):countTokens",
+                    upstreamURL: upstreamURL,
+                    apiKeyHash: proxyKey.apiKeyHash,
+                    accountKey: candidate.record.accountKey,
+                    accountLabel: candidate.record.label,
+                    clientSource: clientSource,
+                    model: requestedModel,
+                    actualModel: resolvedUpstreamModel,
+                    success: false,
+                    latencyMS: latency,
+                    failureCategory: category,
+                    lastError: Helpers.truncate(upstreamError.summary),
+                    apiKeyValue: apiKeyValue
+                )
+            )
+            await self.setLastError(
+                self.publicFacingCandidateFailureMessage(
+                    candidate: candidate,
+                    rawText: upstreamError.summary
+                )
+            )
+            let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                category: category,
+                candidate: candidate,
+                recordUsage: candidate.record.usage,
+                usageError: candidate.record.usageError,
+                text: upstreamError.rawText
+            )
+            try self.noteCandidateAttemptFailure(candidate)
+            throw RecordedCandidateFailure(
+                rawText: upstreamError.summary,
+                shouldContinue: shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate),
+                response: self.geminiUpstreamProxyResponse(
+                    for: upstreamError,
+                    contentType: response.headers["content-type"]
+                )
+            )
+        }
+
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+        let usage = self.geminiUsage(from: payload)
+        let latency = Helpers.nowMilliseconds() - startMS
+        await self.setActive(candidate)
+        try self.store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1beta/models/\(requestedModel):countTokens",
+                upstreamURL: upstreamURL,
+                apiKeyHash: proxyKey.apiKeyHash,
+                accountKey: candidate.record.accountKey,
+                accountLabel: candidate.record.label,
+                clientSource: clientSource,
+                model: requestedModel,
+                actualModel: resolvedUpstreamModel,
+                success: true,
+                latencyMS: latency,
+                usage: usage,
+                apiKeyValue: apiKeyValue
+            )
+        )
+        try self.noteCandidateAttemptSuccess(candidate)
+        await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+        return ProxyHTTPResponse(
+            statusCode: response.statusCode,
+            headers: [
+                "content-type": response.headers["content-type"] ?? "application/json; charset=utf-8",
+            ],
+            body: .bytes(response.body)
+        )
+    }
+
+    private func geminiUpstreamProxyResponse(
+        for error: GeminiUpstreamError,
+        contentType: String?
+    ) -> ProxyHTTPResponse {
+        ProxyHTTPResponse(
+            statusCode: error.httpStatus,
+            headers: [
+                "content-type": self.geminiErrorContentType(contentType),
+            ],
+            body: .bytes(error.responseData)
+        )
+    }
+
+    private func geminiErrorContentType(_ contentType: String?) -> String {
+        let trimmed = contentType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "application/json; charset=utf-8" : trimmed
+    }
+
+    public func countAnthropicTokens(
+        body: Data,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        headers: [String: String] = [:],
+        selectedAccountKey: String? = nil,
+        anthropicVersion: String,
+        anthropicBeta: String?
+    ) async throws -> ProxyHTTPResponse {
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+        let request = try AnthropicTranscoder.normalizeCountTokensRequest(object)
+        let promptCacheContext = PromptCacheSupport.context(
+            headers: headers,
+            requestPayload: object,
+            normalizedRequest: request.request,
+            requestedModel: request.responseModel,
+            proxyKey: proxyKey,
+            sourceAnthropicPayload: object
+        )
+        let clientSource = self.requestLogClientSource(
+            headers: headers,
+            promptCacheContext: promptCacheContext,
+            isGeminiPublicRoute: false
+        )
+        if proxyKey.dataSource == .anthropic {
+            return try await self.countAnthropicTokensViaAnthropicProvider(
+                proxyKey: proxyKey,
+                apiKeyValue: apiKeyValue,
+                clientSource: clientSource,
+                promptCacheContext: promptCacheContext,
+                selectedAccountKey: selectedAccountKey,
+                request: request.request,
+                requestedModel: request.responseModel,
+                rawAnthropicRequest: object,
+                anthropicVersion: anthropicVersion,
+                anthropicBeta: anthropicBeta
+            )
+        }
+        let config = try await self.loadConfigForNetworkRequests()
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: proxyKey.dataSource,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.openAI, .anthropic]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(
+                self.noAvailableAccountsMessage(
+                    for: proxyKey.dataSource,
+                    allowedAccountKeys: proxyKey.allowedAccountKeys
+                )
+            )
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+
+                if candidate.record.providerFamily == .anthropic {
+                    return try await self.countAnthropicTokensViaAnthropicProvider(
+                        proxyKey: proxyKey,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        promptCacheContext: promptCacheContext,
+                        selectedAccountKey: candidate.record.accountKey,
+                        request: request.request,
+                        requestedModel: request.responseModel,
+                        rawAnthropicRequest: object,
+                        anthropicVersion: anthropicVersion,
+                        anthropicBeta: anthropicBeta,
+                        config: config
+                    )
+                }
+
+                let (resolvedRequest, modelResolution) = self.resolvedCodexRequest(
+                    request.request,
+                    requestedModel: request.responseModel,
+                    sourceAnthropicModel: request.responseModel,
+                    record: candidate.record,
+                    config: config,
+                    auth: candidate.auth
+                )
+                let compatibleRequest = PromptCacheSupport.applyCodexPromptCache(
+                    to: resolvedRequest,
+                    context: promptCacheContext,
+                    auth: candidate.auth
+                )
+                let adapterUsesChatCompletions = self.usesOpenAIChatCompletionsAdapter(candidate.auth)
+                let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedUpstreamModel = modelResolution.usesAccountModelRouting
+                    ? (effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel)
+                    : candidate.auth.providerPreset.resolvedUpstreamModel(
+                    for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel
+                )
+                var upstreamRequestBody = adapterUsesChatCompletions
+                    ? self.upstreamChatCompletionsRequest(
+                        from: compatibleRequest,
+                        upstreamModel: resolvedUpstreamModel,
+                        stream: false,
+                        auth: candidate.auth
+                    )
+                    : self.compatibleCodexRequest(
+                        compatibleRequest,
+                        for: candidate.auth,
+                        preserveResolvedModel: modelResolution.usesAccountModelRouting
+                )
+                if adapterUsesChatCompletions {
+                    upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
+                        upstreamRequestBody,
+                        candidate: candidate,
+                        upstreamModel: resolvedUpstreamModel,
+                        context: promptCacheContext
+                    )
+                }
+                let actualModel = self.loggedActualModel(from: upstreamRequestBody)
+                let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
+                let candidateAuth = candidate.auth
+                let upstreamSessionID = promptCacheContext.upstreamSessionID
+                let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    var upstream = self.upstreamRequest(
+                        for: candidateAuth,
+                        config: requestConfig,
+                        accept: "application/json"
+                    )
+                    if candidateAuth.authMode == .chatGPT,
+                       let sessionID = upstreamSessionID
+                    {
+                        upstream.headers["session_id"] = sessionID
+                    }
+                    let response = try await HTTPClientFactory.request(
+                        config: requestConfig,
+                        url: upstream.url,
+                        method: .POST,
+                        headers: upstream.headers,
+                        body: serialized
+                    )
+                    return (response, upstream.url)
+                }
+
+                if (200..<300).contains(response.statusCode) == false {
+                    let text = response.bodyText
+                    let category = self.classifyFailure(status: response.statusCode, text: text)
+                    errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: "/v1/messages/count_tokens",
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: request.responseModel,
+                            actualModel: actualModel,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(text),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: text
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    if shouldContinueAfterRecovery {
+                        continue
+                    }
+                    if self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                        continue
+                    }
+                    break
+                }
+
+                await self.setActive(candidate)
+                let completed: [String: Any]
+                if adapterUsesChatCompletions {
+                    let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                    completed = ProxyTranscoder.completedResponse(
+                        fromChatCompletion: object,
+                        requestedModel: request.responseModel
+                    )
+                    await self.storeChatCompletionsReasoningContentIfNeeded(
+                        fromChatCompletion: object,
+                        candidate: candidate,
+                        upstreamModel: resolvedUpstreamModel,
+                        context: promptCacheContext
+                    )
+                } else {
+                    guard let resolvedCompleted = self.completedResponse(from: response.body) else {
+                        throw ProxyError.message("上游未返回可解析的 completed response")
+                    }
+                    completed = resolvedCompleted
+                }
+
+                let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
+                let payload = try JSONSerialization.data(withJSONObject: AnthropicTranscoder.countTokensResponse(from: usage))
+                let latency = Helpers.nowMilliseconds() - startMS
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: "/v1/messages/count_tokens",
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: request.responseModel,
+                        actualModel: actualModel,
+                        success: true,
+                        latencyMS: latency,
+                        usage: usage,
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                try self.noteCandidateAttemptSuccess(candidate)
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return ProxyHTTPResponse(
+                    statusCode: 200,
+                    headers: self.anthropicResponseHeaders(
+                        version: anthropicVersion,
+                        beta: anthropicBeta,
+                        contentType: "application/json; charset=utf-8"
+                    ),
+                    body: .bytes(payload)
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+
+        throw ProxyError.message(errors.isEmpty ? "没有可用账号完成请求" : errors.joined(separator: " | "))
+    }
+
+    private func handleOAuthBrowserCallback(
+        url: String,
+        expectedState: String,
+        preferredLanguage: OAuthCallbackPageLanguage
+    ) async -> OAuthCallbackPageResponse {
+        do {
+            let providerFamily = await self.runtimeState.pendingOAuthLogin?.providerFamily ?? .openAI
+            let account = try await self.completeOAuthCallback(
+                providerFamily: providerFamily,
+                url: url,
+                expectedState: expectedState,
+                stopListener: false
+            )
+            return OAuthCallbackPageRenderer.success(
+                accountLabel: account.label,
+                preferredLanguage: preferredLanguage
+            )
+        } catch {
+            return OAuthCallbackPageRenderer.failure(
+                detail: error.localizedDescription,
+                preferredLanguage: preferredLanguage
+            )
+        }
+    }
+
+    private func expireOAuthLogin(expectedState: String) async {
+        self.logOAuthEvent("Expiring OAuth session for state \(expectedState).")
+        _ = await self.runtimeState.clearOAuthSessionIfMatches(state: expectedState)
+    }
+
+    private func cancelOAuthLogin(expectedState: String) async {
+        self.logOAuthEvent("Cancelling OAuth session for state \(expectedState).")
+        _ = await self.runtimeState.clearOAuthSessionIfMatches(state: expectedState)
+    }
+
+    private func completeOAuthCallback(
+        providerFamily: AccountProviderFamily,
+        url: String,
+        expectedState: String?,
+        stopListener: Bool
+    ) async throws -> AccountSummary {
+        let pending = await self.runtimeState.pendingOAuthLogin
+        guard let pending else {
+            throw ProxyError.message("没有进行中的 OAuth 登录")
+        }
+        if let expectedState, pending.state != expectedState {
+            throw ProxyError.message("当前 OAuth 会话已失效，请重新生成授权链接")
+        }
+
+        do {
+            let config = try await self.loadConfigForNetworkRequests()
+            let authJSON: String
+            switch providerFamily {
+            case .openAI:
+                authJSON = try await AuthService.completeOAuthCallback(pending: pending, callbackURL: url, config: config)
+            case .anthropic:
+                authJSON = try await AnthropicAuthService.completeOAuthCallback(
+                    pending: pending,
+                    callbackURL: url,
+                    config: config,
+                    secretStore: self.secretStore
+                )
+            case .gemini:
+                authJSON = try await GeminiAuthService.completeOAuthCallback(
+                    pending: pending,
+                    callbackURL: url,
+                    config: config,
+                    secretStore: self.secretStore
+                )
+            }
+            let summary = try await self.importCompletedOAuthAccount(
+                authJSON: authJSON,
+                providerFamily: providerFamily,
+                config: config
+            )
+            try await self.finishOAuthSession(state: pending.state, stopListener: stopListener)
+            return summary
+        } catch {
+            self.logOAuthEvent(
+                "OAuth completion failed for \(providerFamily.rawValue); keeping the current session active for retry. " +
+                    Helpers.truncate(error.localizedDescription)
+            )
+            throw error
+        }
+    }
+
+    func importCompletedOAuthAccount(
+        authJSON: String,
+        providerFamily: AccountProviderFamily,
+        config: AppConfig
+    ) async throws -> AccountSummary {
+        let result = try await self.accountService.importAuthJSONAccounts(
+            items: [.init(source: "oauth", content: authJSON, label: nil)],
+            config: config
+        )
+        if let failure = result.failures.first {
+            throw ProxyError.message(failure.error)
+        }
+        let extracted = try AuthService.extractAuth(from: authJSON, secretStore: self.secretStore)
+        let key = AuthService.accountKey(from: extracted)
+        if providerFamily == .openAI {
+            try self.accountService.updateUsageWindowsVisible(accountKey: key, visible: false)
+        }
+        let accounts = try await self.accountService.listAccounts()
+        guard let summary = accounts.first(where: { $0.accountKey == key }) else {
+            throw ProxyError.message("OAuth 账号导入后未找到账号")
+        }
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try await self.reconcileManagedProxyAccountNodeListeners(config: config)
+        return summary
+    }
+
+    private func finishOAuthSession(state: String, stopListener: Bool) async throws {
+        self.logOAuthEvent("Finishing OAuth session for state \(state).")
+        let listener = await self.runtimeState.clearOAuthSessionIfMatches(state: state)
+        if stopListener, let listener {
+            await listener.stop()
+        }
+    }
+
+    private func forwardToAnthropicProvider(
+        endpoint: String,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        selectedAccountKey: String? = nil,
+        requestedModel: String,
+        reasoningEffort: String? = nil,
+        downstreamStream: Bool,
+        normalizedRequest: [String: Any],
+        responseMode: ResponseMode,
+        sourceAnthropicModel: String? = nil,
+        geminiRequestContext: GeminiRequestContext? = nil,
+        rawAnthropicRequest: [String: Any]? = nil,
+        anthropicVersion: String? = nil,
+        anthropicBeta: String? = nil,
+        config: AppConfig? = nil
+    ) async throws -> ProxyHTTPResponse {
+        let resolvedConfig: AppConfig
+        if let providedConfig = config {
+            resolvedConfig = providedConfig
+        } else {
+            resolvedConfig = try await self.loadConfigForNetworkRequests()
+        }
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: .anthropic,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.anthropic]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(
+                self.noAvailableAccountsMessage(
+                    for: .anthropic,
+                    allowedAccountKeys: proxyKey.allowedAccountKeys
+                )
+            )
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+
+                let modelResolution = self.resolveProxyRequestModel(
+                    requestedModel: requestedModel,
+                    sourceAnthropicModel: sourceAnthropicModel,
+                    record: candidate.record,
+                    config: resolvedConfig,
+                    auth: candidate.auth
+                )
+                let upstreamModel = modelResolution.usesAccountModelRouting
+                    ? modelResolution.resolvedRequestModel
+                    : self.resolveOpenAIToAnthropicModel(
+                        requestedModel: modelResolution.resolvedRequestModel
+                    )
+                let anthropicRequest = rawAnthropicRequest.map {
+                    self.preparedAnthropicRequestPayload(
+                        rawPayload: $0,
+                        upstreamModel: upstreamModel,
+                        stream: downstreamStream,
+                        candidate: candidate
+                    )
+                } ?? AnthropicUpstreamBridge.normalizeRequest(
+                    normalizedRequest,
+                    upstreamModel: upstreamModel,
+                    stream: downstreamStream
+                )
+                let actualModel = self.loggedActualModel(from: anthropicRequest)
+                let serialized = try JSONSerialization.data(withJSONObject: anthropicRequest)
+                let upstreamRequest = self.anthropicUpstreamRequest(
+                    for: candidate.auth,
+                    path: "/v1/messages",
+                    stream: downstreamStream,
+                    anthropicVersion: anthropicVersion ?? AnthropicTranscoder.defaultAnthropicVersion,
+                    anthropicBeta: anthropicBeta
+                )
+                let upstreamHeaders = PromptCacheSupport.applyAnthropicSessionHeader(
+                    to: upstreamRequest.headers,
+                    context: promptCacheContext
+                )
+                let upstreamURL = upstreamRequest.url
+
+                if downstreamStream {
+                    let response = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                        try await HTTPClientFactory.stream(
+                            config: requestConfig,
+                            url: upstreamURL,
+                            method: .POST,
+                            headers: upstreamHeaders,
+                            body: serialized
+                        )
+                    }
+                    if (200..<300).contains(response.statusCode) == false {
+                        let body = try await self.collectBody(from: response.body)
+                        let text = String(decoding: body, as: UTF8.self)
+                        let category = self.classifyFailure(status: response.statusCode, text: text)
+                        errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                        let latency = Helpers.nowMilliseconds() - startMS
+                        try self.store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: proxyKey.apiKeyHash,
+                                accountKey: candidate.record.accountKey,
+                                accountLabel: candidate.record.label,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: actualModel,
+                                reasoningEffort: reasoningEffort,
+                                success: false,
+                                latencyMS: latency,
+                                failureCategory: category,
+                                lastError: Helpers.truncate(text),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                        await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                        let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                            category: category,
+                            candidate: candidate,
+                            recordUsage: candidate.record.usage,
+                            usageError: candidate.record.usageError,
+                            text: text
+                        )
+                        try self.noteCandidateAttemptFailure(candidate)
+                        if shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                            continue
+                        }
+                        break
+                    }
+
+                    await self.setActive(candidate)
+                    if responseMode == .anthropicMessages {
+                        await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                        return self.makeAnthropicPassthroughStreamingResponse(
+                            upstreamBody: response.body,
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            apiKeyValue: apiKeyValue,
+                            clientSource: clientSource,
+                            requestedModel: requestedModel,
+                            actualModel: actualModel,
+                            candidate: candidate,
+                            startMS: startMS,
+                            reasoningEffort: reasoningEffort,
+                            anthropicVersion: anthropicVersion ?? AnthropicTranscoder.defaultAnthropicVersion,
+                            anthropicBeta: anthropicBeta
+                        )
+                    }
+                    let syntheticStream = self.anthropicToSyntheticResponseStream(
+                        upstreamBody: response.body,
+                        requestedModel: requestedModel
+                    )
+                    await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                    return self.makeStreamingProxyResponse(
+                        upstreamBody: syntheticStream,
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        requestedModel: requestedModel,
+                        actualModel: actualModel,
+                        responseMode: responseMode,
+                        geminiRequestContext: geminiRequestContext,
+                        candidate: candidate,
+                        startMS: startMS,
+                        reasoningEffort: reasoningEffort
+                    )
+                }
+
+                let response = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    try await HTTPClientFactory.request(
+                        config: requestConfig,
+                        url: upstreamURL,
+                        method: .POST,
+                        headers: upstreamHeaders,
+                        body: serialized
+                    )
+                }
+                if (200..<300).contains(response.statusCode) == false {
+                    let text = response.bodyText
+                    let category = self.classifyFailure(status: response.statusCode, text: text)
+                    errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(text),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: text
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    if shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                        continue
+                    }
+                    break
+                }
+
+                await self.setActive(candidate)
+                let anthropicMessage = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                let normalizedAnthropicMessage = self.normalizedAnthropicMessage(anthropicMessage)
+                let usage = self.anthropicUsage(from: normalizedAnthropicMessage)
+                let payload: Data
+                switch responseMode {
+                case .anthropicMessages:
+                    payload = try JSONSerialization.data(withJSONObject: normalizedAnthropicMessage)
+                case .responses:
+                    let completed = AnthropicUpstreamBridge.completedResponse(
+                        from: normalizedAnthropicMessage,
+                        requestedModel: requestedModel
+                    )
+                    payload = try JSONSerialization.data(withJSONObject: completed)
+                case .chatCompletions:
+                    let completed = AnthropicUpstreamBridge.completedResponse(
+                        from: normalizedAnthropicMessage,
+                        requestedModel: requestedModel
+                    )
+                    payload = try JSONSerialization.data(
+                        withJSONObject: ProxyTranscoder.chatCompletionFromCompletedResponse(
+                            completedResponse: completed,
+                            requestedModel: requestedModel
+                        )
+                    )
+                case .geminiGenerateContent:
+                    let completed = AnthropicUpstreamBridge.completedResponse(
+                        from: normalizedAnthropicMessage,
+                        requestedModel: requestedModel
+                    )
+                    payload = try JSONSerialization.data(
+                        withJSONObject: GeminiTranscoder.generateContentResponse(
+                            from: completed,
+                            requestedModel: requestedModel,
+                            context: geminiRequestContext ?? .default(sourceModel: requestedModel)
+                        )
+                    )
+                }
+
+                let latency = Helpers.nowMilliseconds() - startMS
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: requestedModel,
+                        actualModel: actualModel,
+                        reasoningEffort: reasoningEffort,
+                        success: true,
+                        latencyMS: latency,
+                        usage: usage,
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                try self.noteCandidateAttemptSuccess(candidate)
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return ProxyHTTPResponse(
+                    statusCode: 200,
+                    headers: ["content-type": "application/json"],
+                    body: .bytes(payload)
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+
+        throw ProxyError.message(
+            errors.isEmpty
+                ? self.noAvailableAccountsMessage(for: .anthropic, allowedAccountKeys: proxyKey.allowedAccountKeys)
+                : errors.joined(separator: " | ")
+        )
+    }
+
+    private func countAnthropicTokensViaAnthropicProvider(
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        selectedAccountKey: String?,
+        request: [String: Any],
+        requestedModel: String,
+        rawAnthropicRequest: [String: Any]? = nil,
+        anthropicVersion: String,
+        anthropicBeta: String?,
+        config: AppConfig? = nil
+    ) async throws -> ProxyHTTPResponse {
+        let resolvedConfig: AppConfig
+        if let providedConfig = config {
+            resolvedConfig = providedConfig
+        } else {
+            resolvedConfig = try await self.loadConfigForNetworkRequests()
+        }
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: .anthropic,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.anthropic]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(
+                self.noAvailableAccountsMessage(
+                    for: .anthropic,
+                    allowedAccountKeys: proxyKey.allowedAccountKeys
+                )
+            )
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+
+                let modelResolution = self.resolveProxyRequestModel(
+                    requestedModel: requestedModel,
+                    sourceAnthropicModel: requestedModel,
+                    record: candidate.record,
+                    config: resolvedConfig,
+                    auth: candidate.auth
+                )
+                let upstreamModel = modelResolution.usesAccountModelRouting
+                    ? modelResolution.resolvedRequestModel
+                    : self.resolveOpenAIToAnthropicModel(
+                        requestedModel: modelResolution.resolvedRequestModel
+                    )
+                var anthropicRequest = rawAnthropicRequest.map {
+                    self.preparedAnthropicRequestPayload(
+                        rawPayload: $0,
+                        upstreamModel: upstreamModel,
+                        stream: false,
+                        candidate: candidate
+                    )
+                } ?? AnthropicUpstreamBridge.normalizeRequest(
+                    request,
+                    upstreamModel: upstreamModel,
+                    stream: false
+                )
+                anthropicRequest.removeValue(forKey: "stream")
+                let actualModel = self.loggedActualModel(from: anthropicRequest)
+                let serialized = try JSONSerialization.data(withJSONObject: anthropicRequest)
+                let upstreamRequest = self.anthropicUpstreamRequest(
+                    for: candidate.auth,
+                    path: "/v1/messages/count_tokens",
+                    stream: false,
+                    anthropicVersion: anthropicVersion,
+                    anthropicBeta: anthropicBeta
+                )
+                let upstreamHeaders = PromptCacheSupport.applyAnthropicSessionHeader(
+                    to: upstreamRequest.headers,
+                    context: promptCacheContext
+                )
+                let upstreamURL = upstreamRequest.url
+                let response = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    try await HTTPClientFactory.request(
+                        config: requestConfig,
+                        url: upstreamURL,
+                        method: .POST,
+                        headers: upstreamHeaders,
+                        body: serialized
+                    )
+                }
+                if (200..<300).contains(response.statusCode) == false {
+                    let text = response.bodyText
+                    let category = self.classifyFailure(status: response.statusCode, text: text)
+                    errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: "/v1/messages/count_tokens",
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(text),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: text
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    if shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                        continue
+                    }
+                    break
+                }
+
+                await self.setActive(candidate)
+                let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                let inputTokens = self.int64Value(payload["input_tokens"]) ?? 0
+                let latency = Helpers.nowMilliseconds() - startMS
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: "/v1/messages/count_tokens",
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: requestedModel,
+                        actualModel: actualModel,
+                        success: true,
+                        latencyMS: latency,
+                        usage: UpstreamUsage(inputTokens: inputTokens, outputTokens: 0, totalTokens: inputTokens, cacheHitTokens: nil),
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                try self.noteCandidateAttemptSuccess(candidate)
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return ProxyHTTPResponse(
+                    statusCode: 200,
+                    headers: self.anthropicResponseHeaders(
+                        version: anthropicVersion,
+                        beta: anthropicBeta,
+                        contentType: "application/json; charset=utf-8"
+                    ),
+                    body: .bytes(response.body)
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+
+        throw ProxyError.message(
+            errors.isEmpty
+                ? self.noAvailableAccountsMessage(for: .anthropic, allowedAccountKeys: proxyKey.allowedAccountKeys)
+                : errors.joined(separator: " | ")
+        )
+    }
+
+    private func forwardToCodexViaOpenAIAPIKeyCandidate(
+        endpoint: String,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        candidate: ProxyCandidate,
+        requestedModel: String,
+        reasoningEffort: String? = nil,
+        downstreamStream: Bool,
+        codexRequest: [String: Any],
+        responseMode: ResponseMode,
+        sourceAnthropicModel: String?,
+        geminiRequestContext: GeminiRequestContext?,
+        explicitProxyTestCustomModel: Bool,
+        config: AppConfig,
+        startMS: Int64
+    ) async throws -> ProxyHTTPResponse {
+        let (resolvedRequest, modelResolution) = self.resolvedCodexRequest(
+            codexRequest,
+            requestedModel: requestedModel,
+            sourceAnthropicModel: sourceAnthropicModel,
+            record: candidate.record,
+            config: config,
+            auth: candidate.auth
+        )
+        let compatibleRequest = PromptCacheSupport.applyCodexPromptCache(
+            to: resolvedRequest,
+            context: promptCacheContext,
+            auth: candidate.auth
+        )
+        let adapters = self.openAIUpstreamAdapters(for: candidate.auth)
+
+        for adapter in adapters {
+            var upstreamRequestBody = self.openAIUpstreamRequestBody(
+                from: compatibleRequest,
+                requestedModel: requestedModel,
+                auth: candidate.auth,
+                adapter: adapter,
+                stream: downstreamStream,
+                preserveCustomModel: explicitProxyTestCustomModel,
+                useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
+            )
+            if adapter == .chatCompletions {
+                let upstreamModel = (upstreamRequestBody["model"] as? String) ?? requestedModel
+                upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
+                    upstreamRequestBody,
+                    candidate: candidate,
+                    upstreamModel: upstreamModel,
+                    context: promptCacheContext
+                )
+            }
+            let actualModel = self.loggedActualModel(from: upstreamRequestBody)
+            let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
+
+            if downstreamStream {
+                let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    var upstream = self.openAIUpstreamRequest(
+                        for: candidate.auth,
+                        config: requestConfig,
+                        accept: "text/event-stream",
+                        adapter: adapter
+                    )
+                    if candidate.auth.authMode == .chatGPT,
+                       let sessionID = promptCacheContext.upstreamSessionID
+                    {
+                        upstream.headers["session_id"] = sessionID
+                    }
+                    return (
+                        try await HTTPClientFactory.stream(
+                            config: requestConfig,
+                            url: upstream.url,
+                            method: .POST,
+                            headers: upstream.headers,
+                            body: serialized
+                        ),
+                        upstream.url
+                    )
+                }
+                if (200..<300).contains(response.statusCode) == false {
+                    let body = try await self.collectBody(from: response.body)
+                    let text = String(decoding: body, as: UTF8.self)
+                    let category = self.classifyFailure(status: response.statusCode, text: text)
+                    let publicMessage = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text)
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(text),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError(publicMessage)
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: text
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    throw RecordedCandidateFailure(
+                        rawText: text,
+                        shouldContinue: shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate)
+                    )
+                }
+
+                await self.setActive(candidate)
+                let streamCandidate = candidate
+                let streamUpstreamModel = (upstreamRequestBody["model"] as? String) ?? requestedModel
+                let streamPromptCacheContext = promptCacheContext
+                let adaptedBody = adapter == .chatCompletions
+                    ? self.openAIChatToSyntheticResponseStream(
+                        upstreamBody: response.body,
+                        requestedModel: requestedModel,
+                        onCompletedReasoningContent: { [weak self] assistantFingerprint, reasoningContent in
+                            guard let self else { return }
+                            await self.storeChatCompletionsReasoningContentIfNeeded(
+                                assistantFingerprint: assistantFingerprint,
+                                reasoningContent: reasoningContent,
+                                candidate: streamCandidate,
+                                upstreamModel: streamUpstreamModel,
+                                context: streamPromptCacheContext
+                            )
+                        }
+                    )
+                    : response.body
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return self.makeStreamingProxyResponse(
+                    upstreamBody: adaptedBody,
+                    endpoint: endpoint,
+                    upstreamURL: upstreamURL,
+                    apiKeyHash: proxyKey.apiKeyHash,
+                    apiKeyValue: apiKeyValue,
+                    clientSource: clientSource,
+                    requestedModel: requestedModel,
+                    actualModel: actualModel,
+                    responseMode: responseMode,
+                    geminiRequestContext: geminiRequestContext,
+                    candidate: candidate,
+                    startMS: startMS,
+                    reasoningEffort: reasoningEffort
+                )
+            }
+
+            let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                var upstream = self.openAIUpstreamRequest(
+                    for: candidate.auth,
+                    config: requestConfig,
+                    accept: "application/json",
+                    adapter: adapter
+                )
+                if candidate.auth.authMode == .chatGPT,
+                   let sessionID = promptCacheContext.upstreamSessionID
+                {
+                    upstream.headers["session_id"] = sessionID
+                }
+                return (
+                    try await HTTPClientFactory.request(
+                        config: requestConfig,
+                        url: upstream.url,
+                        method: .POST,
+                        headers: upstream.headers,
+                        body: serialized
+                    ),
+                    upstream.url
+                )
+            }
+
+            if (200..<300).contains(response.statusCode) == false {
+                let text = response.bodyText
+                let category = self.classifyFailure(status: response.statusCode, text: text)
+                let publicMessage = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text)
+                let latency = Helpers.nowMilliseconds() - startMS
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: requestedModel,
+                        actualModel: actualModel,
+                        reasoningEffort: reasoningEffort,
+                        success: false,
+                        latencyMS: latency,
+                        failureCategory: category,
+                        lastError: Helpers.truncate(text),
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                await self.setLastError(publicMessage)
+                let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                    category: category,
+                    candidate: candidate,
+                    recordUsage: candidate.record.usage,
+                    usageError: candidate.record.usageError,
+                    text: text
+                )
+                try self.noteCandidateAttemptFailure(candidate)
+                throw RecordedCandidateFailure(
+                    rawText: text,
+                    shouldContinue: shouldContinueAfterRecovery || self.shouldContinueAfterFailure(category: category, candidate: candidate)
+                )
+            }
+
+            await self.setActive(candidate)
+            let completed: [String: Any]
+            let usageRecognized: Bool
+            if adapter == .chatCompletions {
+                let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                usageRecognized = ProxyTranscoder.hasRecognizableUsage(inUsageObject: object["usage"])
+                completed = ProxyTranscoder.completedResponse(
+                    fromChatCompletion: object,
+                    requestedModel: requestedModel
+                )
+                await self.storeChatCompletionsReasoningContentIfNeeded(
+                    fromChatCompletion: object,
+                    candidate: candidate,
+                    upstreamModel: (upstreamRequestBody["model"] as? String) ?? requestedModel,
+                    context: promptCacheContext
+                )
+            } else {
+                let events = ProxyTranscoder.decodeSSE(response.body)
+                guard let rawCompleted = self.completedResponse(from: response.body) else {
+                    throw ProxyError.message("上游未返回 response.completed")
+                }
+                usageRecognized = ProxyTranscoder.hasRecognizableUsage(in: rawCompleted)
+                completed = ProxyTranscoder.completedResponseByEnsuringAssistantText(
+                    rawCompleted,
+                    fallbackText: ProxyTranscoder.extractAssistantText(from: events)
+                )
+            }
+            let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
+            let payload: Data
+            switch responseMode {
+            case .chatCompletions:
+                payload = try JSONSerialization.data(withJSONObject: ProxyTranscoder.chatCompletionFromCompletedResponse(completedResponse: completed, requestedModel: requestedModel))
+            case .responses:
+                payload = try JSONSerialization.data(withJSONObject: completed)
+            case .anthropicMessages:
+                payload = try JSONSerialization.data(withJSONObject: AnthropicTranscoder.messageResponse(from: completed, requestedModel: requestedModel))
+            case .geminiGenerateContent:
+                payload = try JSONSerialization.data(
+                    withJSONObject: GeminiTranscoder.generateContentResponse(
+                        from: completed,
+                        requestedModel: requestedModel,
+                        context: geminiRequestContext ?? .default(sourceModel: requestedModel)
+                    )
+                )
+            }
+            let latency = Helpers.nowMilliseconds() - startMS
+            let successDiagnostic = usageRecognized
+                ? nil
+                : self.openAICompatibleMissingUsageDiagnostic(adapter: adapter)
+            try self.store.recordTrace(
+                ProxyRequestTrace(
+                    endpoint: endpoint,
+                    upstreamURL: upstreamURL,
+                    apiKeyHash: proxyKey.apiKeyHash,
+                    accountKey: candidate.record.accountKey,
+                    accountLabel: candidate.record.label,
+                    clientSource: clientSource,
+                    model: requestedModel,
+                    actualModel: actualModel,
+                    reasoningEffort: reasoningEffort,
+                    success: true,
+                    latencyMS: latency,
+                    usage: usage,
+                    lastError: successDiagnostic.map { Helpers.truncate($0) },
+                    apiKeyValue: apiKeyValue
+                )
+            )
+            try self.noteCandidateAttemptSuccess(candidate)
+            await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+            return ProxyHTTPResponse(
+                statusCode: 200,
+                headers: ["content-type": "application/json"],
+                body: .bytes(payload)
+            )
+        }
+
+        throw ProxyError.message("没有可用账号完成请求")
+    }
+
+    private func forwardToCodex(
+        endpoint: String,
+        proxyKey: AuthenticatedProxyKeyContext,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        promptCacheContext: PromptCacheContext,
+        selectedAccountKey: String? = nil,
+        requestedModel: String,
+        reasoningEffort: String? = nil,
+        downstreamStream: Bool,
+        codexRequest: [String: Any],
+        responseMode: ResponseMode,
+        sourceAnthropicModel: String? = nil,
+        geminiRequestContext: GeminiRequestContext? = nil,
+        explicitProxyTestCustomModel: Bool = false
+    ) async throws -> ProxyHTTPResponse {
+        let config = try await self.loadConfigForNetworkRequests()
+        let candidates = await self.prioritizedCandidates(
+            try await self.loadCandidates(
+                selectedAccountKey: selectedAccountKey,
+                dataSource: proxyKey.dataSource,
+                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                allowedProviderFamilies: [.openAI, .anthropic]
+            ),
+            using: promptCacheContext
+        )
+        guard !candidates.isEmpty else {
+            throw ProxyError.message(
+                self.noAvailableAccountsMessage(
+                    for: proxyKey.dataSource,
+                    allowedAccountKeys: proxyKey.allowedAccountKeys
+                )
+            )
+        }
+
+        var errors: [String] = []
+        for var candidate in candidates {
+            let startMS = Helpers.nowMilliseconds()
+            do {
+                candidate = try await self.refreshedCandidateAuthIfNeeded(candidate)
+
+                if candidate.record.providerFamily == .anthropic {
+                    return try await self.forwardToAnthropicProvider(
+                        endpoint: endpoint,
+                        proxyKey: proxyKey,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        promptCacheContext: promptCacheContext,
+                        selectedAccountKey: candidate.record.accountKey,
+                        requestedModel: requestedModel,
+                        reasoningEffort: reasoningEffort,
+                        downstreamStream: downstreamStream,
+                        normalizedRequest: codexRequest,
+                        responseMode: responseMode,
+                        sourceAnthropicModel: sourceAnthropicModel,
+                        geminiRequestContext: geminiRequestContext,
+                        config: config
+                    )
+                }
+
+                if candidate.auth.authMode == .openAIAPIKey {
+                    return try await self.forwardToCodexViaOpenAIAPIKeyCandidate(
+                        endpoint: endpoint,
+                        proxyKey: proxyKey,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        promptCacheContext: promptCacheContext,
+                        candidate: candidate,
+                        requestedModel: requestedModel,
+                        reasoningEffort: reasoningEffort,
+                        downstreamStream: downstreamStream,
+                        codexRequest: codexRequest,
+                        responseMode: responseMode,
+                        sourceAnthropicModel: sourceAnthropicModel,
+                        geminiRequestContext: geminiRequestContext,
+                        explicitProxyTestCustomModel: explicitProxyTestCustomModel,
+                        config: config,
+                        startMS: startMS
+                    )
+                }
+
+                let (resolvedRequest, modelResolution) = self.resolvedCodexRequest(
+                    codexRequest,
+                    requestedModel: requestedModel,
+                    sourceAnthropicModel: sourceAnthropicModel,
+                    record: candidate.record,
+                    config: config,
+                    auth: candidate.auth
+                )
+                let compatibleRequest = PromptCacheSupport.applyCodexPromptCache(
+                    to: resolvedRequest,
+                    context: promptCacheContext,
+                    auth: candidate.auth
+                )
+                let adapterUsesChatCompletions = self.usesOpenAIChatCompletionsAdapter(candidate.auth)
+                let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedUpstreamModel = modelResolution.usesAccountModelRouting
+                    ? (effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel)
+                    : candidate.auth.providerPreset.resolvedUpstreamModel(
+                    for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel
+                )
+                var upstreamRequestBody = adapterUsesChatCompletions
+                    ? self.upstreamChatCompletionsRequest(
+                        from: compatibleRequest,
+                        upstreamModel: resolvedUpstreamModel,
+                        stream: downstreamStream,
+                        auth: candidate.auth
+                    )
+                    : self.compatibleCodexRequest(
+                        compatibleRequest,
+                        for: candidate.auth,
+                        preserveResolvedModel: modelResolution.usesAccountModelRouting
+                )
+                if adapterUsesChatCompletions {
+                    upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
+                        upstreamRequestBody,
+                        candidate: candidate,
+                        upstreamModel: resolvedUpstreamModel,
+                        context: promptCacheContext
+                    )
+                }
+                let actualModel = self.loggedActualModel(from: upstreamRequestBody)
+                let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
+
+                if downstreamStream {
+                    let candidateAuth = candidate.auth
+                    let upstreamSessionID = promptCacheContext.upstreamSessionID
+                    let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                        var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
+                        if candidateAuth.authMode == .chatGPT,
+                           let sessionID = upstreamSessionID
+                        {
+                            upstream.headers["session_id"] = sessionID
+                        }
+                        return (
+                            try await HTTPClientFactory.stream(
+                                config: requestConfig,
+                                url: upstream.url,
+                                method: .POST,
+                                headers: upstream.headers,
+                                body: serialized
+                            ),
+                            upstream.url
+                        )
+                    }
+                    if (200..<300).contains(response.statusCode) == false {
+                        let body = try await self.collectBody(from: response.body)
+                        let text = String(decoding: body, as: UTF8.self)
+                        let category = self.classifyFailure(status: response.statusCode, text: text)
+                        errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                        let latency = Helpers.nowMilliseconds() - startMS
+                        try self.store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: proxyKey.apiKeyHash,
+                                accountKey: candidate.record.accountKey,
+                                accountLabel: candidate.record.label,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: actualModel,
+                                reasoningEffort: reasoningEffort,
+                                success: false,
+                                latencyMS: latency,
+                                failureCategory: category,
+                                lastError: Helpers.truncate(text),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                        await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                        let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                            category: category,
+                            candidate: candidate,
+                            recordUsage: candidate.record.usage,
+                            usageError: candidate.record.usageError,
+                            text: text
+                        )
+                        try self.noteCandidateAttemptFailure(candidate)
+                        if shouldContinueAfterRecovery {
+                            continue
+                        }
+                        if self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                            continue
+                        }
+                        break
+                    }
+
+                    await self.setActive(candidate)
+                    let streamCandidate = candidate
+                    let streamResolvedUpstreamModel = resolvedUpstreamModel
+                    let streamPromptCacheContext = promptCacheContext
+                    let adaptedBody = adapterUsesChatCompletions
+                        ? self.openAIChatToSyntheticResponseStream(
+                            upstreamBody: response.body,
+                            requestedModel: requestedModel,
+                            onCompletedReasoningContent: { [weak self] assistantFingerprint, reasoningContent in
+                                guard let self else { return }
+                                await self.storeChatCompletionsReasoningContentIfNeeded(
+                                    assistantFingerprint: assistantFingerprint,
+                                    reasoningContent: reasoningContent,
+                                    candidate: streamCandidate,
+                                    upstreamModel: streamResolvedUpstreamModel,
+                                    context: streamPromptCacheContext
+                                )
+                            }
+                        )
+                        : response.body
+                    await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                    return self.makeStreamingProxyResponse(
+                        upstreamBody: adaptedBody,
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        apiKeyValue: apiKeyValue,
+                        clientSource: clientSource,
+                        requestedModel: requestedModel,
+                        actualModel: actualModel,
+                        responseMode: responseMode,
+                        geminiRequestContext: geminiRequestContext,
+                        candidate: candidate,
+                        startMS: startMS,
+                        reasoningEffort: reasoningEffort
+                    )
+                }
+
+                let candidateAuth = candidate.auth
+                let upstreamSessionID = promptCacheContext.upstreamSessionID
+                let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
+                    if candidateAuth.authMode == .chatGPT,
+                       let sessionID = upstreamSessionID
+                    {
+                        upstream.headers["session_id"] = sessionID
+                    }
+                    return (
+                        try await HTTPClientFactory.request(
+                            config: requestConfig,
+                            url: upstream.url,
+                            method: .POST,
+                            headers: upstream.headers,
+                            body: serialized
+                        ),
+                        upstream.url
+                    )
+                }
+
+                if (200..<300).contains(response.statusCode) == false {
+                    let text = response.bodyText
+                    let category = self.classifyFailure(status: response.statusCode, text: text)
+                    errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
+                    let latency = Helpers.nowMilliseconds() - startMS
+                    try self.store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: proxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: false,
+                            latencyMS: latency,
+                            failureCategory: category,
+                            lastError: Helpers.truncate(text),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+                    let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
+                        category: category,
+                        candidate: candidate,
+                        recordUsage: candidate.record.usage,
+                        usageError: candidate.record.usageError,
+                        text: text
+                    )
+                    try self.noteCandidateAttemptFailure(candidate)
+                    if shouldContinueAfterRecovery {
+                        continue
+                    }
+                    if self.shouldContinueAfterFailure(category: category, candidate: candidate) {
+                        continue
+                    }
+                    break
+                }
+
+                await self.setActive(candidate)
+                let completed: [String: Any]
+                if adapterUsesChatCompletions {
+                    let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
+                    completed = ProxyTranscoder.completedResponse(
+                        fromChatCompletion: object,
+                        requestedModel: requestedModel
+                    )
+                    await self.storeChatCompletionsReasoningContentIfNeeded(
+                        fromChatCompletion: object,
+                        candidate: candidate,
+                        upstreamModel: resolvedUpstreamModel,
+                        context: promptCacheContext
+                    )
+                } else {
+                    let events = ProxyTranscoder.decodeSSE(response.body)
+                    guard let rawCompleted = self.completedResponse(from: response.body) else {
+                        throw ProxyError.message("上游未返回 response.completed")
+                    }
+                    completed = ProxyTranscoder.completedResponseByEnsuringAssistantText(
+                        rawCompleted,
+                        fallbackText: ProxyTranscoder.extractAssistantText(from: events)
+                    )
+                }
+                let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
+                let payload: Data
+                switch responseMode {
+                case .chatCompletions:
+                    payload = try JSONSerialization.data(withJSONObject: ProxyTranscoder.chatCompletionFromCompletedResponse(completedResponse: completed, requestedModel: requestedModel))
+                case .responses:
+                    payload = try JSONSerialization.data(withJSONObject: completed)
+                case .anthropicMessages:
+                    payload = try JSONSerialization.data(withJSONObject: AnthropicTranscoder.messageResponse(from: completed, requestedModel: requestedModel))
+                case .geminiGenerateContent:
+                    payload = try JSONSerialization.data(
+                        withJSONObject: GeminiTranscoder.generateContentResponse(
+                            from: completed,
+                            requestedModel: requestedModel,
+                            context: geminiRequestContext ?? .default(sourceModel: requestedModel)
+                        )
+                    )
+                }
+                let latency = Helpers.nowMilliseconds() - startMS
+                try self.store.recordTrace(
+                    ProxyRequestTrace(
+                        endpoint: endpoint,
+                        upstreamURL: upstreamURL,
+                        apiKeyHash: proxyKey.apiKeyHash,
+                        accountKey: candidate.record.accountKey,
+                        accountLabel: candidate.record.label,
+                        clientSource: clientSource,
+                        model: requestedModel,
+                        actualModel: actualModel,
+                        reasoningEffort: reasoningEffort,
+                        success: true,
+                        latencyMS: latency,
+                        usage: usage,
+                        apiKeyValue: apiKeyValue
+                    )
+                )
+                try self.noteCandidateAttemptSuccess(candidate)
+                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                return ProxyHTTPResponse(
+                    statusCode: 200,
+                    headers: ["content-type": "application/json"],
+                    body: .bytes(payload)
+                )
+            } catch let error as RecordedCandidateFailure {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.rawText)
+                errors.append(message)
+                await self.setLastError(message)
+                if error.shouldContinue {
+                    continue
+                }
+                if let response = error.response {
+                    return response
+                }
+                break
+            } catch {
+                let message = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: error.localizedDescription)
+                errors.append(message)
+                await self.setLastError(message)
+                try? self.noteCandidateAttemptFailure(candidate)
+                continue
+            }
+        }
+        throw ProxyError.message(errors.isEmpty ? "没有可用账号完成请求" : errors.joined(separator: " | "))
+    }
+
+    private func loadCandidates(
+        selectedAccountKey: String? = nil,
+        dataSource: ProxyDataSource,
+        allowedAccountKeys: [String] = [],
+        allowedProviderFamilies: Set<AccountProviderFamily>? = nil
+    ) async throws -> [ProxyCandidate] {
+        let now = Helpers.now()
+        let records = try self.store.listAccountRecords()
+        let trimmedSelectedAccountKey = selectedAccountKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let allowedAccountKeySet = Set(ProxyAPIKeyRecord.normalizedAllowedAccountKeys(allowedAccountKeys))
+        if !trimmedSelectedAccountKey.isEmpty {
+            guard allowedAccountKeySet.isEmpty || allowedAccountKeySet.contains(trimmedSelectedAccountKey) else {
+                throw ProxyError.message(self.disallowedSelectedAccountMessage())
+            }
+            return [
+                try self.selectedCandidate(
+                    accountKey: trimmedSelectedAccountKey,
+                    records: records,
+                    now: now,
+                    dataSource: dataSource,
+                    allowedProviderFamilies: allowedProviderFamilies
+                ),
+            ]
+        }
+        var configurationErrors: [String] = []
+        let candidates = try records.compactMap { rawRecord -> ProxyCandidate? in
+            var record = rawRecord
+            guard record.enabled else { return nil }
+            guard dataSource.allows(providerFamily: record.providerFamily) else { return nil }
+            if let allowedProviderFamilies, !allowedProviderFamilies.contains(record.providerFamily) {
+                return nil
+            }
+            guard allowedAccountKeySet.isEmpty || allowedAccountKeySet.contains(record.accountKey) else { return nil }
+            if record.authMode.isManualAPIKey {
+                record = try self.accountService.repairedStoredManualAccountIfNeeded(record)
+                if let configurationError = self.manualAPIKeyConfigurationError(for: record) {
+                    configurationErrors.append("\(record.label): \(configurationError)")
+                    return nil
+                }
+            }
+            guard UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else { return nil }
+            if record.authMode.isManualAPIKey {
+                if let cooldownUntil = record.cooldownUntil, cooldownUntil <= now {
+                    try self.store.updateAccountFailureState(id: record.id, consecutiveFailureCount: 0, cooldownUntil: nil)
+                    record.consecutiveFailureCount = 0
+                    record.cooldownUntil = nil
+                }
+                guard record.isCoolingDown(now: now) == false else { return nil }
+            }
+            guard let auth = try? AuthService.extractAuth(from: record.authJSON, secretStore: self.secretStore) else {
+                if let configurationError = self.manualAPIKeyConfigurationError(for: record) {
+                    configurationErrors.append("\(record.label): \(configurationError)")
+                }
+                return nil
+            }
+            return ProxyCandidate(record: record, auth: auth)
+        }
+        if candidates.isEmpty, configurationErrors.isEmpty == false {
+            throw ProxyError.message(configurationErrors.joined(separator: " | "))
+        }
+        return candidates
+    }
+
+    private func selectedCandidate(
+        accountKey: String,
+        records: [AccountRecord],
+        now: Int64,
+        dataSource: ProxyDataSource,
+        allowedProviderFamilies: Set<AccountProviderFamily>? = nil
+    ) throws -> ProxyCandidate {
+        guard var record = records.first(where: { $0.accountKey == accountKey }) else {
+            throw ProxyError.message("指定的测试账号不存在。")
+        }
+        guard record.authMode.supportsPinnedProxyTest(dataSource: dataSource) else {
+            throw ProxyError.message("指定的测试账号与当前 API Key 的数据源不匹配。")
+        }
+        if let allowedProviderFamilies, !allowedProviderFamilies.contains(record.providerFamily) {
+            throw ProxyError.message("指定的测试账号与当前请求协议不兼容。")
+        }
+        guard record.enabled else {
+            throw ProxyError.message("指定的测试账号已禁用。")
+        }
+        guard UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else {
+            throw ProxyError.message("指定的测试账号当前额度窗口受限，暂不可用于测试。")
+        }
+
+        if record.authMode.isManualAPIKey {
+            record = try self.accountService.repairedStoredManualAccountIfNeeded(record)
+            if let configurationError = self.manualAPIKeyConfigurationError(for: record) {
+                throw ProxyError.message("指定的测试账号配置有误：\(configurationError)")
+            }
+            if let cooldownUntil = record.cooldownUntil, cooldownUntil <= now {
+                try self.store.updateAccountFailureState(id: record.id, consecutiveFailureCount: 0, cooldownUntil: nil)
+                record.consecutiveFailureCount = 0
+                record.cooldownUntil = nil
+            }
+            guard record.isCoolingDown(now: now) == false else {
+                throw ProxyError.message("指定的测试账号当前处于 API Key 冷却期，暂不可用于测试。")
+            }
+        }
+
+        guard let auth = try? AuthService.extractAuth(from: record.authJSON, secretStore: self.secretStore) else {
+            if let configurationError = self.manualAPIKeyConfigurationError(for: record) {
+                throw ProxyError.message("指定的测试账号配置有误：\(configurationError)")
+            }
+            throw ProxyError.message("指定的测试账号授权无效，请重新导入或更新。")
+        }
+        return ProxyCandidate(record: record, auth: auth)
+    }
+
+    private func prioritizedCandidates(
+        _ candidates: [ProxyCandidate],
+        using context: PromptCacheContext
+    ) async -> [ProxyCandidate] {
+        guard let stickySessionKey = context.stickySessionKey,
+              stickySessionKey.isEmpty == false,
+              let accountKey = await self.stickySessionBindings.accountKey(for: stickySessionKey),
+              let index = candidates.firstIndex(where: { $0.record.accountKey == accountKey }),
+              context.allowManualAPIKeyStickyBinding || candidates[index].record.authMode.isManualAPIKey == false,
+              index > 0
+        else {
+            return candidates
+        }
+
+        var prioritized = candidates
+        let bound = prioritized.remove(at: index)
+        prioritized.insert(bound, at: 0)
+        return prioritized
+    }
+
+    private func bindStickySessionIfNeeded(
+        candidate: ProxyCandidate,
+        context: PromptCacheContext
+    ) async {
+        guard let stickySessionKey = context.stickySessionKey,
+              stickySessionKey.isEmpty == false,
+              context.allowManualAPIKeyStickyBinding || candidate.record.authMode.isManualAPIKey == false
+        else {
+            return
+        }
+
+        await self.stickySessionBindings.bind(
+            sessionKey: stickySessionKey,
+            accountKey: candidate.record.accountKey,
+            ttlSeconds: PromptCacheSupport.stickySessionTTLSeconds
+        )
+    }
+
+    private func chatCompletionsRequestByApplyingThinkingCompatibility(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        upstreamModel: String,
+        context: PromptCacheContext
+    ) async throws -> [String: Any] {
+        guard self.usesChatCompletionsThinkingCompatibility(candidate.auth) else {
+            return request
+        }
+
+        var updated = request
+        var messages = request["messages"] as? [[String: Any]] ?? []
+        var changed = false
+        var missingCache = false
+        let sessionKeyHashes = self.reasoningContentCacheSessionKeyHashes(context)
+
+        for index in messages.indices {
+            let role = ((messages[index]["role"] as? String) ?? "").lowercased()
+            guard role == "assistant",
+                  let fingerprint = ProxyTranscoder.chatCompletionAssistantToolCallMessageFingerprint(messages[index]),
+                  (messages[index]["reasoning_content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            else {
+                continue
+            }
+
+            var restored = false
+            for sessionKeyHash in sessionKeyHashes {
+                guard let reasoningContent = await self.chatCompletionsReasoningContentCache.reasoningContent(
+                    sessionKeyHash: sessionKeyHash,
+                    accountKey: candidate.record.accountKey,
+                    model: upstreamModel,
+                    assistantFingerprint: fingerprint
+                ) else {
+                    continue
+                }
+                messages[index]["reasoning_content"] = reasoningContent
+                changed = true
+                restored = true
+                break
+            }
+            if restored == false {
+                missingCache = true
+            }
+        }
+
+        if missingCache {
+            throw ProxyError.message(Self.missingThinkingCompatibilityReasoningContentMessage)
+        }
+
+        if changed {
+            updated["messages"] = messages
+        }
+        updated["thinking"] = ["type": "enabled"]
+        updated.removeValue(forKey: "logprobs")
+        updated.removeValue(forKey: "top_logprobs")
+        return updated
+    }
+
+    private static let missingThinkingCompatibilityReasoningContentMessage =
+        "Thinking compatibility is enabled for this Generic OpenAI-compatible account, but the proxy has no cached reasoning_content for a previous assistant tool call in this conversation. Disable Thinking compatibility for this account, or start a fresh conversation without old tool-call history."
+
+    private func storeChatCompletionsReasoningContentIfNeeded(
+        fromChatCompletion payload: [String: Any],
+        candidate: ProxyCandidate,
+        upstreamModel: String,
+        context: PromptCacheContext
+    ) async {
+        guard let pair = ProxyTranscoder.chatCompletionAssistantReasoningCachePair(fromChatCompletion: payload) else {
+            return
+        }
+        await self.storeChatCompletionsReasoningContentIfNeeded(
+            assistantFingerprint: pair.assistantFingerprint,
+            reasoningContent: pair.reasoningContent,
+            candidate: candidate,
+            upstreamModel: upstreamModel,
+            context: context
+        )
+    }
+
+    private func storeChatCompletionsReasoningContentIfNeeded(
+        assistantFingerprint: String,
+        reasoningContent: String,
+        candidate: ProxyCandidate,
+        upstreamModel: String,
+        context: PromptCacheContext
+    ) async {
+        guard self.usesChatCompletionsThinkingCompatibility(candidate.auth),
+              !self.reasoningContentCacheSessionKeyHashes(context).isEmpty
+        else {
+            return
+        }
+
+        for sessionKeyHash in self.reasoningContentCacheSessionKeyHashes(context) {
+            await self.chatCompletionsReasoningContentCache.store(
+                reasoningContent: reasoningContent,
+                sessionKeyHash: sessionKeyHash,
+                accountKey: candidate.record.accountKey,
+                model: upstreamModel,
+                assistantFingerprint: assistantFingerprint
+            )
+        }
+    }
+
+    private func usesChatCompletionsThinkingCompatibility(_ auth: ExtractedAuth) -> Bool {
+        auth.authMode == .openAIAPIKey
+            && auth.providerPreset == .genericOpenAICompatible
+            && auth.upstreamAdapter == .chatCompletions
+            && (auth.upstreamThinkingCompatibility ?? .disabled) == .enabled
+    }
+
+    private func reasoningContentCacheSessionKeyHashes(_ context: PromptCacheContext) -> [String] {
+        var seen = Set<String>()
+        return [
+            context.stickySessionKey,
+            context.sessionIdentifier,
+            context.seedMaterial,
+        ].compactMap { raw -> String? in
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+                return nil
+            }
+            let hash = Helpers.sha256(trimmed)
+            guard seen.insert(hash).inserted else {
+                return nil
+            }
+            return hash
+        }
+    }
+
+    private func preparedGeminiNativeRequestPayload(
+        rawRequest: [String: Any],
+        candidate: ProxyCandidate,
+        context: PromptCacheContext
+    ) async -> [String: Any] {
+        guard await self.shouldApplyGeminiNativeThoughtSignatureCompatibility(
+            rawRequest: rawRequest,
+            selectedAccountKey: candidate.record.accountKey,
+            context: context
+        ) else {
+            return rawRequest
+        }
+
+        return GeminiTranscoder.replacingThoughtSignaturesWithCompatibilitySignature(
+            in: rawRequest
+        )
+    }
+
+    private func preparedAnthropicRequestPayload(
+        rawPayload: [String: Any],
+        upstreamModel: String,
+        stream: Bool,
+        candidate: ProxyCandidate
+    ) -> [String: Any] {
+        let payload = PromptCacheSupport.applyRawAnthropicRequest(
+            rawPayload,
+            upstreamModel: upstreamModel,
+            stream: stream
+        )
+        guard self.shouldSanitizeAnthropicThinkingHistory(for: candidate.auth) else {
+            return payload
+        }
+
+        let baseURL = candidate.auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? candidate.auth.upstreamBaseURL!.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : candidate.auth.providerPreset.defaultBaseURL
+        return AnthropicAPIKeyUpstream.sanitizedRequestForUnsupportedThinkingContentBlocks(
+            payload,
+            baseURL: baseURL
+        )
+    }
+
+    private func shouldSanitizeAnthropicThinkingHistory(for auth: ExtractedAuth) -> Bool {
+        guard auth.authMode == .anthropicAPIKey else {
+            return false
+        }
+
+        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? auth.upstreamBaseURL!.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : auth.providerPreset.defaultBaseURL
+        return AnthropicAPIKeyUpstream.supportsThinkingContentBlocks(baseURL: baseURL) == false
+    }
+
+    private func shouldApplyGeminiNativeThoughtSignatureCompatibility(
+        rawRequest: [String: Any],
+        selectedAccountKey: String,
+        context: PromptCacheContext
+    ) async -> Bool {
+        guard context.isGeminiCLISession,
+              GeminiTranscoder.containsThoughtSignature(in: rawRequest)
+        else {
+            return false
+        }
+
+        if let stickySessionKey = context.stickySessionKey,
+           stickySessionKey.isEmpty == false,
+           let boundAccountKey = await self.stickySessionBindings.accountKey(for: stickySessionKey)
+        {
+            return boundAccountKey != selectedAccountKey
+        }
+
+        return true
+    }
+
+    private func classifyFailure(status: Int, text: String) -> ProxyRequestTrace.FailureCategory {
+        if UsageLimitReachedSignal.parse(from: text) != nil {
+            return .quota
+        }
+        if status == 401 || HTTPErrorClassifier.containsAuthSignal(text) {
+            return .auth
+        }
+        if status == 429 || HTTPErrorClassifier.containsRateLimitSignal(text) {
+            return .rateLimit
+        }
+        if status == 402 || HTTPErrorClassifier.containsQuotaSignal(text) {
+            return .quota
+        }
+        return .upstream
+    }
+
+    private func ensureGeminiPublicRouteCLISession(_ context: PromptCacheContext) throws {
+        guard context.isGeminiCLISession else {
+            throw ProxyError.message(self.geminiPublicRouteCLIOnlyMessage())
+        }
+    }
+
+    private func geminiPublicRouteCLIOnlyMessage() -> String {
+        "Unsupported Gemini public route: official Gemini CLI sessions only. Import a `Google / Gemini Login` account first, and do not call `/v1beta/models/*` POST routes from non-CLI clients."
+    }
+
+    private func geminiPublicRouteRequiresGoogleGeminiLoginMessage() -> String {
+        "Unsupported Gemini account configuration: Gemini public routes require an enabled `Google / Gemini Login` account. Manual API key, OpenAI-compatible, Anthropic-compatible, and Google Gemini Compatible accounts are not used here."
+    }
+
+    private func adminGeminiProxyTestEndpointOnlyMessage() -> String {
+        "Admin proxy test only supports the Gemini endpoint when the selected account comes from `Google / Gemini Login`."
+    }
+
+    private func adminGeminiProxyTestRequiresGoogleGeminiLoginMessage() -> String {
+        "Admin proxy test for Gemini only supports accounts imported from `Google / Gemini Login`."
+    }
+
+    private func adminProxyTestHeaders(
+        selectedAccountKey: String?,
+        anthropicVersion: String?,
+        anthropicBeta: String?
+    ) -> [String: String] {
+        var headers = [
+            ProxyHeaderName.proxyTestConsole: "1",
+        ]
+        if let selectedAccountKey {
+            headers[ProxyHeaderName.testAccountKey] = selectedAccountKey
+        }
+        if let anthropicVersion = self.trimmed(anthropicVersion) {
+            headers["anthropic-version"] = anthropicVersion
+        }
+        if let anthropicBeta = self.trimmed(anthropicBeta) {
+            headers["anthropic-beta"] = anthropicBeta
+        }
+        return headers
+    }
+
+    private func trimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func noAvailableAccountsMessage(
+        for dataSource: ProxyDataSource,
+        allowedAccountKeys: [String] = []
+    ) -> String {
+        let isRestricted = ProxyAPIKeyRecord.normalizedAllowedAccountKeys(allowedAccountKeys).isEmpty == false
+        switch dataSource {
+        case .all:
+            return isRestricted
+                ? "当前 API Key 已限制可用账号范围，但限制范围内没有任何可用的上游账号。"
+                : "当前 API Key 绑定的是全部数据源，但没有任何可用的上游账号。"
+        case .openAI:
+            return isRestricted
+                ? "当前 API Key 已限制可用账号范围，但限制范围内没有可用的 OpenAI 账号。"
+                : "当前 API Key 绑定的是 OpenAI 数据源，但没有可用的 OpenAI 账号。"
+        case .anthropic:
+            return isRestricted
+                ? "当前 API Key 已限制可用账号范围，但限制范围内没有可用的 Anthropic 账号。"
+                : "当前 API Key 绑定的是 Anthropic 数据源，但没有可用的 Anthropic 账号。"
+        case .gemini:
+            return isRestricted
+                ? "当前 API Key 已限制可用账号范围，但限制范围内没有可用的 Gemini 账号。"
+                : "当前 API Key 绑定的是 Gemini 数据源，但没有可用的 Gemini 账号。"
+        }
+    }
+
+    private func disallowedSelectedAccountMessage() -> String {
+        "指定的测试账号不在当前 API Key 允许使用的账号范围内。"
+    }
+
+    private func manualAPIKeyConfigurationError(for record: AccountRecord) -> String? {
+        guard record.authMode.isManualAPIKey else {
+            return nil
+        }
+        if let extracted = try? AuthService.extractAuth(from: record.authJSON, secretStore: self.secretStore) {
+            return OpenAICompatibleUpstream.storedConfigurationError(
+                baseURL: extracted.upstreamBaseURL ?? record.upstreamBaseURL ?? extracted.providerPreset.defaultBaseURL,
+                providerPreset: extracted.providerPreset,
+                apiKey: extracted.accessToken
+            )
+        }
+
+        let metadata = AuthService.extractAuthMetadata(from: record.authJSON)
+        let providerPreset = metadata.authMode.isManualAPIKey ? metadata.providerPreset : record.providerPreset
+        let baseURL = metadata.upstreamBaseURL ?? record.upstreamBaseURL ?? providerPreset.defaultBaseURL
+        return OpenAICompatibleUpstream.storedConfigurationError(
+            baseURL: baseURL,
+            providerPreset: providerPreset,
+            apiKey: nil
+        )
+    }
+
+    private func publicFacingCandidateFailureMessage(
+        candidate: ProxyCandidate,
+        rawText: String
+    ) -> String {
+        let summary = summarizedUpstreamError(rawText)
+        let message: String
+        if candidate.record.authMode == .anthropicSubscriptionOAuth,
+           AnthropicAuthService.isInferenceScopePermissionError(rawText)
+        {
+            message = AnthropicAuthService.reauthorizationRequiredMessage
+        } else if candidate.record.authMode.isManualAPIKey {
+            let humanized = OpenAICompatibleUpstream.humanizedUpstreamErrorMessage(
+                summary,
+                providerPreset: candidate.auth.providerPreset,
+                apiKey: candidate.auth.accessToken
+            )
+            message = humanized == summary ? summary : humanized
+        } else {
+            message = summary
+        }
+        return "\(candidate.record.label): \(message)"
+    }
+
+    private func upstreamRequest(
+        for auth: ExtractedAuth,
+        config: AppConfig,
+        accept: String = "text/event-stream"
+    ) -> (url: String, headers: [String: String]) {
+        switch auth.authMode {
+        case .chatGPT:
+            var headers = [
+                "Authorization": "Bearer \(auth.accessToken)",
+                "Content-Type": "application/json",
+                "Accept": accept,
+                "User-Agent": RuntimeInfo.daemonServerToken,
+            ]
+            headers["ChatGPT-Account-Id"] = auth.accountID
+            return (
+                config.chatGPTBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/backend-api/codex/responses",
+                headers
+            )
+        case .openAIAPIKey:
+            let headers = OpenAICompatibleUpstream.requestHeaders(
+                apiKey: auth.accessToken,
+                accept: accept,
+                providerPreset: auth.providerPreset
+            )
+            if self.usesOpenAIChatCompletionsAdapter(auth) {
+                return (self.openAIChatCompletionsURL(config: config, auth: auth), headers)
+            }
+            return (self.openAIResponsesURL(config: config, auth: auth), headers)
+        case .geminiOAuth:
+            return GeminiAuthService.apiRequest(auth: auth, method: "loadCodeAssist", accept: accept)
+        case .anthropicAPIKey, .anthropicSubscriptionOAuth:
+            return self.anthropicUpstreamRequest(
+                for: auth,
+                path: "/v1/messages",
+                stream: accept.contains("event-stream")
+            )
+        }
+    }
+
+    private func anthropicUpstreamRequest(
+        for auth: ExtractedAuth,
+        path: String,
+        stream: Bool,
+        anthropicVersion: String = AnthropicTranscoder.defaultAnthropicVersion,
+        anthropicBeta: String? = nil
+    ) -> (url: String, headers: [String: String]) {
+        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? auth.upstreamBaseURL!.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : auth.providerPreset.defaultBaseURL
+        let accept = stream ? "text/event-stream" : "application/json"
+        let headers: [String: String]
+        switch auth.authMode {
+        case .anthropicAPIKey:
+            headers = AnthropicAPIKeyUpstream.requestHeaders(
+                apiKey: auth.accessToken,
+                accept: accept,
+                anthropicVersion: anthropicVersion,
+                anthropicBeta: anthropicBeta
+            )
+        case .anthropicSubscriptionOAuth:
+            var oauthHeaders = [
+                "Authorization": "Bearer \(auth.accessToken)",
+                "Content-Type": "application/json",
+                "Accept": accept,
+                "anthropic-version": anthropicVersion,
+                "User-Agent": RuntimeInfo.daemonServerToken,
+            ]
+            oauthHeaders["anthropic-beta"] = anthropicBeta ?? AnthropicAuthService.defaultOAuthBetaHeader
+            headers = oauthHeaders
+        case .chatGPT, .openAIAPIKey, .geminiOAuth:
+            headers = [:]
+        }
+        return ("\(baseURL)\(path)", headers)
+    }
+
+    private func resolveOpenAIToAnthropicModel(requestedModel: String) -> String {
+        let trimmed = requestedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return AnthropicUpstreamBridge.defaultOpenAIToAnthropicModel
+        }
+        if trimmed.lowercased().hasPrefix("claude-") {
+            return trimmed
+        }
+        let lower = trimmed.lowercased()
+        if lower.contains("opus") || lower.contains("max") {
+            return "claude-opus-4-6"
+        }
+        if lower.contains("mini") || lower.contains("haiku") {
+            return "claude-3-5-haiku-latest"
+        }
+        return AnthropicUpstreamBridge.defaultOpenAIToAnthropicModel
+    }
+
+    private func normalizedAnthropicMessage(_ message: [String: Any]) -> [String: Any] {
+        var normalized = message
+        if let usage = ProxyTranscoder.normalizedAnthropicUsageObject(message["usage"]) {
+            normalized["usage"] = usage
+        }
+        return normalized
+    }
+
+    private func loggedActualModel(from requestBody: [String: Any]) -> String? {
+        let trimmed = (requestBody["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedAnthropicEvent(_ event: SSEEvent) -> SSEEvent {
+        guard let json = ProxyTranscoder.jsonObject(from: event) else {
+            return event
+        }
+
+        var normalized = json
+        if var message = normalized["message"] as? [String: Any],
+           let usage = ProxyTranscoder.normalizedAnthropicUsageObject(message["usage"])
+        {
+            message["usage"] = usage
+            normalized["message"] = message
+        }
+        if let usage = ProxyTranscoder.normalizedAnthropicUsageObject(normalized["usage"]) {
+            normalized["usage"] = usage
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: normalized),
+              let payload = String(data: data, encoding: .utf8)
+        else {
+            return event
+        }
+        return SSEEvent(event: event.event, data: payload)
+    }
+
+    private func anthropicUsage(from message: [String: Any]) -> UpstreamUsage {
+        ProxyTranscoder.usageFromAnthropicUsage(message["usage"])
+    }
+
+    private func anthropicToSyntheticResponseStream(
+        upstreamBody: AsyncThrowingStream<Data, Error>,
+        requestedModel: String
+    ) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                var decoder = SSEIncrementalDecoder()
+                var state = AnthropicSyntheticStreamState()
+                do {
+                    for try await chunk in upstreamBody {
+                        for event in decoder.append(chunk) {
+                            if let errorMessage = self.anthropicStreamErrorMessage(from: event) {
+                                throw ProxyError.message(errorMessage)
+                            }
+                            for syntheticChunk in AnthropicUpstreamBridge.responseSSEChunks(
+                                from: event,
+                                state: &state,
+                                requestedModel: requestedModel
+                            ) {
+                                continuation.yield(Data(syntheticChunk.utf8))
+                            }
+                        }
+                    }
+                    for event in decoder.finish() {
+                        if let errorMessage = self.anthropicStreamErrorMessage(from: event) {
+                            throw ProxyError.message(errorMessage)
+                        }
+                        for syntheticChunk in AnthropicUpstreamBridge.responseSSEChunks(
+                            from: event,
+                            state: &state,
+                            requestedModel: requestedModel
+                        ) {
+                            continuation.yield(Data(syntheticChunk.utf8))
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
+        }
+    }
+
+    private func openAIChatToSyntheticResponseStream(
+        upstreamBody: AsyncThrowingStream<Data, Error>,
+        requestedModel: String,
+        onCompletedReasoningContent: (@Sendable (_ assistantFingerprint: String, _ reasoningContent: String) async -> Void)? = nil
+    ) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                var decoder = SSEIncrementalDecoder()
+                var state = OpenAIChatSyntheticStreamState()
+                do {
+                    for try await chunk in upstreamBody {
+                        for event in decoder.append(chunk) {
+                            for syntheticChunk in try ProxyTranscoder.responseSSEChunks(
+                                fromChatCompletionEvent: event,
+                                state: &state,
+                                requestedModel: requestedModel
+                            ) {
+                                continuation.yield(Data(syntheticChunk.utf8))
+                            }
+                        }
+                    }
+                    for event in decoder.finish() {
+                        for syntheticChunk in try ProxyTranscoder.responseSSEChunks(
+                            fromChatCompletionEvent: event,
+                            state: &state,
+                            requestedModel: requestedModel
+                        ) {
+                            continuation.yield(Data(syntheticChunk.utf8))
+                        }
+                    }
+                    let completed = ProxyTranscoder.completedResponse(
+                        fromChatCompletionState: state,
+                        requestedModel: requestedModel
+                    )
+                    if let pair = ProxyTranscoder.chatCompletionAssistantReasoningCachePair(
+                        fromCompletedResponse: completed
+                    ) {
+                        await onCompletedReasoningContent?(pair.assistantFingerprint, pair.reasoningContent)
+                    }
+                    for syntheticChunk in ProxyTranscoder.finalizeResponseSSEChunks(
+                        fromChatCompletionState: state,
+                        requestedModel: requestedModel
+                    ) {
+                        continuation.yield(Data(syntheticChunk.utf8))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
+        }
+    }
+
+    private func makeAnthropicPassthroughStreamingResponse(
+        upstreamBody: AsyncThrowingStream<Data, Error>,
+        endpoint: String,
+        upstreamURL: String?,
+        apiKeyHash: String,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        requestedModel: String,
+        actualModel: String?,
+        candidate: ProxyCandidate,
+        startMS: Int64,
+        reasoningEffort: String? = nil,
+        anthropicVersion: String,
+        anthropicBeta: String?
+    ) -> ProxyHTTPResponse {
+        let headers = self.anthropicResponseHeaders(
+            version: anthropicVersion,
+            beta: anthropicBeta,
+            contentType: "text/event-stream; charset=utf-8"
+        )
+        let store = self.store
+        let accountKey = candidate.record.accountKey
+        let accountLabel = candidate.record.label
+        let terminalTrace = StreamTerminalTraceCoordinator()
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            let task = Task {
+                var decoder = SSEIncrementalDecoder()
+                var state = AnthropicSyntheticStreamState()
+
+                func recordSuccess(_ usage: UpstreamUsage) async {
+                    guard await terminalTrace.begin(.success) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: true,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            usage: usage,
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    try? self.noteCandidateAttemptSuccess(candidate)
+                }
+
+                func recordFailure(_ message: String) async {
+                    guard await terminalTrace.begin(.failure) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: false,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            failureCategory: .upstream,
+                            lastError: Helpers.truncate(message),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError(
+                        self.publicFacingCandidateFailureMessage(
+                            candidate: candidate,
+                            rawText: message
+                        )
+                    )
+                    try? self.noteCandidateAttemptFailure(candidate)
+                }
+
+                do {
+                    for try await chunk in upstreamBody {
+                        for event in decoder.append(chunk) {
+                            if let errorMessage = self.anthropicStreamErrorMessage(from: event) {
+                                throw ProxyError.message(errorMessage)
+                            }
+                            let normalizedEvent = self.normalizedAnthropicEvent(event)
+                            continuation.yield(Data(self.sseString(from: normalizedEvent).utf8))
+                            _ = AnthropicUpstreamBridge.responseSSEChunks(
+                                from: normalizedEvent,
+                                state: &state,
+                                requestedModel: requestedModel
+                            )
+                        }
+                    }
+                    for event in decoder.finish() {
+                        if let errorMessage = self.anthropicStreamErrorMessage(from: event) {
+                            throw ProxyError.message(errorMessage)
+                        }
+                        let normalizedEvent = self.normalizedAnthropicEvent(event)
+                        continuation.yield(Data(self.sseString(from: normalizedEvent).utf8))
+                        _ = AnthropicUpstreamBridge.responseSSEChunks(
+                            from: normalizedEvent,
+                            state: &state,
+                            requestedModel: requestedModel
+                        )
+                    }
+                    let completed = AnthropicUpstreamBridge.completedResponse(from: state, requestedModel: requestedModel)
+                    let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
+                    await recordSuccess(usage)
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    await recordFailure(error.localizedDescription)
+                    continuation.yield(Data(AnthropicTranscoder.errorSSEChunk(message: error.localizedDescription).utf8))
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { @Sendable termination in
+                if case .cancelled = termination {
+                    Task {
+                        guard await terminalTrace.begin(.cancelled) else {
+                            return
+                        }
+                        try? store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: apiKeyHash,
+                                accountKey: accountKey,
+                                accountLabel: accountLabel,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: actualModel,
+                                reasoningEffort: reasoningEffort,
+                                success: false,
+                                latencyMS: Helpers.nowMilliseconds() - startMS,
+                                failureCategory: .cancelled,
+                                lastError: Helpers.truncate(self.cancelledStreamFailureMessage()),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                    }
+                }
+                task.cancel()
+            }
+        }
+        return ProxyHTTPResponse(statusCode: 200, headers: headers, body: .stream(stream))
+    }
+
+    private func sseString(from event: SSEEvent) -> String {
+        var lines: [String] = []
+        if let name = event.event, !name.isEmpty {
+            lines.append("event: \(name)")
+        }
+        let payloadLines = event.data.split(separator: "\n", omittingEmptySubsequences: false)
+        if payloadLines.isEmpty {
+            lines.append("data:")
+        } else {
+            for line in payloadLines {
+                lines.append("data: \(line)")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n\n"
+    }
+
+    private func anthropicStreamErrorMessage(from event: SSEEvent) -> String? {
+        guard let json = ProxyTranscoder.jsonObject(from: event),
+              (json["type"] as? String) == "error"
+        else {
+            return nil
+        }
+        let error = json["error"] as? [String: Any] ?? [:]
+        return (error["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func int64Value(_ value: Any?) -> Int64? {
+        switch value {
+        case let value as Int64:
+            return value
+        case let value as Int:
+            return Int64(value)
+        case let value as NSNumber:
+            return value.int64Value
+        case let value as String:
+            return Int64(value)
+        default:
+            return nil
+        }
+    }
+
+    private func compatibleCodexRequest(_ request: [String: Any], for auth: ExtractedAuth) -> [String: Any] {
+        self.compatibleCodexRequest(request, for: auth, preserveResolvedModel: false)
+    }
+
+    private func compatibleCodexRequest(
+        _ request: [String: Any],
+        for auth: ExtractedAuth,
+        preserveResolvedModel: Bool
+    ) -> [String: Any] {
+        guard auth.authMode == .chatGPT else {
+            return request
+        }
+
+        var compatible = request
+        [
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "top_k",
+            "n",
+            "metadata",
+        ].forEach { compatible.removeValue(forKey: $0) }
+
+        return compatible
+    }
+
+    private struct ProxyRequestModelResolution {
+        var resolvedRequestModel: String
+        var usesAccountModelRouting: Bool
+    }
+
+    private func resolvedCodexRequest(
+        _ request: [String: Any],
+        requestedModel: String,
+        sourceAnthropicModel: String?,
+        record: AccountRecord,
+        config: AppConfig,
+        auth: ExtractedAuth
+    ) -> ([String: Any], ProxyRequestModelResolution) {
+        var resolved = request
+        let resolution = self.resolveProxyRequestModel(
+            requestedModel: requestedModel,
+            sourceAnthropicModel: sourceAnthropicModel,
+            record: record,
+            config: config,
+            auth: auth
+        )
+        if sourceAnthropicModel != nil || resolution.usesAccountModelRouting {
+            resolved["model"] = resolution.resolvedRequestModel
+        }
+        return (resolved, resolution)
+    }
+
+    private func resolveProxyRequestModel(
+        requestedModel: String,
+        sourceAnthropicModel: String?,
+        record: AccountRecord,
+        config: AppConfig,
+        auth: ExtractedAuth
+    ) -> ProxyRequestModelResolution {
+        let sourceModel = (sourceAnthropicModel ?? requestedModel).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let routedTarget = record.modelRouting?.resolvedTargetModel(for: sourceModel) {
+            return ProxyRequestModelResolution(
+                resolvedRequestModel: routedTarget,
+                usesAccountModelRouting: true
+            )
+        }
+        if let defaultTargetModel = record.modelRouting?.defaultTargetModel {
+            return ProxyRequestModelResolution(
+                resolvedRequestModel: defaultTargetModel,
+                usesAccountModelRouting: true
+            )
+        }
+        if let sourceAnthropicModel {
+            return ProxyRequestModelResolution(
+                resolvedRequestModel: self.resolveAnthropicTargetModel(
+                    sourceModel: sourceAnthropicModel,
+                    config: config,
+                    auth: auth
+                ),
+                usesAccountModelRouting: false
+            )
+        }
+        let trimmedRequestedModel = requestedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ProxyRequestModelResolution(
+            resolvedRequestModel: trimmedRequestedModel.isEmpty ? requestedModel : trimmedRequestedModel,
+            usesAccountModelRouting: false
+        )
+    }
+
+    private func resolveAnthropicTargetModel(
+        sourceModel: String,
+        config: AppConfig,
+        auth: ExtractedAuth
+    ) -> String {
+        let trimmedSourceModel = sourceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mappedTarget = config.anthropicModelMappings.first(where: {
+            $0.sourceModel == trimmedSourceModel
+        })?.targetModel ?? config.anthropicDefaultTargetModel
+        let trimmedMappedTarget = mappedTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return trimmedMappedTarget.isEmpty ? AppConfig.defaultAnthropicTargetModel : trimmedMappedTarget
+    }
+
+    private func normalizedGeminiSourceModel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("models/") {
+            return String(trimmed.dropFirst("models/".count))
+        }
+        return trimmed
+    }
+
+    private func geminiSourceModels() -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        let defaults = [
+            "gemini-2.0-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3-pro-preview",
+            "gemini-3.1-pro-preview",
+        ]
+        for model in defaults {
+            let normalized = self.normalizedGeminiSourceModel(model)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            ordered.append(normalized)
+        }
+        return ordered
+    }
+
+    private func geminiModelObject(for model: String) -> [String: Any] {
+        let normalized = self.normalizedGeminiSourceModel(model)
+        return [
+            "name": "models/\(normalized)",
+            "baseModelId": normalized,
+            "version": normalized,
+            "displayName": normalized,
+            "description": "Gemini-compatible model routed by Codex Proxy.",
+            "inputTokenLimit": 1_048_576,
+            "outputTokenLimit": 65_536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "streamGenerateContent",
+                "countTokens",
+            ],
+        ]
+    }
+
+    private func openAIResponsesURL(config: AppConfig, auth: ExtractedAuth) -> String {
+        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedBaseURL = (baseURL?.isEmpty == false ? baseURL! : OpenAICompatibleUpstream.defaultBaseURL)
+        return (try? OpenAICompatibleUpstream.responsesURL(
+            from: resolvedBaseURL,
+            providerPreset: auth.providerPreset,
+            baseURLMode: auth.baseURLMode
+        ))
+            ?? (try? OpenAICompatibleUpstream.responsesURL(
+                from: auth.providerPreset.defaultBaseURL,
+                providerPreset: auth.providerPreset,
+                baseURLMode: auth.baseURLMode
+            ))
+            ?? "\(config.chatGPTBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/v1/responses"
+    }
+
+    private func openAIChatCompletionsURL(config: AppConfig, auth: ExtractedAuth) -> String {
+        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedBaseURL = (baseURL?.isEmpty == false ? baseURL! : OpenAICompatibleUpstream.defaultBaseURL)
+        return (try? OpenAICompatibleUpstream.chatCompletionsURL(
+            from: resolvedBaseURL,
+            providerPreset: auth.providerPreset,
+            baseURLMode: auth.baseURLMode
+        ))
+            ?? (try? OpenAICompatibleUpstream.chatCompletionsURL(
+                from: auth.providerPreset.defaultBaseURL,
+                providerPreset: auth.providerPreset,
+                baseURLMode: auth.baseURLMode
+            ))
+            ?? "\(config.chatGPTBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/v1/chat/completions"
+    }
+
+    private func openAIUpstreamAdapters(for auth: ExtractedAuth) -> [OpenAIUpstreamAdapter] {
+        [self.openAIUpstreamAdapter(for: auth)]
+    }
+
+    private func openAIUpstreamAdapter(for auth: ExtractedAuth) -> OpenAIUpstreamAdapter {
+        if auth.authMode == .openAIAPIKey,
+           auth.providerPreset == .genericOpenAICompatible,
+           auth.upstreamAdapter == .chatCompletions
+        {
+            return .chatCompletions
+        }
+        return self.usesPresetChatCompletionsAdapter(auth) ? .chatCompletions : .responses
+    }
+
+    private func openAIUpstreamRequest(
+        for auth: ExtractedAuth,
+        config: AppConfig,
+        accept: String,
+        adapter: OpenAIUpstreamAdapter
+    ) -> (url: String, headers: [String: String]) {
+        let headers = OpenAICompatibleUpstream.requestHeaders(
+            apiKey: auth.accessToken,
+            accept: accept,
+            providerPreset: auth.providerPreset
+        )
+        let url = switch adapter {
+        case .responses:
+            self.openAIResponsesURL(config: config, auth: auth)
+        case .chatCompletions:
+            self.openAIChatCompletionsURL(config: config, auth: auth)
+        }
+        return (url, headers)
+    }
+
+    private func openAIUpstreamRequestBody(
+        from compatibleRequest: [String: Any],
+        requestedModel: String,
+        auth: ExtractedAuth,
+        adapter: OpenAIUpstreamAdapter,
+        stream: Bool,
+        preserveCustomModel: Bool = false,
+        useResolvedModelAsFinalUpstreamModel: Bool = false
+    ) -> [String: Any] {
+        let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedRequestedModel = effectiveRequestedModel?.isEmpty == false
+            ? effectiveRequestedModel!
+            : requestedModel
+        let resolvedUpstreamModel: String
+        if useResolvedModelAsFinalUpstreamModel {
+            resolvedUpstreamModel = resolvedRequestedModel
+        } else if preserveCustomModel,
+           auth.authMode == .openAIAPIKey,
+           ProxyTranscoder.isSupportedClientModel(resolvedRequestedModel) == false
+        {
+            resolvedUpstreamModel = resolvedRequestedModel
+        } else {
+            resolvedUpstreamModel = auth.providerPreset.resolvedUpstreamModel(for: resolvedRequestedModel)
+        }
+        switch adapter {
+        case .responses:
+            return self.compatibleCodexRequest(
+                compatibleRequest,
+                for: auth,
+                preserveResolvedModel: useResolvedModelAsFinalUpstreamModel
+            )
+        case .chatCompletions:
+            return ProxyTranscoder.upstreamChatCompletionsRequest(
+                from: compatibleRequest,
+                upstreamModel: resolvedUpstreamModel,
+                stream: stream
+            )
+        }
+    }
+
+    private func upstreamChatCompletionsRequest(
+        from compatibleRequest: [String: Any],
+        upstreamModel: String,
+        stream: Bool,
+        auth: ExtractedAuth
+    ) -> [String: Any] {
+        ProxyTranscoder.upstreamChatCompletionsRequest(
+            from: compatibleRequest,
+            upstreamModel: upstreamModel,
+            stream: stream
+        )
+    }
+
+    private func usesOpenAIChatCompletionsAdapter(_ auth: ExtractedAuth) -> Bool {
+        self.openAIUpstreamAdapter(for: auth) == .chatCompletions
+    }
+
+    private func usesPresetChatCompletionsAdapter(_ auth: ExtractedAuth) -> Bool {
+        auth.authMode == .openAIAPIKey && auth.providerPreset.usesOpenAIChatCompletionsAPI
+    }
+
+    private func handleRecoverableFailure(
+        category: ProxyRequestTrace.FailureCategory,
+        candidate: ProxyCandidate,
+        recordUsage: UsageSnapshot?,
+        usageError: String?,
+        text: String
+    ) async throws -> Bool {
+        if category == .quota, let usageLimit = UsageLimitReachedSignal.parse(from: text) {
+            let frozenUsage = UsageLimitWindowSupport.usageByApplyingLimit(
+                usageLimit,
+                to: recordUsage,
+                fallbackPlanType: candidate.record.effectivePlanType,
+                now: Helpers.now()
+            )
+            try self.store.updateUsage(
+                accountKey: candidate.record.accountKey,
+                usage: frozenUsage,
+                usageError: usageLimit.normalizedUsageError,
+                planType: resolvedAccountPlanType(frozenUsage.planType, fallback: candidate.record.effectivePlanType),
+                authJSON: candidate.record.authJSON,
+                usageWindowsVisible: nil,
+                authRefreshBlocked: candidate.record.authRefreshBlocked,
+                authRefreshError: candidate.record.authRefreshError
+            )
+            return false
+        }
+
+        guard category == .auth, !candidate.record.authRefreshBlocked, candidate.auth.authMode.isManualAPIKey == false else {
+            return false
+        }
+        do {
+            let refreshed = try await self.withNetworkConfig(for: candidate.record) {
+                try await AuthService.refreshAuth(
+                    candidate.record.authJSON,
+                    config: $0,
+                    secretStore: self.secretStore
+                )
+            }
+            try self.store.updateUsage(
+                accountKey: candidate.record.accountKey,
+                usage: recordUsage,
+                usageError: usageError,
+                planType: candidate.record.effectivePlanType,
+                authJSON: refreshed,
+                usageWindowsVisible: nil,
+                authRefreshBlocked: false,
+                authRefreshError: nil
+            )
+            return true
+        } catch {
+            try self.store.updateUsage(
+                accountKey: candidate.record.accountKey,
+                usage: recordUsage,
+                usageError: usageError,
+                planType: candidate.record.effectivePlanType,
+                authJSON: candidate.record.authJSON,
+                usageWindowsVisible: nil,
+                authRefreshBlocked: true,
+                authRefreshError: error.localizedDescription
+            )
+            await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
+            return false
+        }
+    }
+
+    private func noteCandidateAttemptSuccess(_ candidate: ProxyCandidate) throws {
+        guard candidate.record.authMode.isManualAPIKey else { return }
+        guard candidate.record.consecutiveFailureCount > 0 || candidate.record.cooldownUntil != nil else { return }
+        try self.store.updateAccountFailureState(id: candidate.record.id, consecutiveFailureCount: 0, cooldownUntil: nil)
+    }
+
+    private func noteCandidateAttemptFailure(_ candidate: ProxyCandidate) throws {
+        guard candidate.record.authMode.isManualAPIKey else { return }
+        let nextCount = candidate.record.consecutiveFailureCount + 1
+        let cooldownUntil = nextCount >= Self.apiKeyFailureCooldownThreshold
+            ? Helpers.now() + Self.apiKeyFailureCooldownSeconds
+            : nil
+        try self.store.updateAccountFailureState(
+            id: candidate.record.id,
+            consecutiveFailureCount: nextCount,
+            cooldownUntil: cooldownUntil
+        )
+    }
+
+    private func shouldContinueAfterFailure(
+        category: ProxyRequestTrace.FailureCategory,
+        candidate: ProxyCandidate
+    ) -> Bool {
+        if candidate.record.authMode.isManualAPIKey {
+            return true
+        }
+        return category == .quota || category == .rateLimit || category == .auth
+    }
+
+    private func collectBody(from stream: AsyncThrowingStream<Data, Error>) async throws -> Data {
+        var data = Data()
+        for try await chunk in stream {
+            data.append(chunk)
+        }
+        return data
+    }
+
+    private func bodyData(from body: ProxyHTTPResponse.Body) async throws -> Data {
+        switch body {
+        case .bytes(let data):
+            return data
+        case .stream(let stream):
+            return try await self.collectBody(from: stream)
+        }
+    }
+
+    private func makeStreamingProxyResponse(
+        upstreamBody: AsyncThrowingStream<Data, Error>,
+        endpoint: String,
+        upstreamURL: String?,
+        apiKeyHash: String,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        requestedModel: String,
+        actualModel: String?,
+        responseMode: ResponseMode,
+        geminiRequestContext: GeminiRequestContext?,
+        candidate: ProxyCandidate,
+        startMS: Int64,
+        reasoningEffort: String? = nil
+    ) -> ProxyHTTPResponse {
+        let accountKey = candidate.record.accountKey
+        let accountLabel = candidate.record.label
+        let store = self.store
+        let terminalTrace = StreamTerminalTraceCoordinator()
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            let keepaliveState = responseMode == .anthropicMessages ? AnthropicStreamKeepaliveState() : nil
+            let streamTask = Task {
+                var decoder = SSEIncrementalDecoder()
+                var chatStreamState = ChatStreamState()
+                var anthropicStreamState = AnthropicStreamState()
+                var anthropicMessagesTerminalState = AnthropicMessagesTerminalState()
+                var geminiStreamState = GeminiStreamState()
+                var responsesTerminalState = ResponsesStreamTerminalState()
+                var rawResponsesTerminalState = ResponsesStreamTerminalState()
+                var geminiTerminalState = GeminiStreamTerminalState()
+                var events: [SSEEvent] = []
+                func completedResponseFromEvents() -> [String: Any]? {
+                    ProxyTranscoder.extractCompletedResponse(from: events)
+                }
+                func usageFromCompletedEvents() -> UpstreamUsage {
+                    completedResponseFromEvents().map(ProxyTranscoder.usageFromCompletedResponse) ?? UpstreamUsage()
+                }
+
+                func yieldLines(_ lines: [String]) async {
+                    for line in lines {
+                        switch responseMode {
+                        case .responses:
+                            responsesTerminalState.observe(sseChunk: line)
+                        case .geminiGenerateContent:
+                            geminiTerminalState.observe(sseChunk: line)
+                        case .anthropicMessages:
+                            anthropicMessagesTerminalState.observe(sseChunk: line)
+                        case .chatCompletions:
+                            break
+                        }
+                        continuation.yield(Data(line.utf8))
+                        if let keepaliveState {
+                            await keepaliveState.noteDownstreamActivity()
+                        }
+                    }
+                }
+
+                func recordSuccess(
+                    usage: UpstreamUsage = usageFromCompletedEvents(),
+                    diagnostic: String? = nil
+                ) async {
+                    guard await terminalTrace.begin(.success) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: true,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            usage: usage,
+                            lastError: diagnostic.map { Helpers.truncate($0) },
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    try? self.noteCandidateAttemptSuccess(candidate)
+                }
+
+                func recordFailure(_ message: String) async {
+                    guard await terminalTrace.begin(.failure) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            reasoningEffort: reasoningEffort,
+                            success: false,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            failureCategory: .upstream,
+                            lastError: Helpers.truncate(message),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError(
+                        self.publicFacingCandidateFailureMessage(
+                            candidate: candidate,
+                            rawText: message
+                        )
+                    )
+                    try? self.noteCandidateAttemptFailure(candidate)
+                }
+
+                func observeRawResponseEvent(_ event: SSEEvent) async {
+                    let sawFailedBefore = rawResponsesTerminalState.sawFailed
+                    rawResponsesTerminalState.observe(event: event)
+                    guard responseMode == .responses else {
+                        return
+                    }
+                    guard rawResponsesTerminalState.sawCompleted == false,
+                          rawResponsesTerminalState.sawFailed,
+                          sawFailedBefore == false
+                    else {
+                        return
+                    }
+                    let message = self.responsesStreamFailureMessage(
+                        reportedError: rawResponsesTerminalState.errorMessage,
+                        hadFailedEvent: true
+                    )
+                    await recordFailure(message)
+                }
+
+                do {
+                    for try await chunk in upstreamBody {
+                        for event in decoder.append(chunk) {
+                            events.append(event)
+                            await observeRawResponseEvent(event)
+                            let lines = self.sseLines(
+                                for: event,
+                                responseMode: responseMode,
+                                chatStreamState: &chatStreamState,
+                                anthropicStreamState: &anthropicStreamState,
+                                geminiStreamState: &geminiStreamState,
+                                requestedModel: requestedModel,
+                                geminiRequestContext: geminiRequestContext
+                            )
+                            await yieldLines(lines)
+                        }
+                    }
+
+                    for event in decoder.finish() {
+                        events.append(event)
+                        await observeRawResponseEvent(event)
+                        let lines = self.sseLines(
+                            for: event,
+                            responseMode: responseMode,
+                            chatStreamState: &chatStreamState,
+                            anthropicStreamState: &anthropicStreamState,
+                            geminiStreamState: &geminiStreamState,
+                            requestedModel: requestedModel,
+                            geminiRequestContext: geminiRequestContext
+                        )
+                        await yieldLines(lines)
+                    }
+
+                    switch responseMode {
+                    case .responses:
+                        if responsesTerminalState.sawCompleted {
+                            await recordSuccess()
+                        } else {
+                            let message = self.responsesStreamFailureMessage(
+                                reportedError: rawResponsesTerminalState.errorMessage ?? responsesTerminalState.errorMessage,
+                                hadFailedEvent: rawResponsesTerminalState.sawFailed || responsesTerminalState.sawFailed
+                            )
+                            await recordFailure(message)
+                            if responsesTerminalState.sawFailed == false {
+                                let failureLines = self.responsesFailureChunks(
+                                    state: &responsesTerminalState,
+                                    requestedModel: requestedModel,
+                                    message: message
+                                )
+                                await yieldLines(failureLines)
+                            }
+                        }
+                        await keepaliveState?.finish()
+                        continuation.finish()
+                    case .geminiGenerateContent:
+                        if geminiTerminalState.sawFinishReason {
+                            await recordSuccess()
+                        } else {
+                            let upstreamError = geminiTerminalState.upstreamError
+                            let message = self.geminiStreamFailureMessage(
+                                reportedError: upstreamError?.summary ?? geminiTerminalState.errorMessage,
+                                hadErrorChunk: geminiTerminalState.sawError
+                            )
+                            await recordFailure(message)
+                            if geminiTerminalState.sawError == false {
+                                let failureChunk = upstreamError.map { self.geminiStreamErrorChunk(error: $0) }
+                                    ?? self.geminiStreamErrorChunk(message: message)
+                                await yieldLines([failureChunk])
+                            }
+                        }
+                        await keepaliveState?.finish()
+                        continuation.finish()
+                    case .chatCompletions, .anthropicMessages:
+                        let completedResponse = completedResponseFromEvents()
+                        let usage = completedResponse.map(ProxyTranscoder.usageFromCompletedResponse) ?? UpstreamUsage()
+                        let diagnostic = responseMode == .anthropicMessages
+                            ? self.anthropicMessagesSuccessDiagnostic(
+                                completedResponse: completedResponse,
+                                terminalState: anthropicMessagesTerminalState,
+                                clientSource: clientSource
+                            )
+                            : nil
+                        if rawResponsesTerminalState.sawCompleted == false && rawResponsesTerminalState.sawFailed {
+                            let message = self.responsesStreamFailureMessage(
+                                reportedError: rawResponsesTerminalState.errorMessage,
+                                hadFailedEvent: true
+                            )
+                            await recordFailure(message)
+                        } else {
+                            await recordSuccess(usage: usage, diagnostic: diagnostic)
+                        }
+                        await keepaliveState?.finish()
+                        continuation.finish()
+                    }
+                } catch is CancellationError {
+                    await keepaliveState?.finish()
+                    continuation.finish()
+                } catch {
+                    switch responseMode {
+                    case .responses:
+                        if responsesTerminalState.sawCompleted {
+                            await recordSuccess()
+                        } else {
+                            let message = self.responsesStreamFailureMessage(
+                                reportedError: rawResponsesTerminalState.errorMessage
+                                    ?? responsesTerminalState.errorMessage
+                                    ?? error.localizedDescription,
+                                hadFailedEvent: rawResponsesTerminalState.sawFailed || responsesTerminalState.sawFailed
+                            )
+                            await recordFailure(message)
+                            if responsesTerminalState.sawFailed == false {
+                                let failureLines = self.responsesFailureChunks(
+                                    state: &responsesTerminalState,
+                                    requestedModel: requestedModel,
+                                    message: message
+                                )
+                                await yieldLines(failureLines)
+                            }
+                        }
+                        await keepaliveState?.finish()
+                        continuation.finish()
+                    case .geminiGenerateContent:
+                        if geminiTerminalState.sawFinishReason {
+                            await recordSuccess()
+                        } else {
+                            let upstreamError = geminiTerminalState.upstreamError ?? (error as? GeminiUpstreamError)
+                            let message = self.geminiStreamFailureMessage(
+                                reportedError: upstreamError?.summary ?? geminiTerminalState.errorMessage ?? error.localizedDescription,
+                                hadErrorChunk: geminiTerminalState.sawError
+                            )
+                            await recordFailure(message)
+                            if geminiTerminalState.sawError == false {
+                                let failureChunk = upstreamError.map { self.geminiStreamErrorChunk(error: $0) }
+                                    ?? self.geminiStreamErrorChunk(message: message)
+                                await yieldLines([failureChunk])
+                            }
+                        }
+                        await keepaliveState?.finish()
+                        continuation.finish()
+                    case .anthropicMessages:
+                        let message = self.responsesStreamFailureMessage(
+                            reportedError: rawResponsesTerminalState.errorMessage ?? error.localizedDescription,
+                            hadFailedEvent: rawResponsesTerminalState.sawFailed
+                        )
+                        await recordFailure(message)
+                        await keepaliveState?.finish()
+                        continuation.yield(Data(AnthropicTranscoder.errorSSEChunk(message: error.localizedDescription).utf8))
+                        continuation.finish()
+                    case .chatCompletions:
+                        let message = self.responsesStreamFailureMessage(
+                            reportedError: rawResponsesTerminalState.errorMessage ?? error.localizedDescription,
+                            hadFailedEvent: rawResponsesTerminalState.sawFailed
+                        )
+                        await recordFailure(message)
+                        await keepaliveState?.finish()
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            let heartbeatTask: Task<Void, Never>? = if let keepaliveState {
+                Task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else {
+                            break
+                        }
+                        if await keepaliveState.shouldEmitPing(intervalMS: 2_000) {
+                            continuation.yield(Data(AnthropicTranscoder.pingSSEChunk().utf8))
+                        }
+                    }
+                }
+            } else {
+                nil
+            }
+            continuation.onTermination = { @Sendable termination in
+                if case .cancelled = termination {
+                    Task {
+                        guard await terminalTrace.begin(.cancelled) else {
+                            return
+                        }
+                        try? store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: apiKeyHash,
+                                accountKey: accountKey,
+                                accountLabel: accountLabel,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: actualModel,
+                                reasoningEffort: reasoningEffort,
+                                success: false,
+                                latencyMS: Helpers.nowMilliseconds() - startMS,
+                                failureCategory: .cancelled,
+                                lastError: Helpers.truncate(self.cancelledStreamFailureMessage()),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                    }
+                }
+                streamTask.cancel()
+                heartbeatTask?.cancel()
+                if let keepaliveState {
+                    Task {
+                        await keepaliveState.finish()
+                    }
+                }
+            }
+        }
+        return ProxyHTTPResponse(
+            statusCode: 200,
+            headers: ["content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache"],
+            body: .stream(stream)
+        )
+    }
+
+    private func makeGeminiPassthroughStreamingResponse(
+        upstreamBody: AsyncThrowingStream<Data, Error>,
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: String,
+        upstreamURL: String?,
+        apiKeyHash: String,
+        apiKeyValue: String,
+        clientSource: RequestLogClientSource,
+        requestedModel: String,
+        actualModel: String,
+        candidate: ProxyCandidate,
+        startMS: Int64,
+        promptCacheContext: PromptCacheContext
+    ) -> ProxyHTTPResponse {
+        let accountKey = candidate.record.accountKey
+        let accountLabel = candidate.record.label
+        let store = self.store
+        let contentType = headers["content-type"] ?? "text/event-stream; charset=utf-8"
+        let terminalTrace = StreamTerminalTraceCoordinator()
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            let task = Task {
+                var decoder = SSEIncrementalDecoder()
+                var terminalState = GeminiStreamTerminalState()
+                var usage = UpstreamUsage()
+
+                func emit(_ payload: [String: Any]) async {
+                    let chunk = self.geminiSSEData(payload)
+                    continuation.yield(Data(chunk.utf8))
+                    let sawErrorBefore = terminalState.sawError
+                    terminalState.observe(sseChunk: chunk)
+                    if let updatedUsage = self.geminiUsageIfPresent(from: payload)
+                    {
+                        usage = updatedUsage
+                    }
+                    guard terminalState.sawFinishReason == false,
+                          terminalState.sawError,
+                          sawErrorBefore == false
+                    else {
+                        return
+                    }
+                    let message = self.geminiStreamFailureMessage(
+                        reportedError: terminalState.upstreamError?.summary ?? terminalState.errorMessage,
+                        hadErrorChunk: true
+                    )
+                    await recordFailure(message)
+                }
+
+                func recordSuccess() async {
+                    guard await terminalTrace.begin(.success) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            success: true,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            usage: usage,
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    try? self.noteCandidateAttemptSuccess(candidate)
+                    await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                }
+
+                func recordFailure(_ message: String) async {
+                    guard await terminalTrace.begin(.failure) else {
+                        return
+                    }
+                    try? store.recordTrace(
+                        ProxyRequestTrace(
+                            endpoint: endpoint,
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: apiKeyHash,
+                            accountKey: accountKey,
+                            accountLabel: accountLabel,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            success: false,
+                            latencyMS: Helpers.nowMilliseconds() - startMS,
+                            failureCategory: .upstream,
+                            lastError: Helpers.truncate(message),
+                            apiKeyValue: apiKeyValue
+                        )
+                    )
+                    await self.setLastError(
+                        self.publicFacingCandidateFailureMessage(
+                            candidate: candidate,
+                            rawText: message
+                        )
+                    )
+                    try? self.noteCandidateAttemptFailure(candidate)
+                }
+
+                do {
+                    for try await chunk in upstreamBody {
+                        for event in decoder.append(chunk) {
+                            for payload in self.geminiForwardedSSEPayloads(from: event) {
+                                await emit(payload)
+                            }
+                        }
+                    }
+                    for event in decoder.finish() {
+                        for payload in self.geminiForwardedSSEPayloads(from: event) {
+                            await emit(payload)
+                        }
+                    }
+
+                    if terminalState.sawFinishReason {
+                        await recordSuccess()
+                    } else {
+                        let upstreamError = terminalState.upstreamError
+                        let message = self.geminiStreamFailureMessage(
+                            reportedError: upstreamError?.summary ?? terminalState.errorMessage,
+                            hadErrorChunk: terminalState.sawError
+                        )
+                        await recordFailure(message)
+                        if terminalState.sawError == false {
+                            let failureChunk = upstreamError.map { self.geminiStreamErrorChunk(error: $0) }
+                                ?? self.geminiStreamErrorChunk(message: message)
+                            continuation.yield(Data(failureChunk.utf8))
+                        }
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    if terminalState.sawFinishReason {
+                        await recordSuccess()
+                    } else {
+                        let upstreamError = terminalState.upstreamError ?? (error as? GeminiUpstreamError)
+                        let message = self.geminiStreamFailureMessage(
+                            reportedError: upstreamError?.summary ?? terminalState.errorMessage ?? error.localizedDescription,
+                            hadErrorChunk: terminalState.sawError
+                        )
+                        await recordFailure(message)
+                        if terminalState.sawError == false {
+                            let failureChunk = upstreamError.map { self.geminiStreamErrorChunk(error: $0) }
+                                ?? self.geminiStreamErrorChunk(message: message)
+                            continuation.yield(Data(failureChunk.utf8))
+                        }
+                    }
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { @Sendable termination in
+                if case .cancelled = termination {
+                    Task {
+                        guard await terminalTrace.begin(.cancelled) else {
+                            return
+                        }
+                        try? store.recordTrace(
+                            ProxyRequestTrace(
+                                endpoint: endpoint,
+                                upstreamURL: upstreamURL,
+                                apiKeyHash: apiKeyHash,
+                                accountKey: accountKey,
+                                accountLabel: accountLabel,
+                                clientSource: clientSource,
+                                model: requestedModel,
+                                actualModel: actualModel,
+                                success: false,
+                                latencyMS: Helpers.nowMilliseconds() - startMS,
+                                failureCategory: .cancelled,
+                                lastError: Helpers.truncate(self.cancelledStreamFailureMessage()),
+                                apiKeyValue: apiKeyValue
+                            )
+                        )
+                    }
+                }
+                task.cancel()
+            }
+        }
+        return ProxyHTTPResponse(
+            statusCode: statusCode,
+            headers: [
+                "content-type": contentType,
+                "cache-control": headers["cache-control"] ?? "no-cache",
+            ],
+            body: .stream(stream)
+        )
+    }
+
+    private func geminiUsage(from object: [String: Any]) -> UpstreamUsage {
+        self.geminiUsageIfPresent(from: object) ?? UpstreamUsage()
+    }
+
+    private func geminiUsageIfPresent(from object: [String: Any]) -> UpstreamUsage? {
+        if let response = object["response"] as? [String: Any] {
+            return self.geminiUsageIfPresent(from: response)
+        }
+        if let metadata = object["usageMetadata"] as? [String: Any]
+            ?? object["usage_metadata"] as? [String: Any]
+        {
+            let inputTokens = self.int64Value(metadata["promptTokenCount"] ?? metadata["prompt_token_count"]) ?? 0
+            let outputTokens = self.int64Value(metadata["candidatesTokenCount"] ?? metadata["candidates_token_count"]) ?? 0
+            let totalTokens = self.int64Value(metadata["totalTokenCount"] ?? metadata["total_token_count"])
+                ?? (inputTokens + outputTokens)
+            let cacheHitTokens = self.int64Value(metadata["cachedContentTokenCount"] ?? metadata["cached_content_token_count"])
+            return UpstreamUsage(
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                totalTokens: totalTokens,
+                cacheHitTokens: cacheHitTokens
+            )
+        }
+        if let totalTokens = self.int64Value(object["totalTokens"] ?? object["total_tokens"]) {
+            return UpstreamUsage(
+                inputTokens: totalTokens,
+                outputTokens: 0,
+                totalTokens: totalTokens,
+                cacheHitTokens: self.int64Value(object["cachedContentTokenCount"] ?? object["cached_content_token_count"])
+            )
+        }
+        return nil
+    }
+
+    private func geminiForwardedSSEPayloads(from event: SSEEvent) -> [[String: Any]] {
+        guard let object = ProxyTranscoder.jsonObject(from: event) else {
+            return []
+        }
+        if let response = object["response"] as? [String: Any] {
+            return response.isEmpty ? [] : [response]
+        }
+        return [object]
+    }
+
+    private func geminiSSEData(_ payload: [String: Any]) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data("{}".utf8)
+        return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+    }
+
+    private func openAICompatibleMissingUsageDiagnostic(adapter: OpenAIUpstreamAdapter) -> String {
+        "OpenAI-compatible upstream \(adapter.diagnosticLabel) response completed without recognizable usage fields; request tokens were recorded as 0."
+    }
+
+    private func isProxyTestConsoleRequest(headers: [String: String]) -> Bool {
+        let marker = headers[ProxyHeaderName.proxyTestConsole]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return marker.isEmpty == false
+    }
+
+    private func anthropicMessagesPrematureEndDiagnostic(clientSource: RequestLogClientSource) -> String {
+        let clientLabel = clientSource == .claudeCode ? "Claude Code" : "The Anthropic-compatible client"
+        return "Upstream stream ended before `response.completed` produced a terminal Anthropic `message_stop`; request tokens were recorded as 0 and \(clientLabel) may appear to stop early."
+    }
+
+    private func anthropicMessagesMissingUsageDiagnostic() -> String {
+        "OpenAI-compatible upstream completed the Claude-compatible stream without recognizable usage fields; request tokens were recorded as 0."
+    }
+
+    private func anthropicMessagesSuccessDiagnostic(
+        completedResponse: [String: Any]?,
+        terminalState: AnthropicMessagesTerminalState,
+        clientSource: RequestLogClientSource
+    ) -> String? {
+        guard terminalState.sawMessageStop else {
+            return self.anthropicMessagesPrematureEndDiagnostic(clientSource: clientSource)
+        }
+        guard let completedResponse else {
+            return self.anthropicMessagesPrematureEndDiagnostic(clientSource: clientSource)
+        }
+        guard ProxyTranscoder.hasRecognizableUsage(in: completedResponse) == false else {
+            return nil
+        }
+        return self.anthropicMessagesMissingUsageDiagnostic()
+    }
+
+    private func responsesFailureChunks(
+        state: inout ResponsesStreamTerminalState,
+        requestedModel: String,
+        message: String
+    ) -> [String] {
+        let identity = state.ensureSyntheticIdentity()
+        var chunks: [String] = []
+        if state.sawCreated == false {
+            chunks.append(
+                ProxyTranscoder.responseCreatedSSEChunk(
+                    responseID: identity.responseID,
+                    createdAt: identity.createdAt,
+                    requestedModel: requestedModel
+                )
+            )
+        }
+        chunks.append(
+            ProxyTranscoder.responseFailedSSEChunk(
+                responseID: identity.responseID,
+                createdAt: identity.createdAt,
+                requestedModel: requestedModel,
+                message: message
+            )
+        )
+        return chunks
+    }
+
+    private func responsesStreamFailureMessage(
+        reportedError: String?,
+        hadFailedEvent: Bool
+    ) -> String {
+        let base = hadFailedEvent
+            ? "Upstream stream returned response.failed."
+            : "Upstream stream terminated before response.completed was received."
+        return self.normalizedStreamFailureMessage(
+            base: base,
+            reportedError: reportedError,
+            endReason: self.streamEndReason(
+                reportedError: reportedError,
+                protocolFailed: hadFailedEvent
+            )
+        )
+    }
+
+    private func geminiStreamFailureMessage(
+        reportedError: String?,
+        hadErrorChunk: Bool
+    ) -> String {
+        let endReason = self.streamEndReason(
+            reportedError: reportedError,
+            protocolFailed: hadErrorChunk
+        )
+        if let rawCause = self.normalizedStreamRawCause(reportedError),
+           rawCause.localizedCaseInsensitiveContains("Gemini upstream error")
+        {
+            return "\(rawCause). Stream end reason: \(endReason.rawValue)."
+        }
+
+        let base = hadErrorChunk
+            ? "Upstream Gemini stream returned an error chunk before a final finishReason was received."
+            : "Upstream Gemini stream terminated before a final finishReason was received."
+        return self.normalizedStreamFailureMessage(
+            base: base,
+            reportedError: reportedError,
+            endReason: endReason
+        )
+    }
+
+    private func normalizedStreamFailureMessage(
+        base: String,
+        reportedError: String?,
+        endReason: StreamEndReason
+    ) -> String {
+        var message = "\(base) Stream end reason: \(endReason.rawValue)."
+        guard let rawCause = self.normalizedStreamRawCause(reportedError) else {
+            return message
+        }
+        guard rawCause.caseInsensitiveCompare(base) != .orderedSame else {
+            return message
+        }
+        message += " Raw upstream error: \(rawCause)"
+        return message
+    }
+
+    private func streamEndReason(
+        reportedError: String?,
+        protocolFailed: Bool
+    ) -> StreamEndReason {
+        if protocolFailed {
+            return .protocolFailed
+        }
+
+        let trimmed = reportedError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.isEmpty == false else {
+            return .prematureEOF
+        }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("cancel") {
+            return .clientCancelled
+        }
+        if lower.contains("broken pipe") || lower.contains("writer") {
+            return .writerError
+        }
+        if lower.contains("premature eof") || lower.contains("httpparsererror") {
+            return .prematureEOF
+        }
+        return .scannerError
+    }
+
+    private func normalizedStreamRawCause(_ reportedError: String?) -> String? {
+        let trimmed = reportedError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let lower = trimmed.lowercased()
+        if lower == "terminated" {
+            return "terminated"
+        }
+        if lower.contains("premature eof") || lower.contains("httpparsererror") {
+            return "premature EOF"
+        }
+        if lower.contains("connection reset by peer") {
+            return "connection reset by peer"
+        }
+        return Helpers.truncate(trimmed)
+    }
+
+    private func cancelledStreamFailureMessage() -> String {
+        "Downstream client cancelled the streaming request. Stream end reason: \(StreamEndReason.clientCancelled.rawValue)."
+    }
+
+    private func geminiStreamErrorChunk(error: GeminiUpstreamError) -> String {
+        let data = error.responseData
+        return "data: \(String(decoding: data, as: UTF8.self))\n\n"
+    }
+
+    private func geminiStreamErrorChunk(message: String) -> String {
+        let lower = message.lowercased()
+        let metadata: (status: Int, statusText: String)
+        if HTTPErrorClassifier.containsAuthSignal(message) || lower.contains("missing proxy api key") {
+            metadata = (401, "UNAUTHENTICATED")
+        } else if HTTPErrorClassifier.containsRateLimitSignal(message) {
+            metadata = (429, "RESOURCE_EXHAUSTED")
+        } else if HTTPErrorClassifier.containsQuotaSignal(message) || lower.contains("unsupported_country_region_territory") {
+            metadata = (403, "PERMISSION_DENIED")
+        } else if lower.contains("unsupported gemini")
+            || lower.contains("missing `")
+            || lower.contains("$.")
+            || lower.contains("gemini request")
+            || lower.contains("candidatecount")
+        {
+            metadata = (400, "INVALID_ARGUMENT")
+        } else {
+            metadata = (500, "INTERNAL")
+        }
+
+        return GeminiTranscoder.errorSSEChunk(
+            status: metadata.status,
+            message: message,
+            statusText: metadata.statusText
+        )
+    }
+
+    private func sseLines(
+        for event: SSEEvent,
+        responseMode: ResponseMode,
+        chatStreamState: inout ChatStreamState,
+        anthropicStreamState: inout AnthropicStreamState,
+        geminiStreamState: inout GeminiStreamState,
+        requestedModel: String,
+        geminiRequestContext: GeminiRequestContext?
+    ) -> [String] {
+        switch responseMode {
+        case .chatCompletions:
+            return ProxyTranscoder.chatCompletionSSEChunks(from: event, streamState: &chatStreamState, requestedModel: requestedModel)
+        case .responses:
+            return ProxyTranscoder.responsesSSEChunks(from: event)
+        case .anthropicMessages:
+            if anthropicStreamState.messageID.isEmpty {
+                anthropicStreamState.messageID = "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            }
+            return AnthropicTranscoder.messagesSSEChunks(
+                from: event,
+                streamState: &anthropicStreamState,
+                requestedModel: requestedModel
+            )
+        case .geminiGenerateContent:
+            return GeminiTranscoder.streamGenerateContentSSEChunks(
+                from: event,
+                state: &geminiStreamState,
+                requestedModel: requestedModel,
+                context: geminiRequestContext ?? .default(sourceModel: requestedModel)
+            )
+        }
+    }
+
+    private func setActive(_ candidate: ProxyCandidate) async {
+        await self.runtimeState.setActive(accountKey: candidate.record.accountKey, accountID: candidate.record.accountID, label: candidate.record.label)
+    }
+
+    private func setLastError(_ error: String?) async {
+        await self.runtimeState.setLastError(error)
+    }
+
+    private func logOAuthEvent(_ message: String) {
+        print("[oauth] \(message)")
+    }
+
+    private func configWithDefaultProxyAPIKeys(_ config: AppConfig) throws -> AppConfig {
+        guard config.proxyAPIKeys.isEmpty else {
+            return config
+        }
+
+        let trimmedLegacyProxyKey = config.proxyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seedKey = trimmedLegacyProxyKey.isEmpty
+            ? try self.secretStore.proxyAPIKey()
+            : config.proxyAPIKey
+        var copy = config
+        copy.proxyAPIKeys = [
+            ProxyAPIKeyRecord(
+                label: AppConfig.defaultProxyAPIKeyLabel,
+                key: seedKey,
+                dataSource: trimmedLegacyProxyKey.isEmpty ? .all : .openAI,
+                enabled: true
+            ),
+        ]
+        copy.primaryProxyAPIKeyID = copy.proxyAPIKeys.first?.id
+        copy.proxyAPIKey = seedKey
+        return copy
+    }
+
+    private func configWithManagedProxySummary(_ config: AppConfig) throws -> AppConfig {
+        var copy = config
+        let subscriptionConfigured = try self.secretStore.mihomoSubscriptionURL() != nil
+        copy.managedProxySummary = ManagedProxyConfigSummary(
+            subscriptionConfigured: subscriptionConfigured,
+            selectedNodeName: copy.managedProxySummary.selectedNodeName,
+            providerName: copy.managedProxySummary.providerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? ManagedProxyConfigSummary.defaultProviderName
+                : copy.managedProxySummary.providerName,
+            autoUpdateIntervalHours: max(1, copy.managedProxySummary.autoUpdateIntervalHours),
+            healthcheckURL: ManagedProxyConfigSummary.sanitizedHealthcheckURL(copy.managedProxySummary.healthcheckURL)
+        )
+        return copy
+    }
+
+    @discardableResult
+    private func ensureAnthropicAccessProxyKeyIfNeeded() throws -> Bool {
+        let accounts = try self.store.listAccountRecords()
+        guard accounts.contains(where: { $0.enabled && $0.providerFamily == .anthropic }) else {
+            return false
+        }
+
+        let config = try self.configWithDefaultProxyAPIKeys(try self.store.loadConfig()).normalizedModelRoutingConfig()
+        let matchingSources: Set<ProxyDataSource> = [.anthropic, .all]
+        let hasEnabledMatchingKey = config.proxyAPIKeys.contains { record in
+            record.enabled && matchingSources.contains(record.dataSource)
+        }
+        guard hasEnabledMatchingKey == false else {
+            return false
+        }
+
+        // If the user already has Anthropic-capable keys but disabled them, preserve that intent.
+        let hasConfiguredMatchingKey = config.proxyAPIKeys.contains { record in
+            matchingSources.contains(record.dataSource)
+        }
+        guard hasConfiguredMatchingKey == false else {
+            return false
+        }
+
+        var updated = config
+        updated.proxyAPIKeys.append(
+            ProxyAPIKeyRecord(
+                label: AppConfig.defaultAnthropicAccessProxyAPIKeyLabel,
+                key: self.generatedUniqueProxyAPIKey(existingKeys: Set(updated.proxyAPIKeys.map(\.key))),
+                dataSource: .anthropic,
+                enabled: true
+            )
+        )
+        try self.store.saveConfig(updated.normalizedModelRoutingConfig())
+        return true
+    }
+
+    private func generatedUniqueProxyAPIKey(existingKeys: Set<String>) -> String {
+        var candidate = AppConfig.generatedProxyAPIKey()
+        while existingKeys.contains(candidate) {
+            candidate = AppConfig.generatedProxyAPIKey()
+        }
+        return candidate
+    }
+
+    private func loadConfigForNetworkRequests() async throws -> AppConfig {
+        try await self.withNetworkConfig { $0 }
+    }
+
+    private func withNetworkConfig<T: Sendable>(
+        for accountRecord: AccountRecord? = nil,
+        operation: @escaping (AppConfig) async throws -> T
+    ) async throws -> T {
+        do {
+            let config = try await self.loadConfig()
+            if let accountRecord,
+               let preferredNodeName = AccountSummary.normalizedManagedProxyNodeName(accountRecord.managedProxyNodeName)
+            {
+                guard let managedProxyRuntime else {
+                    throw ProxyError.message(
+                        self.accountManagedProxyNodeResolutionFailureMessage(
+                            label: accountRecord.label,
+                            nodeName: preferredNodeName,
+                            detail: "订阅代理不可用：请先启动本地服务。"
+                        )
+                    )
+                }
+
+                let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+                var requestConfig = config
+                do {
+                    requestConfig.outboundProxy = try await managedProxyRuntime.effectiveProxySettingsForAccountNode(
+                        name: preferredNodeName,
+                        config: requestConfig,
+                        subscriptionURL: subscriptionURL
+                    )
+                } catch let error as ManagedProxyAccountNodeResolutionError {
+                    switch error {
+                    case .nodeUnavailable(let nodeName):
+                        throw ProxyError.message(
+                            self.accountManagedProxyNodeUnavailableMessage(
+                                label: accountRecord.label,
+                                nodeName: nodeName
+                            )
+                        )
+                    case .listenerUnavailable(let nodeName):
+                        throw ProxyError.message(
+                            self.accountManagedProxyNodeListenerUnavailableMessage(
+                                label: accountRecord.label,
+                                nodeName: nodeName
+                            )
+                        )
+                    }
+                } catch {
+                    throw ProxyError.message(
+                        self.accountManagedProxyNodeResolutionFailureMessage(
+                            label: accountRecord.label,
+                            nodeName: preferredNodeName,
+                            detail: error.localizedDescription
+                        )
+                    )
+                }
+                return try await operation(requestConfig)
+            }
+
+            switch config.outboundProxyMode {
+            case .disabled:
+                var directConfig = config
+                directConfig.outboundProxy = .init()
+                return try await operation(directConfig)
+            case .manual:
+                return try await operation(config)
+            case .subscription:
+                guard let managedProxyRuntime else {
+                    throw ProxyError.message("订阅代理不可用：请先启动本地服务。")
+                }
+                let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+                var requestConfig = config
+                requestConfig.outboundProxy = try await managedProxyRuntime.effectiveProxySettings(
+                    config: requestConfig,
+                    subscriptionURL: subscriptionURL
+                )
+                return try await operation(requestConfig)
+            }
+        } catch {
+            await self.setLastError(error.localizedDescription)
+            throw error
+        }
+    }
+
+    private func withManagedProxyNodeCoordinator<T: Sendable>(
+        _ operation: @escaping () async throws -> T
+    ) async throws -> T {
+        await self.managedProxyNodeCoordinator.acquire()
+        do {
+            let result = try await operation()
+            await self.managedProxyNodeCoordinator.release()
+            return result
+        } catch {
+            await self.managedProxyNodeCoordinator.release()
+            throw error
+        }
+    }
+
+    private func validateManagedProxyNodeSelection(_ nodeName: String) async throws {
+        let snapshot = try await self.managedProxySnapshot()
+        guard snapshot.nodes.contains(where: { $0.name == nodeName }) else {
+            throw ProxyError.message("未找到要绑定的订阅节点：\(nodeName)")
+        }
+    }
+
+    private func accountManagedProxyNodeUnavailableMessage(label: String, nodeName: String) -> String {
+        "\(label)：自定义的出站节点当前不可用：\(nodeName)"
+    }
+
+    private func accountManagedProxyNodeListenerUnavailableMessage(label: String, nodeName: String) -> String {
+        "\(label)：自定义的出站节点监听端口不可用：\(nodeName)"
+    }
+
+    private func accountManagedProxyNodeResolutionFailureMessage(
+        label: String,
+        nodeName: String,
+        detail: String
+    ) -> String {
+        "\(label)：自定义的出站节点 \(nodeName) 当前无法生效，\(detail)"
+    }
+
+    private func syncManagedProxyRuntime(for config: AppConfig) async throws {
+        guard let managedProxyRuntime, self.manageManagedProxyRuntime else {
+            return
+        }
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        let nodeNames = try self.enabledManagedProxyAccountNodeNames()
+        try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.reconcileAccountNodeListeners(
+                nodeNames: nodeNames,
+                config: config,
+                subscriptionURL: subscriptionURL
+            )
+        }
+    }
+
+    private func reconcileManagedProxyAccountNodeListeners(config: AppConfig? = nil) async throws {
+        guard let managedProxyRuntime, self.manageManagedProxyRuntime else {
+            return
+        }
+        let resolvedConfig: AppConfig
+        if let config {
+            resolvedConfig = config
+        } else {
+            resolvedConfig = try await self.loadConfig()
+        }
+        let nodeNames = try self.enabledManagedProxyAccountNodeNames()
+        let subscriptionURL = try self.secretStore.mihomoSubscriptionURL()
+        try await self.withManagedProxyNodeCoordinator {
+            try await managedProxyRuntime.reconcileAccountNodeListeners(
+                nodeNames: nodeNames,
+                config: resolvedConfig,
+                subscriptionURL: subscriptionURL
+            )
+        }
+    }
+
+    private func enabledManagedProxyAccountNodeNames() throws -> [String] {
+        let accounts = try self.store.listAccountRecords()
+        var seen = Set<String>()
+        return accounts.compactMap { record in
+            guard record.enabled,
+                  let nodeName = AccountSummary.normalizedManagedProxyNodeName(record.managedProxyNodeName),
+                  seen.insert(nodeName).inserted else {
+                return nil
+            }
+            return nodeName
+        }
+        .sorted { lhs, rhs in
+            lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+    }
+
+    private func importBootstrapAccountsIfNeeded(config: AppConfig) async throws {
+        let bootstrapURL = Paths.bootstrapAccountsURL(in: self.dataDirectory)
+        guard FileManager.default.fileExists(atPath: bootstrapURL.path) else { return }
+        let content = try String(contentsOf: bootstrapURL, encoding: .utf8)
+        _ = try await self.accountService.importAuthJSONAccounts(items: [.init(source: bootstrapURL.lastPathComponent, content: content)], config: config)
+        try self.ensureAnthropicAccessProxyKeyIfNeeded()
+        try? FileManager.default.removeItem(at: bootstrapURL)
+    }
+
+    private func importBootstrapSettingsIfNeeded() async throws {
+        let bootstrapURL = Paths.bootstrapSettingsURL(in: self.dataDirectory)
+        guard FileManager.default.fileExists(atPath: bootstrapURL.path) else { return }
+        let data = try Data(contentsOf: bootstrapURL)
+        let config = try Helpers.readJSON(AppConfig.self, from: data)
+        try self.store.saveConfig(config.normalizedModelRoutingConfig())
+        try? FileManager.default.removeItem(at: bootstrapURL)
+    }
+
+    private func persistConfigSecretMirrors(for config: AppConfig) throws {
+        let adminToken = config.adminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !adminToken.isEmpty {
+            try self.secretStore.persistMirroredAdminToken(adminToken)
+        }
+
+        let primaryProxyKey = (config.primaryProxyAPIKeyRecord?.key ?? config.proxyAPIKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !primaryProxyKey.isEmpty {
+            try self.secretStore.persistMirroredProxyAPIKey(primaryProxyKey)
+        }
+    }
+
+    private enum ResponseMode {
+        case chatCompletions
+        case responses
+        case anthropicMessages
+        case geminiGenerateContent
+    }
+
+    private struct ProxyCandidate: Sendable {
+        var record: AccountRecord
+        var auth: ExtractedAuth
+    }
+
+    private func refreshedCandidateAuthIfNeeded(_ candidate: ProxyCandidate) async throws -> ProxyCandidate {
+        try await self.withNetworkConfig(for: candidate.record) { config in
+            var refreshedCandidate = candidate
+            try await self.refreshCandidateAuthIfNeeded(&refreshedCandidate, config: config)
+            return refreshedCandidate
+        }
+    }
+
+    private func refreshCandidateAuthIfNeeded(
+        _ candidate: inout ProxyCandidate,
+        config: AppConfig
+    ) async throws {
+        guard AuthService.authNeedsRefresh(candidate.record.authJSON, secretStore: self.secretStore) else {
+            return
+        }
+        guard !candidate.record.authRefreshBlocked else {
+            return
+        }
+
+        let refreshed = try await AuthService.refreshAuth(
+            candidate.record.authJSON,
+            config: config,
+            secretStore: self.secretStore
+        )
+        candidate.record.authJSON = refreshed
+        try self.store.updateUsage(
+            accountKey: candidate.record.accountKey,
+            usage: candidate.record.usage,
+            usageError: candidate.record.usageError,
+            planType: candidate.record.effectivePlanType,
+            authJSON: refreshed,
+            usageWindowsVisible: nil,
+            authRefreshBlocked: false,
+            authRefreshError: nil
+        )
+        candidate.auth = try AuthService.extractAuth(from: refreshed, secretStore: self.secretStore)
+    }
+
+    private func completedResponse(from data: Data) -> [String: Any]? {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["output"] != nil
+        {
+            return object
+        }
+        let events = ProxyTranscoder.decodeSSE(data)
+        return ProxyTranscoder.extractCompletedResponse(from: events)
+    }
+
+    private func anthropicResponseHeaders(
+        version: String,
+        beta: String?,
+        contentType: String
+    ) -> [String: String] {
+        var headers: [String: String] = [
+            "content-type": contentType,
+            "anthropic-version": version,
+        ]
+        if let beta, !beta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers["anthropic-beta"] = beta
+        }
+        return headers
+    }
+
+    private static func anthropicBaseURL(from publicBaseURL: String) -> String {
+        guard let url = URL(string: publicBaseURL),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else {
+            return publicBaseURL.replacingOccurrences(of: "/v1", with: "")
+        }
+
+        if components.path.hasPrefix("/v1") {
+            components.path = String(components.path.dropFirst(3))
+        }
+        return components.string ?? publicBaseURL.replacingOccurrences(of: "/v1", with: "")
+    }
+
+    private static func geminiBaseURL(from publicBaseURL: String) -> String {
+        self.anthropicBaseURL(from: publicBaseURL)
+    }
+}

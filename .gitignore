@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+DerivedData/
+ThirdParty/mihomo/linux-*/
+ThirdParty/mihomo/**/.mihomo-cache
+Artifacts/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+Dist/
+ThirdParty/

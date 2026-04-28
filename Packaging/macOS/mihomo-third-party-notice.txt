@@ -1,0 +1,10 @@
+This app bundles mihomo v1.19.23 from MetaCubeX.
+
+Upstream project:
+https://github.com/MetaCubeX/mihomo
+
+License:
+MIT
+
+Reference:
+https://github.com/MetaCubeX/mihomo/blob/v1.19.23/LICENSE

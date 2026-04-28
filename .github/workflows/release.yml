@@ -1,0 +1,41 @@
+name: Build Release Artifacts
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Swiftly
+        shell: bash
+        run: |
+          curl -L --fail --silent --show-error https://download.swift.org/swiftly/darwin/swiftly.pkg -o swiftly.pkg
+          installer -pkg swiftly.pkg -target CurrentUserHomeDirectory
+          ~/.swiftly/bin/swiftly init --quiet-shell-followup
+          echo "SWIFTLY_HOME_DIR=$HOME/.swiftly" >> "$GITHUB_ENV"
+          echo "$HOME/.swiftly/bin" >> "$GITHUB_PATH"
+      - name: Build release zips and bundled Linux deployment packages
+        shell: bash
+        run: |
+          . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
+          hash -r
+          ~/.swiftly/bin/swiftly install --use 6.3.1
+          ./Scripts/package-release.sh
+          ./Scripts/build-linux-artifacts.sh "$GITHUB_WORKSPACE/Artifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-zips
+          path: Dist/remote-capable/AICodingProxy-macos-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: Artifacts/linux-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: Artifacts/linux-arm64
