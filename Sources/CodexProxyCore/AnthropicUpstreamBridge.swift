@@ -324,11 +324,22 @@ public enum AnthropicUpstreamBridge {
         case "message_delta":
             if json["usage"] != nil {
                 let usage = ProxyTranscoder.usageFromAnthropicUsage(json["usage"])
+                let updatedInputFromUsage = state.inputTokens == 0 && usage.inputTokens > 0
+                if state.inputTokens == 0, usage.inputTokens > 0 {
+                    state.inputTokens = usage.inputTokens
+                }
                 state.outputTokens = usage.outputTokens
+                let previousCacheReadTokens = state.cacheReadTokens ?? 0
                 state.cacheReadTokens = self.mergedCacheReadTokens(
                     current: state.cacheReadTokens,
                     next: usage.cacheHitTokens
                 )
+                if let cacheReadTokens = state.cacheReadTokens,
+                   cacheReadTokens > previousCacheReadTokens,
+                   updatedInputFromUsage == false
+                {
+                    state.inputTokens += cacheReadTokens - previousCacheReadTokens
+                }
             }
             return []
 

@@ -390,17 +390,18 @@ extension DesktopAppModel {
     }
 
     func setRequestLogsSortField(_ value: RequestLogSortField) {
-        self.requestLogsDraftFilterState.sortBy = value
+        self.applyRequestLogsSort(sortBy: value)
     }
 
     func setRequestLogsSortDirection(_ value: RequestLogSortDirection) {
-        self.requestLogsDraftFilterState.sortDirection = value
+        self.applyRequestLogsSort(sortDirection: value)
     }
 
     func toggleRequestLogsSortDirection() {
-        self.requestLogsDraftFilterState.sortDirection = self.requestLogsDraftFilterState.sortDirection == .ascending
+        let direction: RequestLogSortDirection = self.requestLogsDraftFilterState.sortDirection == .ascending
             ? .descending
             : .ascending
+        self.applyRequestLogsSort(sortDirection: direction)
     }
 
     func previousRequestLogsPage() {
@@ -412,6 +413,30 @@ extension DesktopAppModel {
     func nextRequestLogsPage() {
         guard self.requestLogsHasMorePages else { return }
         self.requestLogsAppliedFilterState.page += 1
+        self.scheduleRequestLogsRefresh()
+    }
+
+    private func applyRequestLogsSort(
+        sortBy: RequestLogSortField? = nil,
+        sortDirection: RequestLogSortDirection? = nil
+    ) {
+        let nextSortBy = sortBy ?? self.requestLogsDraftFilterState.sortBy
+        let nextSortDirection = sortDirection ?? self.requestLogsDraftFilterState.sortDirection
+        guard
+            self.requestLogsDraftFilterState.sortBy != nextSortBy
+                || self.requestLogsAppliedFilterState.sortBy != nextSortBy
+                || self.requestLogsDraftFilterState.sortDirection != nextSortDirection
+                || self.requestLogsAppliedFilterState.sortDirection != nextSortDirection
+        else {
+            return
+        }
+
+        self.requestLogsDraftFilterState.sortBy = nextSortBy
+        self.requestLogsDraftFilterState.sortDirection = nextSortDirection
+        self.requestLogsDraftFilterState.page = 1
+        self.requestLogsAppliedFilterState.sortBy = nextSortBy
+        self.requestLogsAppliedFilterState.sortDirection = nextSortDirection
+        self.requestLogsAppliedFilterState.page = 1
         self.scheduleRequestLogsRefresh()
     }
 

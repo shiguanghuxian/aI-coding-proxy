@@ -328,6 +328,7 @@ final class DesktopAppModel: ObservableObject {
             self.syncAccountPoolDetailDrawerContext()
         }
     }
+    @Published private(set) var systemColorScheme: ColorScheme = .light
     @Published var stats = AdminStatsSummary(
         totalRequests: 0,
         totalFailures: 0,
@@ -524,6 +525,7 @@ final class DesktopAppModel: ObservableObject {
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.preferences = preferencesStore.load()
+        self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
         let initialRequestLogsFilterState = RequestLogFilterState.defaultState()
         self.requestLogsDraftFilterState = initialRequestLogsFilterState
         self.requestLogsAppliedFilterState = initialRequestLogsFilterState
@@ -532,6 +534,17 @@ final class DesktopAppModel: ObservableObject {
 
     var localization: LocalizationStore {
         LocalizationStore(mode: self.preferences.languageMode)
+    }
+
+    var resolvedPreferredColorScheme: ColorScheme {
+        switch self.preferences.themeMode {
+        case .system:
+            return self.systemColorScheme
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
     }
 
     var savedRemoteHosts: [RemoteHostConfig] {
@@ -3886,11 +3899,18 @@ final class DesktopAppModel: ObservableObject {
         let previousPreferences = self.preferences
         var preferences = previousPreferences
         mutate(&preferences)
+        if previousPreferences.themeMode != preferences.themeMode, preferences.themeMode == .system {
+            self.refreshSystemColorScheme()
+        }
         self.preferences = preferences
         if previousPreferences.themeMode != preferences.themeMode {
             AppearanceStore.applyAppAppearance(for: preferences.themeMode)
         }
         self.persistPreferences(showSuccessNotice: showSuccessNotice)
+        self.refreshThemeSensitiveWindows()
+    }
+
+    func refreshThemeSensitiveWindows() {
         self.aboutWindowController?.refreshWindow()
         self.helpWindowController?.refreshWindow()
         self.onboardingWindowController?.refreshWindow()
@@ -3899,6 +3919,14 @@ final class DesktopAppModel: ObservableObject {
         self.clientConfigManagerWindowController?.refreshWindow()
         self.requestLogsWindowController?.refreshWindow()
         self.remoteAdminWindowControllers.values.forEach { $0.refreshWindow(preferences: self.preferences) }
+    }
+
+    @discardableResult
+    func refreshSystemColorScheme() -> Bool {
+        let colorScheme = AppearanceStore.currentSystemColorScheme()
+        guard self.systemColorScheme != colorScheme else { return false }
+        self.systemColorScheme = colorScheme
+        return true
     }
 
     private func resetRemoteManagementRevealState() {

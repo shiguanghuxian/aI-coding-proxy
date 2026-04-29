@@ -492,6 +492,64 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(AppearanceStore.nsAppearanceName(for: .dark), .darkAqua)
     }
 
+    @MainActor
+    func testAppearanceStoreResolvesCurrentSystemColorScheme() {
+        XCTAssertTrue([ColorScheme.light, ColorScheme.dark].contains(AppearanceStore.currentSystemColorScheme()))
+        XCTAssertEqual(AppearanceStore.colorScheme(for: NSAppearance(named: .aqua)!), .light)
+        XCTAssertEqual(AppearanceStore.colorScheme(for: NSAppearance(named: .darkAqua)!), .dark)
+    }
+
+    @MainActor
+    func testAppearanceStoreClearsForcedAppearanceWhenFollowingSystem() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer {
+            window.orderOut(nil)
+            AppearanceStore.applyAppAppearance(for: .system)
+        }
+
+        AppearanceStore.applyAppAppearance(for: .dark)
+        XCTAssertEqual(NSApplication.shared.appearance?.name, .darkAqua)
+        XCTAssertEqual(window.appearance?.name, .darkAqua)
+
+        AppearanceStore.applyAppAppearance(for: .system)
+        XCTAssertNil(NSApplication.shared.appearance)
+        XCTAssertNil(window.appearance)
+    }
+
+    @MainActor
+    func testUpdateThemeResolvesFollowSystemToExplicitSwiftUIColorScheme() throws {
+        let (preferencesStore, directory) = try Self.makePreferencesStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let model = DesktopAppModel(preferencesStore: preferencesStore)
+        let currentSystemScheme = AppearanceStore.currentSystemColorScheme()
+
+        model.updateTheme(.dark)
+        XCTAssertEqual(model.resolvedPreferredColorScheme, .dark)
+
+        model.updateTheme(.system)
+        XCTAssertEqual(model.preferences.themeMode, .system)
+        XCTAssertEqual(model.systemColorScheme, currentSystemScheme)
+        XCTAssertEqual(model.resolvedPreferredColorScheme, currentSystemScheme)
+    }
+
+    @MainActor
+    func testRefreshSystemColorSchemeSkipsPublishingWhenUnchanged() throws {
+        let (preferencesStore, directory) = try Self.makePreferencesStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let model = DesktopAppModel(preferencesStore: preferencesStore)
+        let initialSystemScheme = model.systemColorScheme
+
+        XCTAssertFalse(model.refreshSystemColorScheme())
+        XCTAssertEqual(model.systemColorScheme, initialSystemScheme)
+    }
+
     func testRootShellViewUsesSharedMainWindowTitlebarControlsForBothInterfaceModes() throws {
         let appSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
         let rootShellSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RootShellView.swift")
@@ -504,6 +562,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertFalse(rootShellSource.contains(".toolbar {"))
         XCTAssertFalse(rootShellSource.contains("self.mainWindowTitlebarControls"))
         XCTAssertTrue(appSource.contains("modeEntryTitle: self.interfaceModeToolbarTitle"))
+        XCTAssertTrue(appSource.contains("modeEntrySymbol: self.interfaceModeToolbarSymbol"))
         XCTAssertTrue(appSource.contains("modeEntryHelpText: self.interfaceModeToolbarHelpText"))
         XCTAssertTrue(appSource.contains("onModeEntry: { self.model.switchInterfaceMode(target: self.interfaceModeToolbarTarget) }"))
     }
@@ -513,6 +572,8 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         XCTAssertTrue(source.contains("self.model.isMinimalMode ? .full : .minimal"))
         XCTAssertTrue(source.contains("self.model.label(for: self.interfaceModeToolbarTarget)"))
+        XCTAssertTrue(source.contains("\"rectangle.compress.vertical\""))
+        XCTAssertTrue(source.contains("\"rectangle.expand.vertical\""))
         XCTAssertTrue(source.contains("self.model.switchToFullModeButtonTitle"))
         XCTAssertTrue(source.contains("self.model.switchToMinimalModeButtonTitle"))
     }
@@ -551,9 +612,15 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(behaviorSource.contains("window.styleMask.insert(.fullSizeContentView)"))
         XCTAssertFalse(appSource.contains("showsTransparentToolbarBackground:"))
         XCTAssertTrue(sharedUISource.contains("struct MainWindowTitlebarControls: View"))
+        XCTAssertTrue(sharedUISource.contains(".accessibilityIdentifier(\"main-window-titlebar-controls\")"))
         XCTAssertTrue(sharedUISource.contains("accessibilityID: \"titlebar-help-button\""))
         XCTAssertTrue(sharedUISource.contains("accessibilityID: \"titlebar-refresh-button\""))
         XCTAssertTrue(sharedUISource.contains(".accessibilityIdentifier(\"titlebar-interface-mode-button\")"))
+        XCTAssertTrue(sharedUISource.contains("static let controlHeight: CGFloat = 30"))
+        XCTAssertTrue(sharedUISource.contains("static let labelFontSize: CGFloat = 11"))
+        XCTAssertTrue(sharedUISource.contains("static let iconSize: CGFloat = 11"))
+        XCTAssertTrue(sharedUISource.contains("static let containerHorizontalPadding: CGFloat = 6"))
+        XCTAssertTrue(sharedUISource.contains(".fill(self.containerBackground(palette: palette))"))
         XCTAssertFalse(sharedUISource.contains(".accessibilityIdentifier(\"titlebar-minimal-mode-button\")"))
         XCTAssertTrue(appSource.contains("NSTitlebarAccessoryViewController"))
         XCTAssertTrue(appSource.contains("newAccessory.layoutAttribute = .right"))
@@ -3605,6 +3672,17 @@ final class CodexProxyDesktopTests: XCTestCase {
             contentsOfFile: "Sources/CodexProxyDesktop/Appearance.swift",
             encoding: .utf8
         )
+        let swiftUIHostSources = try [
+            "Sources/CodexProxyDesktop/AboutWindowController.swift",
+            "Sources/CodexProxyDesktop/ClientConfigManagerWindowController.swift",
+            "Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift",
+            "Sources/CodexProxyDesktop/HelpWindowController.swift",
+            "Sources/CodexProxyDesktop/ManagedProxyWindowController.swift",
+            "Sources/CodexProxyDesktop/OnboardingWindowController.swift",
+            "Sources/CodexProxyDesktop/ProxyTestWindowController.swift",
+            "Sources/CodexProxyDesktop/RemoteAdminWindowController.swift",
+            "Sources/CodexProxyDesktop/RequestLogsWindowController.swift",
+        ].map { try Self.repoFileText($0) }.joined(separator: "\n")
         let statusItemRendererSource = try String(
             contentsOfFile: "Sources/CodexProxyDesktop/MenuBarStatusItemRenderer.swift",
             encoding: .utf8
@@ -3615,6 +3693,19 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(appSource.contains("app.delegate = delegate"))
         XCTAssertTrue(appSource.contains("app.run()"))
         XCTAssertTrue(appSource.contains("final class AppDelegate: NSObject, NSApplicationDelegate"))
+        XCTAssertTrue(appSource.contains("private var effectiveAppearanceObservation: NSKeyValueObservation?"))
+        XCTAssertTrue(appSource.contains("NSApplication.shared.observe("))
+        XCTAssertTrue(appSource.contains("\\.effectiveAppearance"))
+        let refreshStart = try XCTUnwrap(appSource.range(of: "private func refreshSystemAppearanceIfNeeded() {"))
+        let refreshEnd = try XCTUnwrap(appSource[refreshStart.upperBound...].range(of: "\n    }\n\n    private func loadInitialData"))
+        let refreshSystemAppearanceBody = String(appSource[refreshStart.upperBound..<refreshEnd.lowerBound])
+        XCTAssertTrue(refreshSystemAppearanceBody.contains("guard self.model.preferences.themeMode == .system else { return }"))
+        XCTAssertTrue(refreshSystemAppearanceBody.contains("guard self.model.refreshSystemColorScheme() else { return }"))
+        XCTAssertTrue(appSource.contains("self.model.refreshThemeSensitiveWindows()"))
+        XCTAssertFalse(refreshSystemAppearanceBody.contains("AppearanceStore.applyAppAppearance(for: .system)"))
+        XCTAssertFalse(refreshSystemAppearanceBody.contains("self.refreshAppChrome()"))
+        XCTAssertTrue(swiftUIHostSources.contains("resolvedPreferredColorScheme"))
+        XCTAssertFalse(swiftUIHostSources.contains(".preferredColorScheme(AppearanceStore.preferredColorScheme(for:"))
         XCTAssertTrue(appSource.contains("NSStatusBar.system.statusItem"))
         XCTAssertTrue(appSource.contains("NSStatusItem.squareLength"))
         XCTAssertTrue(appSource.contains("private let statusItemRenderer = MenuBarStatusItemRenderer()"))
@@ -3674,6 +3765,75 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertFalse(controllerSource.contains("objectWillChange.sink"))
         XCTAssertFalse(controllerSource.contains("import Combine"))
         XCTAssertFalse(controllerSource.contains("NSApplication.didUpdateNotification"))
+    }
+
+    func testAuxiliaryWindowHeadersDoNotRenderDuplicateCloseButtons() throws {
+        func slice(_ source: String, from startMarker: String, to endMarker: String) throws -> String {
+            let start = try XCTUnwrap(source.range(of: startMarker))
+            let end = try XCTUnwrap(source[start.upperBound...].range(of: endMarker))
+            return String(source[start.upperBound..<end.lowerBound])
+        }
+
+        let requestLogsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RequestLogsView.swift")
+        let proxyTestSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ProxyTestConsoleView.swift")
+        let managedProxySource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ManagedProxyManagerView.swift")
+        let remoteAdminSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RemoteAdminWindowView.swift")
+        let remoteAdminControllerSource = try Self.repoFileText("Sources/CodexProxyDesktop/RemoteAdminWindowController.swift")
+
+        let requestLogsHeaderButtons = try slice(
+            requestLogsSource,
+            from: "private func headerButtons(palette: AppearancePalette) -> some View {",
+            to: "\n    private func embeddedControlsDisclosure"
+        )
+        XCTAssertTrue(requestLogsHeaderButtons.contains("commonReload"))
+        XCTAssertFalse(requestLogsHeaderButtons.contains("commonDismiss"))
+        XCTAssertFalse(requestLogsHeaderButtons.contains("dismissRequestLogsWindow"))
+
+        let proxyTestHeader = try slice(
+            proxyTestSource,
+            from: "private func header(palette: AppearancePalette) -> some View {",
+            to: "\n    private var requestColumn"
+        )
+        XCTAssertTrue(proxyTestHeader.contains("commonReload"))
+        XCTAssertFalse(proxyTestHeader.contains("commonDismiss"))
+        XCTAssertFalse(proxyTestHeader.contains("dismissProxyTestConsole"))
+
+        let managedProxyHeaderButtons = try slice(
+            managedProxySource,
+            from: "private func headerButtons(palette: AppearancePalette) -> some View {",
+            to: "\n    private func embeddedRuntimeActionStrip"
+        )
+        XCTAssertTrue(managedProxyHeaderButtons.contains("commonReload"))
+        XCTAssertFalse(managedProxyHeaderButtons.contains("commonDismiss"))
+        XCTAssertFalse(managedProxyHeaderButtons.contains("dismissManagedProxyManagerWindow"))
+
+        let remoteAdminHeader = try slice(
+            remoteAdminSource,
+            from: "private struct RemoteAdminHeaderCard: View {",
+            to: "\n}\n\nprivate struct RemoteAdminNotePanel"
+        )
+        XCTAssertTrue(remoteAdminHeader.contains("remote-admin-header-refresh-button"))
+        XCTAssertTrue(remoteAdminHeader.contains("remote-admin-header-reconnect-button"))
+        XCTAssertFalse(remoteAdminHeader.contains("remote-admin-header-close-button"))
+        XCTAssertFalse(remoteAdminHeader.contains("关闭窗口"))
+        XCTAssertFalse(remoteAdminHeader.contains("Close Window"))
+        XCTAssertFalse(remoteAdminSource.contains("let onClose: () -> Void"))
+        XCTAssertFalse(remoteAdminControllerSource.contains("RemoteAdminWindowView(model: self.model) {"))
+        XCTAssertTrue(remoteAdminControllerSource.contains("RemoteAdminWindowView(model: self.model)"))
+
+        for path in [
+            "Sources/CodexProxyDesktop/ProxyTestWindowController.swift",
+            "Sources/CodexProxyDesktop/ManagedProxyWindowController.swift",
+            "Sources/CodexProxyDesktop/RequestLogsWindowController.swift",
+            "Sources/CodexProxyDesktop/RemoteAdminWindowController.swift",
+        ] {
+            let source = try Self.repoFileText(path)
+            XCTAssertTrue(
+                source.contains("window.styleMask = [.titled, .closable, .miniaturizable, .resizable]"),
+                path
+            )
+            XCTAssertTrue(source.contains("func windowWillClose"), path)
+        }
     }
 
     @MainActor
@@ -8893,8 +9053,14 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(appSource.contains("newHostingController.sizingOptions = [.intrinsicContentSize, .preferredContentSize]"))
         XCTAssertTrue(appSource.contains("private func sizeMainTitlebarControlsView(_ view: NSView)"))
         XCTAssertTrue(appSource.contains("MainWindowTitlebarControlsMetrics.minimumWidth"))
-        XCTAssertTrue(appSource.contains("static let trailingInset: CGFloat = 10"))
+        XCTAssertTrue(appSource.contains("static let minimumWidth: CGFloat = 510"))
+        XCTAssertTrue(appSource.contains("static let minimumHeight: CGFloat = 44"))
+        XCTAssertTrue(appSource.contains("static let topInset: CGFloat = 4"))
+        XCTAssertTrue(appSource.contains("static let bottomInset: CGFloat = 2"))
+        XCTAssertTrue(appSource.contains("static let trailingInset: CGFloat = 8"))
         XCTAssertTrue(appSource.contains(".frame(minWidth: MainWindowTitlebarControlsMetrics.minimumWidth, alignment: .trailing)"))
+        XCTAssertTrue(appSource.contains(".padding(.top, MainWindowTitlebarControlsMetrics.topInset)"))
+        XCTAssertTrue(appSource.contains(".padding(.bottom, MainWindowTitlebarControlsMetrics.bottomInset)"))
         XCTAssertTrue(appSource.contains(".padding(.trailing, MainWindowTitlebarControlsMetrics.trailingInset)"))
         XCTAssertTrue(appSource.contains("newAccessory.layoutAttribute = .right"))
         XCTAssertTrue(appSource.contains("window.titlebarAccessoryViewControllers.contains(where: { $0 === accessory }) == false"))
@@ -11796,7 +11962,101 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
-    func testRequestLogsSortChangesRemainPendingUntilQuery() async {
+    func testRequestLogsSortChangesApplyImmediatelyAndResetToFirstPage() async {
+        let probe = RequestLogsProbe()
+        let admin = AdminAPIClient(
+            requestLogsHandler: { query in
+                await probe.recordRequest(query)
+                return RequestLogPage(
+                    entries: [Self.makeRequestLogEntry(id: 1, model: "gpt-5.4", apiKey: "sk-history")],
+                    totalCount: 120,
+                    page: query.page,
+                    pageSize: query.pageSize,
+                    availableAPIKeys: ["sk-history"],
+                    availableModels: ["gpt-5.4"]
+                )
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+
+        model.applyRequestLogsFiltersAndRefresh()
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 1)
+        model.nextRequestLogsPage()
+        await Self.waitForRecordedRequestCount(on: probe, count: 2)
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 2)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.page, 2)
+
+        model.setRequestLogsSortField(.latency)
+        await Self.waitForRecordedRequestCount(on: probe, count: 3)
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 1)
+
+        XCTAssertFalse(model.requestLogsHasPendingFilterChanges)
+        XCTAssertEqual(model.requestLogsDraftFilterState.sortBy, .latency)
+        XCTAssertEqual(model.requestLogsDraftFilterState.sortDirection, .descending)
+        XCTAssertEqual(model.requestLogsDraftFilterState.page, 1)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.sortBy, .latency)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.sortDirection, .descending)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.page, 1)
+
+        model.setRequestLogsSortDirection(.ascending)
+        await Self.waitForRecordedRequestCount(on: probe, count: 4)
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 1)
+
+        XCTAssertFalse(model.requestLogsHasPendingFilterChanges)
+        XCTAssertEqual(model.requestLogsDraftFilterState.sortBy, .latency)
+        XCTAssertEqual(model.requestLogsDraftFilterState.sortDirection, .ascending)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.sortBy, .latency)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.sortDirection, .ascending)
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.requestQueries.map(\.page), [1, 2, 1, 1])
+        XCTAssertEqual(snapshot.requestQueries.map(\.sortBy), [.time, .time, .latency, .latency])
+        XCTAssertEqual(snapshot.requestQueries.map(\.sortDirection), [.descending, .descending, .descending, .ascending])
+    }
+
+    @MainActor
+    func testRequestLogsSortAppliesWithoutApplyingPendingFilters() async {
+        let probe = RequestLogsProbe()
+        let admin = AdminAPIClient(
+            requestLogsHandler: { query in
+                await probe.recordRequest(query)
+                let resolvedModel = query.model ?? "all-models"
+                return RequestLogPage(
+                    entries: [Self.makeRequestLogEntry(id: 1, model: resolvedModel, apiKey: "sk-\(resolvedModel)")],
+                    totalCount: 1,
+                    page: query.page,
+                    pageSize: query.pageSize,
+                    availableAPIKeys: ["sk-\(resolvedModel)"],
+                    availableModels: [resolvedModel]
+                )
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+
+        model.setRequestLogsModel("slow-model")
+        model.applyRequestLogsFiltersAndRefresh()
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "slow-model", expectedPage: 1)
+
+        model.setRequestLogsModel("fast-model")
+        XCTAssertTrue(model.requestLogsHasPendingFilterChanges)
+
+        model.setRequestLogsSortField(.latency)
+        await Self.waitForRecordedRequestCount(on: probe, count: 2)
+        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "slow-model", expectedPage: 1)
+
+        XCTAssertTrue(model.requestLogsHasPendingFilterChanges)
+        XCTAssertEqual(model.requestLogsAppliedFilterState.selectedModel, "slow-model")
+        XCTAssertEqual(model.requestLogsDraftFilterState.selectedModel, "fast-model")
+        XCTAssertEqual(model.requestLogsAppliedFilterState.sortBy, .latency)
+        XCTAssertEqual(model.requestLogsDraftFilterState.sortBy, .latency)
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.requestQueries.map { $0.model ?? "" }, ["slow-model", "slow-model"])
+        XCTAssertEqual(snapshot.requestQueries.map(\.sortBy), [.time, .latency])
+    }
+
+    @MainActor
+    func testRequestLogsSortSameValueDoesNotRefresh() async {
         let probe = RequestLogsProbe()
         let admin = AdminAPIClient(
             requestLogsHandler: { query in
@@ -11816,26 +12076,24 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.applyRequestLogsFiltersAndRefresh()
         await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 1)
 
-        model.setRequestLogsSortField(.latency)
-        model.setRequestLogsSortDirection(.ascending)
-
-        XCTAssertTrue(model.requestLogsHasPendingFilterChanges)
-        XCTAssertEqual(model.requestLogsDraftFilterState.sortBy, .latency)
-        XCTAssertEqual(model.requestLogsDraftFilterState.sortDirection, .ascending)
-        XCTAssertEqual(model.requestLogsAppliedFilterState.sortBy, .time)
-        XCTAssertEqual(model.requestLogsAppliedFilterState.sortDirection, .descending)
-
-        model.applyRequestLogsFiltersAndRefresh()
-        await Self.waitForRecordedRequestCount(on: probe, count: 2)
-        await Self.waitForRequestLogsRefresh(on: model, expectedModel: "gpt-5.4", expectedPage: 1)
-
-        XCTAssertFalse(model.requestLogsHasPendingFilterChanges)
-        XCTAssertEqual(model.requestLogsAppliedFilterState.sortBy, .latency)
-        XCTAssertEqual(model.requestLogsAppliedFilterState.sortDirection, .ascending)
+        model.setRequestLogsSortField(.time)
+        model.setRequestLogsSortDirection(.descending)
+        try? await Task.sleep(nanoseconds: 50_000_000)
 
         let snapshot = await probe.snapshot()
-        XCTAssertEqual(snapshot.requestQueries.last?.sortBy, .latency)
-        XCTAssertEqual(snapshot.requestQueries.last?.sortDirection, .ascending)
+        XCTAssertEqual(snapshot.requestQueries.count, 1)
+    }
+
+    func testRequestLogsViewKeepsSingleFilterQueryButton() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RequestLogsView.swift")
+        let queryButtonCount = source.components(separatedBy: "actionQueryRequestLogs").count - 1
+        XCTAssertEqual(queryButtonCount, 1)
+
+        let toolbarStart = try XCTUnwrap(source.range(of: "private var tableToolbarActions: some View {"))
+        let toolbarEnd = try XCTUnwrap(source[toolbarStart.upperBound...].range(of: "\n    }\n\n    @ViewBuilder\n    private func tableFooter"))
+        let toolbarBody = String(source[toolbarStart.upperBound..<toolbarEnd.lowerBound])
+        XCTAssertFalse(toolbarBody.contains("actionQueryRequestLogs"))
+        XCTAssertTrue(toolbarBody.contains("actionExportRequestLogs"))
     }
 
     @MainActor
@@ -13526,7 +13784,7 @@ private extension CodexProxyDesktopTests {
             width: width,
             height: height,
             rootView: AnyView(
-                RemoteAdminWindowView(model: model, onClose: {})
+                RemoteAdminWindowView(model: model)
                     .frame(width: width, height: height)
             )
         )

@@ -7647,7 +7647,75 @@ final class CodexProxyDaemonTests: XCTestCase {
             let logs = try await harness.controller.requestLogs(
                 query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
             )
-            XCTAssertEqual(logs.entries.first?.cacheHitTokens, 5)
+            let entry = try XCTUnwrap(logs.entries.first)
+            XCTAssertEqual(entry.inputTokens, 16)
+            XCTAssertEqual(entry.outputTokens, 7)
+            XCTAssertEqual(entry.totalTokens, 23)
+            XCTAssertEqual(entry.cacheHitTokens, 5)
+        }
+    }
+
+    func testAnthropicDataSourceMessagesLogCacheReadTokensAsInputTokens() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let upstream = Self.makeAnthropicCachedUsageProviderApplication(
+            inputTokens: 0,
+            cachedTokens: nil,
+            cacheReadTokens: 17
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.proxyAPIKeys = [
+                ProxyAPIKeyRecord(
+                    id: "primary-anthropic",
+                    label: "Anthropic Primary",
+                    key: harness.config.proxyAPIKey,
+                    dataSource: .anthropic,
+                    enabled: true,
+                    createdAt: 1
+                ),
+            ]
+            config.primaryProxyAPIKeyID = "primary-anthropic"
+            _ = try await harness.controller.saveConfig(config)
+
+            let secretRef = try harness.controller.secretStore.saveAnthropicOAuthSecret(
+                AnthropicOAuthSecretBundle(
+                    accessToken: "anthropic-access",
+                    refreshToken: "anthropic-refresh",
+                    expiresAt: Helpers.now() + 3_600
+                )
+            )
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "anthropic-auth.json",
+                    content: Self.anthropicOAuthAuthJSON(
+                        secretRef: secretRef,
+                        baseURL: "http://localhost:\(upstreamClient.port ?? 0)"
+                    ),
+                    label: "Anthropic OAuth"
+                )
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/messages",
+                    body: #"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let entry = try XCTUnwrap(logs.entries.first)
+            XCTAssertEqual(entry.inputTokens, 17)
+            XCTAssertEqual(entry.outputTokens, 7)
+            XCTAssertEqual(entry.totalTokens, 24)
+            XCTAssertEqual(entry.cacheHitTokens, 17)
         }
     }
 
@@ -7705,7 +7773,76 @@ final class CodexProxyDaemonTests: XCTestCase {
                 query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
             )
             let entry = try XCTUnwrap(logs.entries.first(where: { $0.endpoint == "/v1/messages" }))
+            XCTAssertEqual(entry.inputTokens, 11)
+            XCTAssertEqual(entry.outputTokens, 7)
+            XCTAssertEqual(entry.totalTokens, 18)
             XCTAssertEqual(entry.cacheHitTokens, 0)
+        }
+    }
+
+    func testAnthropicDataSourceStreamingMessagesLogCachedTokensAsInputTokens() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let upstream = Self.makeAnthropicStreamingUsageProviderApplication(
+            cacheReadTokens: 17,
+            inputTokens: 0,
+            outputTokens: 7,
+            cacheCreationTokens: 3
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.proxyAPIKeys = [
+                ProxyAPIKeyRecord(
+                    id: "primary-anthropic",
+                    label: "Anthropic Primary",
+                    key: harness.config.proxyAPIKey,
+                    dataSource: .anthropic,
+                    enabled: true,
+                    createdAt: 1
+                ),
+            ]
+            config.primaryProxyAPIKeyID = "primary-anthropic"
+            _ = try await harness.controller.saveConfig(config)
+
+            let secretRef = try harness.controller.secretStore.saveAnthropicOAuthSecret(
+                AnthropicOAuthSecretBundle(
+                    accessToken: "anthropic-access",
+                    refreshToken: "anthropic-refresh",
+                    expiresAt: Helpers.now() + 3_600
+                )
+            )
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "anthropic-auth.json",
+                    content: Self.anthropicOAuthAuthJSON(
+                        secretRef: secretRef,
+                        baseURL: "http://localhost:\(upstreamClient.port ?? 0)"
+                    ),
+                    label: "Anthropic OAuth"
+                )
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/messages",
+                    body: #"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            XCTAssertTrue(Self.string(from: body).contains("event: message_stop"))
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let entry = try XCTUnwrap(logs.entries.first(where: { $0.endpoint == "/v1/messages" }))
+            XCTAssertEqual(entry.inputTokens, 20)
+            XCTAssertEqual(entry.outputTokens, 7)
+            XCTAssertEqual(entry.totalTokens, 27)
+            XCTAssertEqual(entry.cacheHitTokens, 17)
         }
     }
 
@@ -9089,13 +9226,22 @@ final class CodexProxyDaemonTests: XCTestCase {
         return Application(router: router)
     }
 
-    private static func makeAnthropicCachedUsageProviderApplication() -> Application<RouterResponder<BasicRequestContext>> {
+    private static func makeAnthropicCachedUsageProviderApplication(
+        inputTokens: Int64 = 11,
+        outputTokens: Int64 = 7,
+        cachedTokens: Int64? = 5,
+        cacheReadTokens: Int64? = nil,
+        cacheCreationTokens: Int64? = nil
+    ) -> Application<RouterResponder<BasicRequestContext>> {
         let router = Router()
 
         router.post("v1/messages") { request, _ async throws -> Response in
             let body = try await Self.string(from: request.body)
             let payload = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] ?? [:]
             let model = payload["model"] as? String ?? "claude-sonnet-4-5"
+            let cachedUsageFragment = cachedTokens.map { #","cached_tokens":\#($0)"# } ?? ""
+            let cacheReadUsageFragment = cacheReadTokens.map { #","cache_read_input_tokens":\#($0)"# } ?? ""
+            let cacheCreationUsageFragment = cacheCreationTokens.map { #","cache_creation_input_tokens":\#($0)"# } ?? ""
 
             return Response(
                 status: .ok,
@@ -9116,9 +9262,8 @@ final class CodexProxyDaemonTests: XCTestCase {
                           ],
                           "stop_reason": "end_turn",
                           "usage": {
-                            "input_tokens": 11,
-                            "output_tokens": 7,
-                            "cached_tokens": 5
+                            "input_tokens": \(inputTokens),
+                            "output_tokens": \(outputTokens)\(cachedUsageFragment)\(cacheReadUsageFragment)\(cacheCreationUsageFragment)
                           }
                         }
                         """
@@ -9131,7 +9276,10 @@ final class CodexProxyDaemonTests: XCTestCase {
     }
 
     private static func makeAnthropicStreamingUsageProviderApplication(
-        cacheReadTokens: Int64?
+        cacheReadTokens: Int64?,
+        inputTokens: Int64 = 11,
+        outputTokens: Int64 = 7,
+        cacheCreationTokens: Int64? = nil
     ) -> Application<RouterResponder<BasicRequestContext>> {
         let router = Router()
 
@@ -9140,6 +9288,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             let payload = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] ?? [:]
             let model = payload["model"] as? String ?? "claude-sonnet-4-5"
             let cacheReadUsageFragment = cacheReadTokens.map { #","cache_read_input_tokens":\#($0)"# } ?? ""
+            let cacheCreationUsageFragment = cacheCreationTokens.map { #","cache_creation_input_tokens":\#($0)"# } ?? ""
 
             var headers = HTTPFields()
             headers.append(.init(name: .contentType, value: "text/event-stream; charset=utf-8"))
@@ -9150,7 +9299,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                     var writer = writer
                     try await writer.write(
                         ByteBuffer(
-                            string: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"\(model)\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":11,\"output_tokens\":0\(cacheReadUsageFragment)}}}\n\n"
+                            string: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"\(model)\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":\(inputTokens),\"output_tokens\":0\(cacheReadUsageFragment)\(cacheCreationUsageFragment)}}}\n\n"
                         )
                     )
                     try await writer.write(
@@ -9170,7 +9319,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                     )
                     try await writer.write(
                         ByteBuffer(
-                            string: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":7\(cacheReadUsageFragment)}}\n\n"
+                            string: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":\(outputTokens)\(cacheReadUsageFragment)}}\n\n"
                         )
                     )
                     try await writer.write(

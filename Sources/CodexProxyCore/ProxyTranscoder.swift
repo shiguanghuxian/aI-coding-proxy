@@ -630,13 +630,18 @@ public enum ProxyTranscoder {
             return nil
         }
 
-        let cacheReadTokens = self.int64Value(usage["cache_read_input_tokens"])
-            ?? self.int64Value(usage["cached_tokens"])
-        if let cacheReadTokens, cacheReadTokens > 0 {
+        let cacheReadTokens = self.anthropicCacheReadInputTokens(from: usage)
+        if let cacheReadTokens, cacheReadTokens >= 0 {
             usage["cache_read_input_tokens"] = cacheReadTokens
             if usage["cached_tokens"] == nil {
                 usage["cached_tokens"] = cacheReadTokens
             }
+        }
+        if usage["cache_creation_input_tokens"] == nil,
+           let cacheCreationTokens = self.anthropicCacheCreationInputTokens(from: usage),
+           cacheCreationTokens >= 0
+        {
+            usage["cache_creation_input_tokens"] = cacheCreationTokens
         }
         return usage
     }
@@ -646,20 +651,20 @@ public enum ProxyTranscoder {
             return .init()
         }
 
-        let input = self.int64Value(usage["input_tokens"])
+        let rawInput = self.int64Value(usage["input_tokens"])
             ?? self.int64Value(usage["prompt_tokens"])
             ?? 0
         let output = self.int64Value(usage["output_tokens"])
             ?? self.int64Value(usage["completion_tokens"])
             ?? 0
-        let total = self.int64Value(usage["total_tokens"]) ?? (input + output)
-        let cacheHitTokens = self.int64Value(usage["cache_read_input_tokens"])
-            ?? self.int64Value(usage["cached_tokens"])
+        let cacheHitTokens = self.anthropicCacheReadInputTokens(from: usage)
+        let cacheCreationTokens = self.anthropicCacheCreationInputTokens(from: usage) ?? 0
+        let input = rawInput + (cacheHitTokens ?? 0) + cacheCreationTokens
 
         return UpstreamUsage(
             inputTokens: input,
             outputTokens: output,
-            totalTokens: total,
+            totalTokens: input + output,
             cacheHitTokens: cacheHitTokens
         )
     }
@@ -1275,6 +1280,42 @@ public enum ProxyTranscoder {
             totalTokens: total,
             cacheHitTokens: cacheHitTokens
         )
+    }
+
+    private static func anthropicCacheReadInputTokens(from usage: [String: Any]) -> Int64? {
+        self.int64Value(usage["cache_read_input_tokens"])
+            ?? self.int64Value(usage["cached_tokens"])
+    }
+
+    private static func anthropicCacheCreationInputTokens(from usage: [String: Any]) -> Int64? {
+        if let value = self.int64Value(usage["cache_creation_input_tokens"]) {
+            return value
+        }
+        guard let cacheCreation = usage["cache_creation"] as? [String: Any] else {
+            return nil
+        }
+        let values = self.anthropicCacheCreationInputTokenValues(from: cacheCreation)
+        guard values.isEmpty == false else {
+            return nil
+        }
+        return values.reduce(0, +)
+    }
+
+    private static func anthropicCacheCreationInputTokenValues(from object: [String: Any]) -> [Int64] {
+        var values: [Int64] = []
+        for (key, value) in object {
+            let normalizedKey = key.lowercased()
+            if normalizedKey.contains("tokens"),
+               let tokenValue = self.int64Value(value)
+            {
+                values.append(tokenValue)
+                continue
+            }
+            if let nested = value as? [String: Any] {
+                values.append(contentsOf: self.anthropicCacheCreationInputTokenValues(from: nested))
+            }
+        }
+        return values
     }
 
     private static func completedUsageObject(_ usage: UpstreamUsage) -> [String: Any] {

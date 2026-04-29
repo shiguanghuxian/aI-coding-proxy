@@ -69,7 +69,7 @@ final class AboutWindowController: NSObject, NSWindowDelegate, AboutWindowContro
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             AboutView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

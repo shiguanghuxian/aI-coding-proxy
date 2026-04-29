@@ -273,19 +273,18 @@ private struct ClientConfigPlanSidebar: View {
             .scrollIndicators(.hidden)
 
             VStack(alignment: .leading, spacing: 10) {
-                Button(self.model.clientConfigManagerApplyButtonTitle()) {
+                Button {
                     Task { await self.model.applyClientConfigManagerSelection() }
+                } label: {
+                    Text(self.model.clientConfigManagerApplyButtonTitle())
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .buttonStyle(AppActionButtonStyle(kind: .primary))
+                .frame(maxWidth: .infinity)
                 .disabled(!self.model.clientConfigManagerCanApplyCurrentSelection)
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        self.utilityButtons
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        self.utilityButtons
-                    }
+                VStack(alignment: .leading, spacing: 8) {
+                    self.utilityButtons
                 }
             }
         }
@@ -302,24 +301,45 @@ private struct ClientConfigPlanSidebar: View {
 
     private var utilityButtons: some View {
         Group {
-            Button(self.model.localized(zh: "配置文件", en: "Files")) {
-                self.model.revealClientConfigManagedFiles()
-            }
-            .buttonStyle(AppActionButtonStyle(kind: .secondary))
-            .disabled(self.model.isClientConfigManagerBusy)
+            self.utilityButton(
+                title: self.model.clientConfigManagerRevealFilesButtonTitle,
+                systemImage: "folder",
+                action: self.model.revealClientConfigManagedFiles
+            )
 
-            Button(self.model.localized(zh: "备份", en: "Backups")) {
-                self.model.presentClientConfigBackupDrawer()
-            }
-            .buttonStyle(AppActionButtonStyle(kind: .secondary))
-            .disabled(self.model.isClientConfigManagerBusy)
+            self.utilityButton(
+                title: self.model.clientConfigManagerViewBackupsButtonTitle,
+                systemImage: "clock.arrow.circlepath",
+                action: self.model.presentClientConfigBackupDrawer
+            )
 
-            Button(self.model.text(.commonReload)) {
+            self.utilityButton(
+                title: self.model.clientConfigManagerRefreshStatusButtonTitle,
+                systemImage: "arrow.clockwise"
+            ) {
                 Task { await self.model.refreshClientConfigManagerState(showLoading: true) }
             }
-            .buttonStyle(AppActionButtonStyle(kind: .secondary))
-            .disabled(self.model.isClientConfigManagerBusy)
         }
+    }
+
+    private func utilityButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 16)
+                Text(title)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .frame(maxWidth: .infinity)
+        .disabled(self.model.isClientConfigManagerBusy)
     }
 
     private var blockingNoticeText: String? {

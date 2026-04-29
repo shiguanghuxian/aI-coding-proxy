@@ -509,13 +509,6 @@ struct ManagedProxyManagerView: View {
             }
             .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent, compact: true))
             .disabled(self.model.managedProxyOperation == .loading)
-
-            if self.presentationMode == .window {
-                Button(self.model.text(.commonDismiss)) {
-                    self.model.dismissManagedProxyManagerWindow()
-                }
-                .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
-            }
         }
     }
 

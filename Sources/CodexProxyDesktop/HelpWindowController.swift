@@ -69,7 +69,7 @@ final class HelpWindowController: NSObject, NSWindowDelegate, HelpWindowControll
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             HelpView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

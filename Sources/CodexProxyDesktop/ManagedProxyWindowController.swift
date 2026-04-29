@@ -62,7 +62,7 @@ final class ManagedProxyWindowController: NSObject, NSWindowDelegate {
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             ManagedProxyManagerView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

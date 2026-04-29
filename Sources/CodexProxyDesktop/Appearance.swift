@@ -59,10 +59,28 @@ enum AppearanceStore {
     }
 
     @MainActor
+    static func currentSystemColorScheme() -> ColorScheme {
+        if let interfaceStyle = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") {
+            if interfaceStyle.localizedCaseInsensitiveContains("dark") {
+                return .dark
+            }
+            if interfaceStyle.localizedCaseInsensitiveContains("light") {
+                return .light
+            }
+            return self.colorScheme(for: NSApplication.shared.effectiveAppearance)
+        }
+
+        return .light
+    }
+
+    static func colorScheme(for appearance: NSAppearance) -> ColorScheme {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+    }
+
+    @MainActor
     static func applyAppAppearance(for mode: DesktopThemeMode) {
         let app = NSApplication.shared
-        let appearance = self.nsAppearanceName(for: mode).flatMap(NSAppearance.init(named:))
-        app.appearance = appearance
+        app.appearance = self.nsAppearance(for: mode)
         for window in app.windows {
             self.applyWindowAppearance(window, for: mode)
         }
@@ -70,7 +88,11 @@ enum AppearanceStore {
 
     @MainActor
     static func applyWindowAppearance(_ window: NSWindow, for mode: DesktopThemeMode) {
-        window.appearance = self.nsAppearanceName(for: mode).flatMap(NSAppearance.init(named:))
+        window.appearance = self.nsAppearance(for: mode)
+    }
+
+    private static func nsAppearance(for mode: DesktopThemeMode) -> NSAppearance? {
+        self.nsAppearanceName(for: mode).flatMap(NSAppearance.init(named:))
     }
 
     static func palette(for scheme: ColorScheme) -> AppearancePalette {

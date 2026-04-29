@@ -69,7 +69,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate, OnboardingWi
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             OnboardingView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

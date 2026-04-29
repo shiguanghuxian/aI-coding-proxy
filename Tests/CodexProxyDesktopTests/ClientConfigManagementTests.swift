@@ -88,6 +88,23 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertEqual(model.clientConfigManagerApplyButtonTitle(), "Apply To Claude Code")
     }
 
+    func testClientConfigManagerUtilityButtonTitlesDescribeActions() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.clientConfigManagerRevealFilesButtonTitle, "Reveal Config Files")
+        XCTAssertEqual(model.clientConfigManagerViewBackupsButtonTitle, "View Restorable Backups")
+        XCTAssertEqual(model.clientConfigManagerRefreshStatusButtonTitle, "Refresh Config Status")
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.clientConfigManagerRevealFilesButtonTitle, "打开配置文件位置")
+        XCTAssertEqual(model.clientConfigManagerViewBackupsButtonTitle, "查看可回退备份")
+        XCTAssertEqual(model.clientConfigManagerRefreshStatusButtonTitle, "重新检测配置状态")
+    }
+
     func testClientConfigManagerEntryTitleClarifiesLocalClientConfiguration() throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }

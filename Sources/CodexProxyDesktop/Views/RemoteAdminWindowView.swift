@@ -7,15 +7,13 @@ struct RemoteAdminWindowView: View {
 
     @ObservedObject var model: RemoteAdminWindowModel
 
-    let onClose: () -> Void
-
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 ShellBackground()
 
                 VStack(alignment: .leading, spacing: 18) {
-                    RemoteAdminHeaderCard(model: self.model, onClose: self.onClose)
+                    RemoteAdminHeaderCard(model: self.model)
 
                     ZStack {
                         RemoteAdminWorkspaceShell(model: self.model)
@@ -300,8 +298,6 @@ private struct RemoteAdminHeaderCard: View {
 
     @ObservedObject var model: RemoteAdminWindowModel
 
-    let onClose: () -> Void
-
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
@@ -529,13 +525,11 @@ private struct RemoteAdminHeaderCard: View {
             HStack(spacing: 8) {
                 self.refreshButton
                 self.reconnectButton
-                self.closeButton
             }
 
             VStack(alignment: .trailing, spacing: 8) {
                 self.refreshButton
                 self.reconnectButton
-                self.closeButton
             }
         }
     }
@@ -556,14 +550,6 @@ private struct RemoteAdminHeaderCard: View {
         .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
         .disabled(self.model.isRefreshing)
         .accessibilityIdentifier("remote-admin-header-reconnect-button")
-    }
-
-    private var closeButton: some View {
-        Button(self.model.localized(zh: "关闭窗口", en: "Close Window")) {
-            self.onClose()
-        }
-        .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
-        .accessibilityIdentifier("remote-admin-header-close-button")
     }
 }
 

@@ -1260,17 +1260,23 @@ struct DashboardHeader: View {
 }
 
 private enum TitlebarControlMetrics {
-    static let groupSpacing: CGFloat = 5
-    static let controlHeight: CGFloat = 26
-    static let cornerRadius: CGFloat = 10
-    static let labelFontSize: CGFloat = 10
-    static let iconSize: CGFloat = 9.5
-    static let labelSpacing: CGFloat = 4
-    static let horizontalPadding: CGFloat = 8
-    static let pillHorizontalPadding: CGFloat = 10
+    static let groupSpacing: CGFloat = 7
+    static let controlHeight: CGFloat = 30
+    static let cornerRadius: CGFloat = 11
+    static let containerCornerRadius: CGFloat = 15
+    static let containerHorizontalPadding: CGFloat = 6
+    static let containerVerticalPadding: CGFloat = 4
+    static let labelFontSize: CGFloat = 11
+    static let iconSize: CGFloat = 11
+    static let statusDotSize: CGFloat = 7
+    static let labelSpacing: CGFloat = 5
+    static let horizontalPadding: CGFloat = 10
+    static let pillHorizontalPadding: CGFloat = 12
 }
 
 struct MainWindowTitlebarControls: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let statusText: String
     let statusTone: StatusPill.Tone
     let isBusy: Bool
@@ -1279,10 +1285,13 @@ struct MainWindowTitlebarControls: View {
     let reloadTitle: String
     let onReload: () -> Void
     let modeEntryTitle: String
+    let modeEntrySymbol: String
     let modeEntryHelpText: String
     let onModeEntry: () -> Void
 
     var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
         HStack(spacing: TitlebarControlMetrics.groupSpacing) {
             TitlebarStatusPill(text: self.statusText, tone: self.statusTone)
                 .fixedSize(horizontal: true, vertical: false)
@@ -1308,12 +1317,34 @@ struct MainWindowTitlebarControls: View {
 
             TitlebarModeEntryButton(
                 title: self.modeEntryTitle,
+                symbol: self.modeEntrySymbol,
                 helpText: self.modeEntryHelpText,
                 action: self.onModeEntry
             )
                 .fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.horizontal, TitlebarControlMetrics.containerHorizontalPadding)
+        .padding(.vertical, TitlebarControlMetrics.containerVerticalPadding)
+        .background(
+            RoundedRectangle(cornerRadius: TitlebarControlMetrics.containerCornerRadius, style: .continuous)
+                .fill(self.containerBackground(palette: palette))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: TitlebarControlMetrics.containerCornerRadius, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 0.96 : 0.86), lineWidth: 1)
+        )
+        .shadow(
+            color: palette.shadow.opacity(self.colorScheme == .dark ? 0.10 : 0.04),
+            radius: 6,
+            x: 0,
+            y: 2
+        )
+        .accessibilityIdentifier("main-window-titlebar-controls")
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func containerBackground(palette: AppearancePalette) -> Color {
+        palette.panelRaised.opacity(self.colorScheme == .dark ? 0.64 : 0.88)
     }
 }
 
@@ -1330,7 +1361,8 @@ private struct TitlebarStatusPill: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(colors.foreground)
-                .frame(width: 6, height: 6)
+                .frame(width: TitlebarControlMetrics.statusDotSize, height: TitlebarControlMetrics.statusDotSize)
+                .shadow(color: colors.foreground.opacity(0.28), radius: 2, x: 0, y: 0)
             Text(self.text)
                 .font(.system(size: TitlebarControlMetrics.labelFontSize, weight: .semibold))
                 .foregroundStyle(colors.foreground)
@@ -1353,32 +1385,32 @@ private struct TitlebarStatusPill: View {
         case .success:
             return (
                 palette.success,
-                palette.successSoft.opacity(self.colorScheme == .dark ? 0.52 : 0.9),
-                palette.success.opacity(self.colorScheme == .dark ? 0.28 : 0.18)
+                palette.successSoft.opacity(self.colorScheme == .dark ? 0.72 : 1.0),
+                palette.success.opacity(self.colorScheme == .dark ? 0.40 : 0.26)
             )
         case .accent:
             return (
                 palette.accent,
-                palette.accentSoft.opacity(self.colorScheme == .dark ? 0.52 : 0.9),
-                palette.accent.opacity(self.colorScheme == .dark ? 0.28 : 0.18)
+                palette.accentSoft.opacity(self.colorScheme == .dark ? 0.72 : 1.0),
+                palette.accent.opacity(self.colorScheme == .dark ? 0.40 : 0.26)
             )
         case .warning:
             return (
                 palette.warning,
-                palette.warningSoft.opacity(self.colorScheme == .dark ? 0.52 : 0.88),
-                palette.warning.opacity(self.colorScheme == .dark ? 0.30 : 0.18)
+                palette.warningSoft.opacity(self.colorScheme == .dark ? 0.70 : 0.96),
+                palette.warning.opacity(self.colorScheme == .dark ? 0.42 : 0.28)
             )
         case .danger:
             return (
                 palette.danger,
-                palette.dangerSoft.opacity(self.colorScheme == .dark ? 0.52 : 0.88),
-                palette.danger.opacity(self.colorScheme == .dark ? 0.30 : 0.18)
+                palette.dangerSoft.opacity(self.colorScheme == .dark ? 0.70 : 0.96),
+                palette.danger.opacity(self.colorScheme == .dark ? 0.42 : 0.28)
             )
         case .neutral:
             return (
                 palette.textSecondary,
-                palette.panel.opacity(self.colorScheme == .dark ? 0.12 : 0.02),
-                palette.border.opacity(self.colorScheme == .dark ? 0.9 : 0.82)
+                palette.panelEmphasis.opacity(self.colorScheme == .dark ? 0.62 : 0.86),
+                palette.border.opacity(self.colorScheme == .dark ? 0.98 : 0.9)
             )
         }
     }
@@ -1397,11 +1429,11 @@ private struct TitlebarBusyChip: View {
             .frame(height: TitlebarControlMetrics.controlHeight)
             .background(
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
-                    .fill(palette.panel.opacity(self.colorScheme == .dark ? 0.12 : 0.02))
+                    .fill(palette.panelEmphasis.opacity(self.colorScheme == .dark ? 0.64 : 0.82))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
-                    .stroke(palette.border.opacity(self.colorScheme == .dark ? 0.88 : 0.76), lineWidth: 1)
+                    .stroke(palette.border.opacity(self.colorScheme == .dark ? 0.96 : 0.86), lineWidth: 1)
             )
     }
 }
@@ -1448,14 +1480,14 @@ private struct TitlebarActionButtonStyle: ButtonStyle {
         return configuration.label
             .font(.system(size: TitlebarControlMetrics.labelFontSize, weight: .semibold))
             .lineLimit(1)
-            .foregroundStyle(palette.accent)
+            .foregroundStyle(palette.textPrimary)
             .background(
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
                     .fill(self.backgroundFill(palette: palette, pressed: pressed))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
-                    .stroke(palette.border.opacity(self.colorScheme == .dark ? 0.88 : 0.78), lineWidth: 1)
+                    .stroke(palette.border.opacity(self.colorScheme == .dark ? 0.98 : 0.9), lineWidth: 1)
             )
             .scaleEffect(pressed ? 0.99 : 1.0)
             .opacity(self.isEnabled ? 1.0 : 0.72)
@@ -1464,12 +1496,12 @@ private struct TitlebarActionButtonStyle: ButtonStyle {
 
     private func backgroundFill(palette: AppearancePalette, pressed: Bool) -> Color {
         if pressed {
-            return palette.panelRaised.opacity(self.colorScheme == .dark ? 0.18 : 0.45)
+            return palette.panelEmphasis.opacity(self.colorScheme == .dark ? 0.78 : 1.0)
         }
         if self.isHovered {
-            return palette.panelRaised.opacity(self.colorScheme == .dark ? 0.1 : 0.22)
+            return palette.panelEmphasis.opacity(self.colorScheme == .dark ? 0.66 : 0.96)
         }
-        return palette.panel.opacity(0.001)
+        return palette.panel.opacity(self.colorScheme == .dark ? 0.50 : 0.72)
     }
 }
 
@@ -1477,13 +1509,14 @@ private struct TitlebarModeEntryButton: View {
     @State private var isHovered = false
 
     let title: String
+    let symbol: String
     let helpText: String
     let action: () -> Void
 
     var body: some View {
         Button(action: self.action) {
             HStack(spacing: TitlebarControlMetrics.labelSpacing) {
-                Image(systemName: "rectangle.compress.vertical")
+                Image(systemName: self.symbol)
                     .font(.system(size: TitlebarControlMetrics.iconSize, weight: .semibold))
                 Text(self.title)
                     .lineLimit(1)
@@ -1514,7 +1547,7 @@ private struct TitlebarModeEntryButtonStyle: ButtonStyle {
         return configuration.label
             .font(.system(size: TitlebarControlMetrics.labelFontSize, weight: .semibold))
             .lineLimit(1)
-            .foregroundStyle(palette.accent)
+            .foregroundStyle(Color.white)
             .background(
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
                     .fill(self.backgroundFill(palette: palette, pressed: pressed))
@@ -1523,6 +1556,7 @@ private struct TitlebarModeEntryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: TitlebarControlMetrics.cornerRadius, style: .continuous)
                     .stroke(palette.accent.opacity(self.colorScheme == .dark ? 0.26 : 0.16), lineWidth: 1)
             )
+            .shadow(color: palette.accent.opacity(self.colorScheme == .dark ? 0.26 : 0.18), radius: 5, x: 0, y: 2)
             .scaleEffect(pressed ? 0.992 : 1.0)
             .opacity(self.isEnabled ? 1.0 : 0.72)
             .interactiveCursor(isEnabled: self.isEnabled)
@@ -1530,12 +1564,12 @@ private struct TitlebarModeEntryButtonStyle: ButtonStyle {
 
     private func backgroundFill(palette: AppearancePalette, pressed: Bool) -> Color {
         if pressed {
-            return palette.accentSoft.opacity(self.colorScheme == .dark ? 0.28 : 0.72)
+            return palette.accent.opacity(self.colorScheme == .dark ? 0.76 : 0.82)
         }
         if self.isHovered {
-            return palette.accentSoft.opacity(self.colorScheme == .dark ? 0.18 : 0.48)
+            return palette.accent.opacity(self.colorScheme == .dark ? 0.94 : 0.96)
         }
-        return palette.accentSoft.opacity(self.colorScheme == .dark ? 0.08 : 0.22)
+        return palette.accent.opacity(self.colorScheme == .dark ? 0.84 : 0.90)
     }
 }
 

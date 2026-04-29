@@ -75,7 +75,7 @@ final class ClientConfigManagerWindowController: NSObject, NSWindowDelegate, Cli
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             ClientConfigManagerView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

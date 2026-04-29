@@ -63,7 +63,7 @@ final class ProxyTestWindowController: NSObject, NSWindowDelegate {
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             ProxyTestConsoleView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

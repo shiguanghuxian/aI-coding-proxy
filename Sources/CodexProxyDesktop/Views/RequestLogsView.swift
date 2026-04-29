@@ -159,13 +159,6 @@ struct RequestLogsView: View {
                 self.model.scheduleRequestLogsRefresh()
             }
             .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
-
-            if self.presentationMode == .window {
-                Button(self.model.text(.commonDismiss)) {
-                    self.model.dismissRequestLogsWindow()
-                }
-                .buttonStyle(RequestLogsCompactButtonStyle(kind: .secondary))
-            }
         }
     }
 
@@ -495,12 +488,6 @@ struct RequestLogsView: View {
 
     private var tableToolbarActions: some View {
         HStack(spacing: 8) {
-            Button(self.model.text(.actionQueryRequestLogs)) {
-                self.model.applyRequestLogsFiltersAndRefresh()
-            }
-            .buttonStyle(RequestLogsCompactButtonStyle(kind: .primary))
-            .disabled(self.model.requestLogsIsRefreshing)
-
             Button(self.model.text(.actionExportRequestLogs)) {
                 Task { await self.model.exportRequestLogs() }
             }

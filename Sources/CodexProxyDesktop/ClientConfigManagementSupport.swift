@@ -234,6 +234,18 @@ extension DesktopAppModel {
         )
     }
 
+    var clientConfigManagerRevealFilesButtonTitle: String {
+        self.localized(zh: "打开配置文件位置", en: "Reveal Config Files")
+    }
+
+    var clientConfigManagerViewBackupsButtonTitle: String {
+        self.localized(zh: "查看可回退备份", en: "View Restorable Backups")
+    }
+
+    var clientConfigManagerRefreshStatusButtonTitle: String {
+        self.localized(zh: "重新检测配置状态", en: "Refresh Config Status")
+    }
+
     func clientConfigManagerEndpointText(for target: ClientConfigTarget? = nil) -> String {
         let resolvedTarget = target ?? self.clientConfigManagerTarget
         switch resolvedTarget {

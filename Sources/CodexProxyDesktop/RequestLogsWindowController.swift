@@ -68,7 +68,7 @@ final class RequestLogsWindowController: NSObject, NSWindowDelegate {
     private func makeRootView(model: DesktopAppModel) -> AnyView {
         AnyView(
             RequestLogsView(model: model)
-                .preferredColorScheme(AppearanceStore.preferredColorScheme(for: model.preferences.themeMode))
+                .preferredColorScheme(model.resolvedPreferredColorScheme)
         )
     }
 }

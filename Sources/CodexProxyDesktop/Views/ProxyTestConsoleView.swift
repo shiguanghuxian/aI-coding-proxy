@@ -89,11 +89,6 @@ struct ProxyTestConsoleView: View {
                             Task { await self.model.refreshProxyTestConsole() }
                         }
                         .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
-
-                        Button(self.model.text(.commonDismiss)) {
-                            self.model.dismissProxyTestConsole()
-                        }
-                        .buttonStyle(AppActionButtonStyle(kind: .secondary))
                     }
                 }
 
@@ -118,11 +113,6 @@ struct ProxyTestConsoleView: View {
                             Task { await self.model.refreshProxyTestConsole() }
                         }
                         .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
-
-                        Button(self.model.text(.commonDismiss)) {
-                            self.model.dismissProxyTestConsole()
-                        }
-                        .buttonStyle(AppActionButtonStyle(kind: .secondary))
                     }
                 }
             }

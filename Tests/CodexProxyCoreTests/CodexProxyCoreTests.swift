@@ -3390,9 +3390,9 @@ final class CodexProxyCoreTests: XCTestCase {
             "cached_tokens": 5,
         ])
 
-        XCTAssertEqual(usage.inputTokens, 11)
+        XCTAssertEqual(usage.inputTokens, 16)
         XCTAssertEqual(usage.outputTokens, 7)
-        XCTAssertEqual(usage.totalTokens, 18)
+        XCTAssertEqual(usage.totalTokens, 23)
         XCTAssertEqual(usage.cacheHitTokens, 5)
         XCTAssertEqual((normalized?["cache_read_input_tokens"] as? NSNumber)?.int64Value, 5)
 
@@ -3410,6 +3410,58 @@ final class CodexProxyCoreTests: XCTestCase {
         )
         let responseUsage = message["usage"] as? [String: Any]
         XCTAssertEqual((responseUsage?["cache_read_input_tokens"] as? NSNumber)?.int64Value, 5)
+    }
+
+    func testAnthropicUsageCountsCacheReadTokensAsInputTokensForLogs() {
+        let usage = ProxyTranscoder.usageFromAnthropicUsage([
+            "input_tokens": 0,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 17,
+        ])
+
+        XCTAssertEqual(usage.inputTokens, 17)
+        XCTAssertEqual(usage.outputTokens, 7)
+        XCTAssertEqual(usage.totalTokens, 24)
+        XCTAssertEqual(usage.cacheHitTokens, 17)
+    }
+
+    func testAnthropicUsageCountsCacheCreationTokensAsInputTokensForLogs() {
+        let usage = ProxyTranscoder.usageFromAnthropicUsage([
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 5,
+            "cache_creation_input_tokens": 3,
+        ])
+
+        XCTAssertEqual(usage.inputTokens, 19)
+        XCTAssertEqual(usage.outputTokens, 7)
+        XCTAssertEqual(usage.totalTokens, 26)
+        XCTAssertEqual(usage.cacheHitTokens, 5)
+    }
+
+    func testAnthropicUsageCountsCacheCreationObjectAsInputTokensForLogs() {
+        let usage = ProxyTranscoder.usageFromAnthropicUsage([
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cache_creation": [
+                "ephemeral_5m_input_tokens": 3,
+                "ephemeral_1h_input_tokens": 4,
+            ],
+        ])
+        let normalized = ProxyTranscoder.normalizedAnthropicUsageObject([
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cache_creation": [
+                "ephemeral_5m_input_tokens": 3,
+                "ephemeral_1h_input_tokens": 4,
+            ],
+        ])
+
+        XCTAssertEqual(usage.inputTokens, 18)
+        XCTAssertEqual(usage.outputTokens, 7)
+        XCTAssertEqual(usage.totalTokens, 25)
+        XCTAssertNil(usage.cacheHitTokens)
+        XCTAssertEqual((normalized?["cache_creation_input_tokens"] as? NSNumber)?.int64Value, 7)
     }
 
     func testAnthropicMessageResponsePreservesExplicitZeroCacheReadTokens() {
@@ -3464,6 +3516,45 @@ final class CodexProxyCoreTests: XCTestCase {
         let usage = try XCTUnwrap(response["usage"] as? [String: Any])
 
         XCTAssertEqual((usage["cache_read_input_tokens"] as? NSNumber)?.int64Value, 0)
+    }
+
+    func testAnthropicUpstreamBridgeSyntheticStreamCountsCachedTokensInTotalInput() throws {
+        var state = AnthropicSyntheticStreamState()
+        let events: [SSEEvent] = [
+            .init(
+                event: "message_start",
+                data: #"{"type":"message_start","message":{"id":"msg_stream","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":17,"cache_creation_input_tokens":3}}}"#
+            ),
+            .init(
+                event: "content_block_delta",
+                data: #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#
+            ),
+            .init(
+                event: "message_delta",
+                data: #"{"type":"message_delta","usage":{"output_tokens":7,"cache_read_input_tokens":17}}"#
+            ),
+            .init(event: "message_stop", data: #"{"type":"message_stop"}"#),
+        ]
+
+        let translated = events.flatMap { event in
+            AnthropicUpstreamBridge.responseSSEChunks(
+                from: event,
+                state: &state,
+                requestedModel: "gpt-5.4"
+            )
+        }.flatMap { chunk in
+            ProxyTranscoder.decodeSSE(Data(chunk.utf8))
+        }
+
+        let completed = try XCTUnwrap(translated.last)
+        let payload = try XCTUnwrap(ProxyTranscoder.jsonObject(from: completed))
+        let response = try XCTUnwrap(payload["response"] as? [String: Any])
+        let usage = try XCTUnwrap(response["usage"] as? [String: Any])
+
+        XCTAssertEqual((usage["input_tokens"] as? NSNumber)?.int64Value, 20)
+        XCTAssertEqual((usage["output_tokens"] as? NSNumber)?.int64Value, 7)
+        XCTAssertEqual((usage["total_tokens"] as? NSNumber)?.int64Value, 27)
+        XCTAssertEqual((usage["cache_read_input_tokens"] as? NSNumber)?.int64Value, 17)
     }
 
     func testDuplicateImportPreservesExistingEnabledState() async throws {

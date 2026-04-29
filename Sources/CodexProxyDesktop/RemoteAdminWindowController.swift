@@ -98,10 +98,8 @@ final class RemoteAdminWindowController: NSObject, NSWindowDelegate, RemoteAdmin
 
     private func makeRootView() -> AnyView {
         AnyView(
-            RemoteAdminWindowView(model: self.model) { [weak self] in
-                self?.closeWindow()
-            }
-            .preferredColorScheme(AppearanceStore.preferredColorScheme(for: self.model.appModel.preferences.themeMode))
+            RemoteAdminWindowView(model: self.model)
+            .preferredColorScheme(self.model.appModel.resolvedPreferredColorScheme)
         )
     }
 }

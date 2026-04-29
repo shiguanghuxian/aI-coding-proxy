@@ -9,9 +9,11 @@ enum DesktopBrandIcon {
 }
 
 private enum MainWindowTitlebarControlsMetrics {
-    static let minimumWidth: CGFloat = 420
-    static let minimumHeight: CGFloat = 26
-    static let trailingInset: CGFloat = 10
+    static let minimumWidth: CGFloat = 510
+    static let minimumHeight: CGFloat = 44
+    static let topInset: CGFloat = 4
+    static let bottomInset: CGFloat = 2
+    static let trailingInset: CGFloat = 8
 }
 
 @main
@@ -43,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItemRenderResult: MenuBarStatusItemRenderer.RenderResult?
     private var didLoadInitialData = false
     private var didHandleInitialHelpPresentation = false
+    private var effectiveAppearanceObservation: NSKeyValueObservation?
     private var cancellables = Set<AnyCancellable>()
 
     override init() {
@@ -67,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DesktopMainWindow.configureOpenAction { [weak self] in
             self?.openMainWindow()
         }
+        self.configureEffectiveAppearanceObserver()
         self.configureModelObservers()
         self.configureStatusItem()
         self.openMainWindow()
@@ -117,6 +121,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .store(in: &self.cancellables)
     }
 
+    private func configureEffectiveAppearanceObserver() {
+        self.effectiveAppearanceObservation = NSApplication.shared.observe(
+            \.effectiveAppearance,
+            options: [.new]
+        ) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                self?.refreshSystemAppearanceIfNeeded()
+            }
+        }
+    }
+
+    private func refreshSystemAppearanceIfNeeded() {
+        guard self.model.preferences.themeMode == .system else { return }
+        guard self.model.refreshSystemColorScheme() else { return }
+        self.model.refreshThemeSensitiveWindows()
+    }
+
     private func loadInitialData() {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -161,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func refreshMainWindow() {
         self.mainWindow?.title = self.model.mainWindowTitle
+        self.mainHostingController?.rootView = DesktopMainWindowHostView(model: self.model)
         if let window = self.mainWindow {
             self.applyMainWindowChrome(window)
             AppearanceStore.applyWindowAppearance(window, for: self.model.preferences.themeMode)
@@ -289,6 +311,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    private func refreshStatusPopover() {
+        if let hostingController = self.statusPopover?.contentViewController as? NSHostingController<MenuBarPanelHostView> {
+            hostingController.rootView = MenuBarPanelHostView(model: self.model)
+        }
+    }
+
     private func renderStatusItemImages(
         presentation: DesktopAppModel.MenuBarTokenUsagePresentation?,
         foregroundColor: NSColor,
@@ -398,6 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func refreshAppChrome() {
         self.refreshMainWindow()
+        self.refreshStatusPopover()
         self.refreshStatusItem()
     }
 
@@ -434,7 +463,7 @@ private struct DesktopMainWindowHostView: View {
     var body: some View {
         RootShellView(model: self.model)
             .frame(minWidth: 1160, minHeight: 760)
-            .preferredColorScheme(AppearanceStore.preferredColorScheme(for: self.model.preferences.themeMode))
+            .preferredColorScheme(self.model.resolvedPreferredColorScheme)
     }
 }
 
@@ -451,12 +480,15 @@ private struct MainWindowTitlebarControlsHostView: View {
             reloadTitle: self.model.text(.commonReload),
             onReload: { Task { await self.model.loadAll() } },
             modeEntryTitle: self.interfaceModeToolbarTitle,
+            modeEntrySymbol: self.interfaceModeToolbarSymbol,
             modeEntryHelpText: self.interfaceModeToolbarHelpText,
             onModeEntry: { self.model.switchInterfaceMode(target: self.interfaceModeToolbarTarget) }
         )
         .frame(minWidth: MainWindowTitlebarControlsMetrics.minimumWidth, alignment: .trailing)
+        .padding(.top, MainWindowTitlebarControlsMetrics.topInset)
+        .padding(.bottom, MainWindowTitlebarControlsMetrics.bottomInset)
         .padding(.trailing, MainWindowTitlebarControlsMetrics.trailingInset)
-        .preferredColorScheme(AppearanceStore.preferredColorScheme(for: self.model.preferences.themeMode))
+        .preferredColorScheme(self.model.resolvedPreferredColorScheme)
     }
 
     private var interfaceModeToolbarTarget: DesktopInterfaceMode {
@@ -465,6 +497,15 @@ private struct MainWindowTitlebarControlsHostView: View {
 
     private var interfaceModeToolbarTitle: String {
         self.model.label(for: self.interfaceModeToolbarTarget)
+    }
+
+    private var interfaceModeToolbarSymbol: String {
+        switch self.interfaceModeToolbarTarget {
+        case .minimal:
+            "rectangle.compress.vertical"
+        case .full:
+            "rectangle.expand.vertical"
+        }
     }
 
     private var interfaceModeToolbarHelpText: String {
@@ -483,7 +524,7 @@ private struct MenuBarPanelHostView: View {
     var body: some View {
         MenuBarPanel(model: self.model)
             .id(self.model.preferences.languageMode)
-            .preferredColorScheme(AppearanceStore.preferredColorScheme(for: self.model.preferences.themeMode))
+            .preferredColorScheme(self.model.resolvedPreferredColorScheme)
     }
 }
 
