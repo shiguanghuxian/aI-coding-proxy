@@ -8379,6 +8379,140 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testStopAccountCooldownConfirmsCallsAdminReloadsAccountsAndShowsSuccess() async {
+        let coolingAccount = Self.makeAccount(
+            id: "stop-cooling-api-account",
+            label: "Stop Cooling API",
+            accountID: "acct-stop-cooling-api",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://example.com/v1",
+            consecutiveFailureCount: 3,
+            cooldownUntil: Helpers.now() + 3_600,
+            usageError: "API key cooling down"
+        )
+        let probe = AccountCooldownStopProbe(account: coolingAccount)
+        let admin = AdminAPIClient(
+            accountsHandler: { await probe.accounts() },
+            getStatusHandler: { Self.makeProxyStatus(running: false) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            stopAccountCooldownHandler: { id in try await probe.stop(id: id) }
+        )
+        var confirmationContent: DesktopAppModel.AccountCooldownStopConfirmationContent?
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmStopAccountCooldownHandler: { content in
+                confirmationContent = content
+                return true
+            }
+        )
+        model.preferences.languageMode = .zhHans
+        model.accounts = [coolingAccount]
+
+        XCTAssertTrue(model.canStopAccountCooldown(coolingAccount))
+
+        await model.stopAccountCooldown(coolingAccount)
+
+        XCTAssertEqual(confirmationContent?.title, model.text(.confirmStopAccountCooldownTitle))
+        XCTAssertEqual(confirmationContent?.actionTitle, model.text(.confirmStopAccountCooldownAction))
+        XCTAssertTrue(confirmationContent?.informativeText.contains(coolingAccount.label) == true)
+        let callCount = await probe.callCount()
+        XCTAssertEqual(callCount, 1)
+        guard let updated = model.accounts.first else {
+            XCTFail("Expected account list to be reloaded.")
+            return
+        }
+        XCTAssertEqual(updated.consecutiveFailureCount, 0)
+        XCTAssertNil(updated.cooldownUntil)
+        XCTAssertNil(updated.usageError)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successAccountCooldownStopped))
+        XCTAssertTrue(model.banners.first?.detail?.contains(updated.label) == true)
+    }
+
+    @MainActor
+    func testStopAccountCooldownCancelDoesNotCallAdmin() async {
+        let coolingAccount = Self.makeAccount(
+            id: "cancel-stop-cooling-api-account",
+            label: "Cancel Stop Cooling API",
+            accountID: "acct-cancel-stop-cooling-api",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://example.com/v1",
+            consecutiveFailureCount: 4,
+            cooldownUntil: Helpers.now() + 3_600,
+            usageError: "API key cooling down"
+        )
+        let probe = AccountCooldownStopProbe(account: coolingAccount)
+        let admin = AdminAPIClient(
+            accountsHandler: { await probe.accounts() },
+            getStatusHandler: { Self.makeProxyStatus(running: false) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            stopAccountCooldownHandler: { id in try await probe.stop(id: id) }
+        )
+        var confirmationContent: DesktopAppModel.AccountCooldownStopConfirmationContent?
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmStopAccountCooldownHandler: { content in
+                confirmationContent = content
+                return false
+            }
+        )
+        model.accounts = [coolingAccount]
+
+        await model.stopAccountCooldown(coolingAccount)
+
+        XCTAssertNotNil(confirmationContent)
+        let callCount = await probe.callCount()
+        XCTAssertEqual(callCount, 0)
+        XCTAssertEqual(model.accounts.first, coolingAccount)
+        XCTAssertTrue(model.banners.isEmpty)
+    }
+
+    @MainActor
+    func testCanStopAccountCooldownOnlyForCoolingManualAPIKeyAccounts() {
+        let model = DesktopAppModel()
+        let coolingOpenAIAPIKey = Self.makeAccount(
+            id: "cooling-openai-api-key",
+            label: "Cooling OpenAI API Key",
+            accountID: "acct-cooling-openai-api-key",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://example.com/v1",
+            consecutiveFailureCount: 3,
+            cooldownUntil: Helpers.now() + 3_600
+        )
+        let coolingAnthropicAPIKey = Self.makeAccount(
+            id: "cooling-anthropic-api-key",
+            label: "Cooling Anthropic API Key",
+            accountID: "acct-cooling-anthropic-api-key",
+            authMode: .anthropicAPIKey,
+            upstreamBaseURL: "https://example.com",
+            consecutiveFailureCount: 3,
+            cooldownUntil: Helpers.now() + 3_600
+        )
+        let runningAPIKey = Self.makeAccount(
+            id: "running-api-key",
+            label: "Running API Key",
+            accountID: "acct-running-api-key",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://example.com/v1",
+            consecutiveFailureCount: 0,
+            cooldownUntil: nil
+        )
+        let coolingOAuth = Self.makeAccount(
+            id: "cooling-oauth",
+            label: "Cooling OAuth",
+            accountID: "acct-cooling-oauth",
+            authMode: .chatGPT,
+            consecutiveFailureCount: 3,
+            cooldownUntil: Helpers.now() + 3_600
+        )
+
+        XCTAssertTrue(model.canStopAccountCooldown(coolingOpenAIAPIKey))
+        XCTAssertTrue(model.canStopAccountCooldown(coolingAnthropicAPIKey))
+        XCTAssertFalse(model.canStopAccountCooldown(runningAPIKey))
+        XCTAssertFalse(model.canStopAccountCooldown(coolingOAuth))
+    }
+
+    @MainActor
     func testRefreshUsageForAccountFailureClearsRefreshingStateAndPublishesError() async {
         let account = Self.makeAccount(
             id: "oauth-account",
@@ -14447,6 +14581,34 @@ private actor AccountManagedProxyNodeClearProbe {
 
     func callCount() -> Int {
         self.clearCalls
+    }
+}
+
+private actor AccountCooldownStopProbe {
+    private var storedAccount: AccountSummary
+    private var stopCalls = 0
+
+    init(account: AccountSummary) {
+        self.storedAccount = account
+    }
+
+    func accounts() -> [AccountSummary] {
+        [self.storedAccount]
+    }
+
+    func stop(id: String) throws -> AccountSummary {
+        guard id == self.storedAccount.id else {
+            throw ProxyError.message("unexpected account id \(id)")
+        }
+        self.stopCalls += 1
+        self.storedAccount.consecutiveFailureCount = 0
+        self.storedAccount.cooldownUntil = nil
+        self.storedAccount.usageError = nil
+        return self.storedAccount
+    }
+
+    func callCount() -> Int {
+        self.stopCalls
     }
 }
 

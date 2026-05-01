@@ -1236,6 +1236,7 @@ struct AccountPoolDetailSidebar: View {
                                 self.editActionButton(for: account)
                                 self.outboundNodeButton(for: account)
                                 self.modelRoutingButton(for: account)
+                                self.stopCooldownButton(for: account)
                                 self.enableToggleButton(for: account)
                                 self.removeButton(for: account)
                             }
@@ -1410,6 +1411,16 @@ struct AccountPoolDetailSidebar: View {
             Task { await self.model.toggleAccountEnabled(account) }
         }
         .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+    }
+
+    @ViewBuilder
+    private func stopCooldownButton(for account: AccountSummary) -> some View {
+        if self.model.canStopAccountCooldown(account) {
+            Button(self.model.text(.actionStopAccountCooldown)) {
+                Task { await self.model.stopAccountCooldown(account) }
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+        }
     }
 
     private func removeButton(for account: AccountSummary) -> some View {
@@ -2475,6 +2486,7 @@ private struct AccountCard: View {
                 self.editActionButton
                 self.outboundNodeButton
                 self.modelRoutingButton
+                self.stopCooldownButton
                 Spacer(minLength: 0)
                 self.moreActionsMenu
             }
@@ -2619,6 +2631,17 @@ private struct AccountCard: View {
         }
         .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private var stopCooldownButton: some View {
+        if self.model.canStopAccountCooldown(self.account) {
+            Button(self.model.text(.actionStopAccountCooldown)) {
+                Task { await self.model.stopAccountCooldown(self.account) }
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+            .fixedSize(horizontal: true, vertical: false)
+        }
     }
 
     @ViewBuilder

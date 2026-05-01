@@ -336,6 +336,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionAccountCardEdit
     case actionAccountCardNode
     case actionAccountCardMore
+    case actionStopAccountCooldown
     case actionSaveAccount
     case actionRotateAPIKey
     case actionOpenRequestLogs
@@ -518,6 +519,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case confirmClearAccountManagedProxyNodesTitle
     case confirmClearAccountManagedProxyNodesMessage
     case confirmClearAccountManagedProxyNodesAction
+    case confirmStopAccountCooldownTitle
+    case confirmStopAccountCooldownAction
     case confirmRemoveAuthorizationTitle
     case confirmRemoveAuthorizationMessage
     case confirmImportLocalAccountsToRemoteTitle
@@ -646,6 +649,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAccountManagedProxyNodeUpdated
     case successAccountManagedProxyNodesCleared
     case successAccountModelRoutingUpdated
+    case successAccountCooldownStopped
     case successUsageRefreshed
     case successAccountUsageRefreshed
     case successProxyKeyRotated
@@ -705,6 +709,7 @@ public enum OperationContext: String, Sendable {
     case updateAccountManagedProxyNode
     case clearAccountManagedProxyNodes
     case updateAccountModelRouting
+    case stopAccountCooldown
     case refreshUsage
     case refreshAccountUsage
     case rotateProxyKey
@@ -1061,6 +1066,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAccountManagedProxyNodesCleared)
         case .updateAccountModelRouting:
             return self.text(.successAccountModelRoutingUpdated)
+        case .stopAccountCooldown:
+            return self.text(.successAccountCooldownStopped)
         case .refreshUsage:
             return self.text(.successUsageRefreshed)
         case .refreshAccountUsage:
@@ -1153,7 +1160,7 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .saveSettings || context == .saveRemoteHost || context == .deleteRemoteHost || lower.contains("config") || lower.contains("settings") {
             return self.text(.errorConfigurationFailed)
         }
-        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .reorderAccounts {
+        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .reorderAccounts {
             return self.text(.errorAccountManagementFailed)
         }
         if context == .copyEndpoint || context == .copyAPIKey || context == .copyClaudeCodeEnv || context == .copyGeminiCLIEnv || context == .copyOAuthLink || context == .copyManagedProxyTerminalCommand {
@@ -1193,6 +1200,8 @@ public struct LocalizationStore: Sendable, Equatable {
             )
         case .updateAccountModelRouting:
             return self.localized(zh: "已更新账号模型转换：\(detail)", en: "Updated account model routing: \(detail)")
+        case .stopAccountCooldown:
+            return self.localized(zh: "已停止账号冷却：\(detail)", en: "Stopped account cooldown: \(detail)")
         case .enableAccount:
             return self.localized(zh: "已启用账号：\(detail)", en: "Enabled account: \(detail)")
         case .disableAccount:
@@ -2011,6 +2020,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardEdit: "Edit",
             .actionAccountCardNode: "Outbound Node",
             .actionAccountCardMore: "More",
+            .actionStopAccountCooldown: "Stop Cooldown",
             .actionSaveAccount: "Save Account",
             .actionRotateAPIKey: "Rotate API Key",
             .actionOpenRequestLogs: "Detailed Logs",
@@ -2193,6 +2203,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearAccountManagedProxyNodesTitle: "Clear custom outbound nodes for all accounts?",
             .confirmClearAccountManagedProxyNodesMessage: "This removes every account-level outbound node override, including accounts hidden by the current search or filters. After clearing, all accounts follow the outbound mode from Settings again.",
             .confirmClearAccountManagedProxyNodesAction: "Clear All Overrides",
+            .confirmStopAccountCooldownTitle: "Stop this account's cooldown?",
+            .confirmStopAccountCooldownAction: "Stop Cooldown",
             .confirmRemoveAuthorizationTitle: "Remove this local authorization?",
             .confirmRemoveAuthorizationMessage: "This only removes the saved authorization from AI Coding Proxy's local account pool. It does not clear your current `~/.codex/auth.json` login state.",
             .confirmImportLocalAccountsToRemoteTitle: "Import local desktop accounts to this remote host?",
@@ -2321,6 +2333,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodeUpdated: "Account outbound node updated",
             .successAccountManagedProxyNodesCleared: "Account outbound nodes cleared",
             .successAccountModelRoutingUpdated: "Account model routing updated",
+            .successAccountCooldownStopped: "Account cooldown stopped",
             .successUsageRefreshed: "Usage refreshed",
             .successAccountUsageRefreshed: "Account usage refreshed",
             .successProxyKeyRotated: "API key rotated",
@@ -2592,6 +2605,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardEdit: "编辑",
             .actionAccountCardNode: "出站节点",
             .actionAccountCardMore: "更多",
+            .actionStopAccountCooldown: "停止冷却",
             .actionSaveAccount: "保存账号",
             .actionRotateAPIKey: "轮换 API Key",
             .actionOpenRequestLogs: "查看详细日志",
@@ -2774,6 +2788,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearAccountManagedProxyNodesTitle: "确认清空全部账号的自定义出站节点？",
             .confirmClearAccountManagedProxyNodesMessage: "这个操作会清空所有账号已保存的自定义出站节点，包括当前搜索或筛选没有显示出来的账号。清空后，全部账号都会重新跟随设置页的全局出站模式。",
             .confirmClearAccountManagedProxyNodesAction: "全部清空",
+            .confirmStopAccountCooldownTitle: "确认停止这个账号的冷却？",
+            .confirmStopAccountCooldownAction: "停止冷却",
             .confirmRemoveAuthorizationTitle: "确认移除这条本地授权？",
             .confirmRemoveAuthorizationMessage: "这只会删除 AI Coding Proxy 账号池里保存的本地授权记录，不会清除当前 `~/.codex/auth.json` 登录态。",
             .confirmImportLocalAccountsToRemoteTitle: "确认把本地账号导入到这台远端主机？",
@@ -2902,6 +2918,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodeUpdated: "账号出站节点已更新",
             .successAccountManagedProxyNodesCleared: "账号出站节点已清空",
             .successAccountModelRoutingUpdated: "账号模型转换已更新",
+            .successAccountCooldownStopped: "账号冷却已停止",
             .successUsageRefreshed: "用量已刷新",
             .successAccountUsageRefreshed: "账号用量已刷新",
             .successProxyKeyRotated: "API Key 已轮换",

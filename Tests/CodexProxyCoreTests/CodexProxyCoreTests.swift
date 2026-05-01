@@ -4263,6 +4263,41 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
+    func testRefreshAllUsageLimitsManualAPIKeyRefreshesToThreeConcurrentTasks() async throws {
+        let probe = ConcurrentRequestProbe()
+        let upstream = Self.makeDelayedOpenAICompatibleModelsApplication(probe: probe)
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            for index in 0..<5 {
+                var record = try Self.makeManualAPIKeyRecordFixture(
+                    baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                    apiKey: "sk-refresh-all-concurrent-\(index)",
+                    label: "Concurrent API \(index)"
+                )
+                record.usageError = "previous error"
+                XCTAssertFalse(try store.upsertAccount(record))
+            }
+
+            let refreshed = try await service.refreshAllUsage(config: AppConfig())
+            let snapshot = await probe.snapshot()
+
+            XCTAssertEqual(refreshed.count, 5)
+            XCTAssertTrue(
+                refreshed.allSatisfy { $0.usageError == nil },
+                refreshed.compactMap(\.usageError).joined(separator: " | ")
+            )
+            XCTAssertEqual(snapshot.totalHits, 5)
+            XCTAssertEqual(snapshot.maxActiveHits, 3)
+        }
+    }
+
     func testRefreshGenericManualAPIKeyFallbackValidationUsesAccountModelRoutingBeforePresetCandidates() async throws {
         let probe = ManualValidationProbe()
         let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
@@ -4339,6 +4374,107 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
+    func testRefreshGenericManualAPIKeyFallbackValidationHandlesNotImplementedModelsEndpoint() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
+            probe: probe,
+            providerPreset: .genericOpenAICompatible,
+            modelsStatus: HTTPResponse.Status(code: 501, reasonPhrase: "Not Implemented")
+        )
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            var record = try Self.makeManualAPIKeyRecordFixture(
+                baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                apiKey: "sk-generic-not-implemented",
+                label: "Generic Not Implemented API"
+            )
+            record.usageError = "previous error"
+            XCTAssertFalse(try store.upsertAccount(record))
+
+            let refreshed = try await service.refreshUsage(id: record.id, config: AppConfig())
+            let snapshot = await probe.snapshot()
+
+            XCTAssertNil(refreshed.usageError)
+            XCTAssertEqual(snapshot.modelsHits, 1)
+            XCTAssertEqual(snapshot.responsesBodies.count, 1)
+        }
+    }
+
+    func testRefreshGenericManualAPIKeyFallbackValidationHandlesBadRequestModelsMissing() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
+            probe: probe,
+            providerPreset: .genericOpenAICompatible,
+            modelsStatus: .badRequest
+        )
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            var record = try Self.makeManualAPIKeyRecordFixture(
+                baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                apiKey: "sk-generic-models-missing",
+                label: "Generic Models Missing API"
+            )
+            record.usageError = "previous error"
+            XCTAssertFalse(try store.upsertAccount(record))
+
+            let refreshed = try await service.refreshUsage(id: record.id, config: AppConfig())
+            let snapshot = await probe.snapshot()
+
+            XCTAssertNil(refreshed.usageError)
+            XCTAssertEqual(snapshot.modelsHits, 1)
+            XCTAssertEqual(snapshot.responsesBodies.count, 1)
+        }
+    }
+
+    func testRefreshGenericManualAPIKeyDoesNotFallbackForUnauthorizedModelsEndpoint() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
+            probe: probe,
+            providerPreset: .genericOpenAICompatible,
+            modelsStatus: .unauthorized,
+            modelsBody: #"{"error":{"message":"invalid api key"}}"#
+        )
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            var record = try Self.makeManualAPIKeyRecordFixture(
+                baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                apiKey: "sk-generic-unauthorized",
+                label: "Generic Unauthorized API"
+            )
+            record.usageError = "previous error"
+            XCTAssertFalse(try store.upsertAccount(record))
+
+            let refreshed = try await service.refreshUsage(id: record.id, config: AppConfig())
+            let snapshot = await probe.snapshot()
+
+            XCTAssertTrue(refreshed.usageError?.contains("invalid api key") == true)
+            XCTAssertEqual(snapshot.modelsHits, 1)
+            XCTAssertEqual(snapshot.responsesBodies.count, 0)
+            XCTAssertEqual(snapshot.chatBodies.count, 0)
+        }
+    }
+
     func testRefreshGoogleGeminiManualAPIKeyFallbackValidationUsesChatCompletionsProbe() async throws {
         let probe = ManualValidationProbe()
         let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
@@ -4373,6 +4509,40 @@ final class CodexProxyCoreTests: XCTestCase {
             XCTAssertEqual(snapshot.chatBodies.count, 1)
             XCTAssertTrue(snapshot.chatBodies[0].contains(#""model":"gemini-2.5-flash""#))
             XCTAssertTrue(snapshot.chatBodies[0].contains(#""content":"你好""#))
+        }
+    }
+
+    func testRefreshGoogleGeminiManualAPIKeyFallbackValidationHandlesBadRequestModelsMissing() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleValidationFallbackApplication(
+            probe: probe,
+            providerPreset: .googleGeminiCompatible,
+            modelsStatus: .badRequest
+        )
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            var record = try Self.makeManualAPIKeyRecordFixture(
+                baseURL: "http://localhost:\(client.port ?? 0)/v1beta/openai",
+                apiKey: "sk-gemini-models-missing",
+                label: "Gemini Models Missing API",
+                providerPreset: .googleGeminiCompatible
+            )
+            record.usageError = "previous error"
+            XCTAssertFalse(try store.upsertAccount(record))
+
+            let refreshed = try await service.refreshUsage(id: record.id, config: AppConfig())
+            let snapshot = await probe.snapshot()
+
+            XCTAssertNil(refreshed.usageError)
+            XCTAssertEqual(snapshot.modelsHits, 1)
+            XCTAssertEqual(snapshot.chatBodies.count, 1)
         }
     }
 
@@ -4493,6 +4663,40 @@ final class CodexProxyCoreTests: XCTestCase {
             XCTAssertEqual(stored.consecutiveFailureCount, 0)
             XCTAssertNil(stored.cooldownUntil)
             XCTAssertNil(stored.usageError)
+        }
+    }
+
+    func testRefreshAnthropicManualAPIKeyFallbackValidationHandlesBadRequestModelsMissing() async throws {
+        let upstream = Self.makeAnthropicValidationFallbackApplication(
+            modelsStatus: .badRequest,
+            modelsBody: #"{"error":{"message":"models missing"}}"#,
+            expectedMessagesModel: "qwen3.6-plus",
+            expectedProbeText: "你好"
+        )
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let secretStore = SecretStore(dataDirectory: directory)
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let service = AccountService(store: store, secretStore: secretStore)
+            var record = try Self.makeManualAPIKeyRecordFixture(
+                baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                apiKey: "sk-anthropic-models-missing",
+                label: "Anthropic Models Missing API",
+                providerPreset: .anthropicAPICompatible
+            )
+            record.modelRouting = AccountModelRoutingConfig(defaultTargetModel: "qwen3.6-plus")
+            record.usageError = "previous error"
+            XCTAssertFalse(try store.upsertAccount(record))
+
+            let refreshed = try await service.refreshUsage(id: record.id, config: AppConfig())
+
+            XCTAssertNil(refreshed.usageError)
+            XCTAssertEqual(refreshed.consecutiveFailureCount, 0)
+            XCTAssertNil(refreshed.cooldownUntil)
         }
     }
 
@@ -4727,6 +4931,82 @@ final class CodexProxyCoreTests: XCTestCase {
             XCTAssertEqual(stored.consecutiveFailureCount, 2)
             XCTAssertEqual(stored.cooldownUntil, expectedCooldown)
             XCTAssertTrue(stored.usageError?.contains("models unavailable") == true)
+        }
+    }
+
+    func testStopAccountCooldownClearsAPIKeyFailureStateAndCoolingUsageError() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let service = AccountService(store: store, secretStore: secretStore)
+        var record = try Self.makeManualAPIKeyRecordFixture(
+            baseURL: "https://example.com/v1",
+            apiKey: "sk-stop-cooldown",
+            label: "Cooling API"
+        )
+        record.consecutiveFailureCount = 3
+        record.cooldownUntil = Helpers.now() + 3_600
+        record.usageError = "API key cooling down"
+        XCTAssertFalse(try store.upsertAccount(record))
+
+        let updated = try await service.stopAccountCooldown(id: record.id)
+
+        XCTAssertEqual(updated.consecutiveFailureCount, 0)
+        XCTAssertNil(updated.cooldownUntil)
+        XCTAssertNil(updated.usageError)
+
+        let stored = try store.loadAccountRecord(id: record.id)
+        XCTAssertEqual(stored.consecutiveFailureCount, 0)
+        XCTAssertNil(stored.cooldownUntil)
+        XCTAssertNil(stored.usageError)
+    }
+
+    func testStopAccountCooldownKeepsNonCoolingUsageError() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let service = AccountService(store: store, secretStore: secretStore)
+        var record = try Self.makeManualAPIKeyRecordFixture(
+            baseURL: "https://example.com/v1",
+            apiKey: "sk-stop-cooldown-keeps-error",
+            label: "Cooling API With Error"
+        )
+        record.consecutiveFailureCount = 3
+        record.cooldownUntil = Helpers.now() + 3_600
+        record.usageError = "models unavailable"
+        XCTAssertFalse(try store.upsertAccount(record))
+
+        let updated = try await service.stopAccountCooldown(id: record.id)
+
+        XCTAssertEqual(updated.consecutiveFailureCount, 0)
+        XCTAssertNil(updated.cooldownUntil)
+        XCTAssertEqual(updated.usageError, "models unavailable")
+    }
+
+    func testStopAccountCooldownRejectsNonAPIKeyAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let service = AccountService(store: store, secretStore: secretStore)
+        var record = try self.makeChatGPTAccountRecord(label: "OAuth Account")
+        record.consecutiveFailureCount = 3
+        record.cooldownUntil = Helpers.now() + 3_600
+        XCTAssertFalse(try store.upsertAccount(record))
+
+        do {
+            _ = try await service.stopAccountCooldown(id: record.id)
+            XCTFail("Expected non-API-key cooldown stop to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("仅支持 API Key 类型账号"))
         }
     }
 
@@ -9607,6 +9887,36 @@ final class CodexProxyCoreTests: XCTestCase {
         return Application(router: router)
     }
 
+    private static func makeDelayedOpenAICompatibleModelsApplication(
+        probe: ConcurrentRequestProbe,
+        delayMS: Int64 = 100
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        router.get("v1/models") { _, _ async throws in
+            await probe.begin()
+            do {
+                try await Task.sleep(for: .milliseconds(delayMS))
+                await probe.end()
+                return Response(
+                    status: .ok,
+                    headers: Self.jsonHeaders(),
+                    body: .init(byteBuffer: ByteBuffer(string: #"{"object":"list","data":[{"id":"gpt-5.4","object":"model","created":0,"owned_by":"openai"}]}"#))
+                )
+            } catch {
+                await probe.end()
+                throw error
+            }
+        }
+        router.post("v1/responses") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"id":"resp_validation","status":"completed","output":[]}"#))
+            )
+        }
+        return Application(router: router)
+    }
+
     private static func makeAnthropicValidationFallbackApplication(
         modelsStatus: HTTPResponse.Status = .ok,
         modelsBody: String? = nil,
@@ -9689,6 +9999,7 @@ final class CodexProxyCoreTests: XCTestCase {
         probe: ManualValidationProbe,
         providerPreset: OpenAICompatibleProviderPreset,
         modelsStatus: HTTPResponse.Status = .notFound,
+        modelsBody: String? = nil,
         unsupportedModels: Set<String> = []
     ) -> Application<RouterResponder<BasicRequestContext>> {
         let router = Router()
@@ -9704,7 +10015,7 @@ final class CodexProxyCoreTests: XCTestCase {
                         byteBuffer: ByteBuffer(
                             string: modelsStatus == .ok
                                 ? #"{"object":"list","data":[{"id":"gpt-5.4","object":"model","created":0,"owned_by":"openai"}]}"#
-                                : #"{"error":{"message":"models missing"}}"#
+                                : (modelsBody ?? #"{"error":{"message":"models missing"}}"#)
                         )
                     )
                 )
@@ -9741,7 +10052,7 @@ final class CodexProxyCoreTests: XCTestCase {
                         byteBuffer: ByteBuffer(
                             string: modelsStatus == .ok
                                 ? #"{"object":"list","data":[{"id":"gemini-2.5-flash","object":"model","created":0,"owned_by":"google"}]}"#
-                                : #"{"error":{"message":"models missing"}}"#
+                                : (modelsBody ?? #"{"error":{"message":"models missing"}}"#)
                         )
                     )
                 )
@@ -11024,6 +11335,26 @@ private actor ManualValidationProbe {
 
     func snapshot() -> (modelsHits: Int, responsesBodies: [String], chatBodies: [String]) {
         (self.modelsHits, self.responsesBodies, self.chatBodies)
+    }
+}
+
+private actor ConcurrentRequestProbe {
+    private var activeHits = 0
+    private var maxActiveHits = 0
+    private var totalHits = 0
+
+    func begin() {
+        self.activeHits += 1
+        self.totalHits += 1
+        self.maxActiveHits = max(self.maxActiveHits, self.activeHits)
+    }
+
+    func end() {
+        self.activeHits -= 1
+    }
+
+    func snapshot() -> (totalHits: Int, maxActiveHits: Int) {
+        (self.totalHits, self.maxActiveHits)
     }
 }
 

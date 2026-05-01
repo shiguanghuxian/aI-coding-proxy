@@ -29,6 +29,7 @@ final class DesktopAppModel: ObservableObject {
 
     typealias ConfirmStopDaemonHandler = () -> Bool
     typealias ConfirmClearAccountManagedProxyNodesHandler = () -> Bool
+    typealias ConfirmStopAccountCooldownHandler = (AccountCooldownStopConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
@@ -86,6 +87,12 @@ final class DesktopAppModel: ObservableObject {
     }
 
     struct ClearAccountManagedProxyNodesConfirmationContent: Equatable {
+        var title: String
+        var informativeText: String
+        var actionTitle: String
+    }
+
+    struct AccountCooldownStopConfirmationContent: Equatable {
         var title: String
         var informativeText: String
         var actionTitle: String
@@ -444,6 +451,7 @@ final class DesktopAppModel: ObservableObject {
     private let preferencesStore: DesktopPreferencesStore
     private let confirmStopDaemonHandler: ConfirmStopDaemonHandler?
     private let confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler?
+    private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
     let clientConfigManagerWindowFactory: ClientConfigManagerWindowFactory
@@ -505,6 +513,7 @@ final class DesktopAppModel: ObservableObject {
         onboardingWindowFactory: @escaping (DesktopAppModel) -> OnboardingWindowControlling = { OnboardingWindowController(model: $0) },
         confirmStopDaemonHandler: ConfirmStopDaemonHandler? = nil,
         confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler? = nil,
+        confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
         confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil
     ) {
@@ -522,6 +531,7 @@ final class DesktopAppModel: ObservableObject {
         self.onboardingWindowFactory = onboardingWindowFactory
         self.confirmStopDaemonHandler = confirmStopDaemonHandler
         self.confirmClearAccountManagedProxyNodesHandler = confirmClearAccountManagedProxyNodesHandler
+        self.confirmStopAccountCooldownHandler = confirmStopAccountCooldownHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.preferences = preferencesStore.load()
@@ -1432,6 +1442,10 @@ final class DesktopAppModel: ObservableObject {
 
     var accountCardNodeActionTitle: String {
         self.text(.actionAccountCardNode)
+    }
+
+    func canStopAccountCooldown(_ account: AccountSummary) -> Bool {
+        account.authMode.isManualAPIKey && account.isCoolingDown()
     }
 
     var accountCardMoreActionTitle: String {
@@ -3427,6 +3441,21 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
+    func stopAccountCooldown(_ account: AccountSummary) async {
+        guard self.canStopAccountCooldown(account) else { return }
+        guard self.confirmStopAccountCooldown(for: account) else { return }
+
+        self.isBusy = true
+        defer { self.isBusy = false }
+        do {
+            let updated = try await self.admin.stopAccountCooldown(id: account.id)
+            try await self.reloadAccountState()
+            self.publishSuccess(.stopAccountCooldown, detail: updated.label)
+        } catch {
+            self.present(error: error, context: .stopAccountCooldown)
+        }
+    }
+
     func removeAccount(_ account: AccountSummary) async {
         guard self.confirmRemoveAuthorization(for: account) else { return }
 
@@ -4254,6 +4283,17 @@ final class DesktopAppModel: ObservableObject {
         )
     }
 
+    func stopAccountCooldownConfirmationContent(for account: AccountSummary) -> AccountCooldownStopConfirmationContent {
+        AccountCooldownStopConfirmationContent(
+            title: self.text(.confirmStopAccountCooldownTitle),
+            informativeText: self.localized(
+                zh: "即将停止 `\(account.label)` 的本地 API Key 冷却状态。确认后该账号会立刻重新参与请求路由；如果上游仍然失败，系统会重新累计失败并再次进入冷却。",
+                en: "This stops the local API key cooldown for `\(account.label)`. After confirmation, this account can be routed immediately again. If the upstream still fails, failures will be counted again and cooldown may return."
+            ),
+            actionTitle: self.text(.confirmStopAccountCooldownAction)
+        )
+    }
+
     func deleteRemoteHostConfirmationContent(for host: RemoteHostConfig) -> DeleteRemoteHostConfirmationContent {
         let hostName = host.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? host.host
@@ -4292,6 +4332,21 @@ final class DesktopAppModel: ObservableObject {
         }
 
         let content = self.clearAccountManagedProxyNodesConfirmationContent()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = content.title
+        alert.informativeText = content.informativeText
+        alert.addButton(withTitle: content.actionTitle)
+        alert.addButton(withTitle: self.text(.commonCancel))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmStopAccountCooldown(for account: AccountSummary) -> Bool {
+        let content = self.stopAccountCooldownConfirmationContent(for: account)
+        if let confirmStopAccountCooldownHandler {
+            return confirmStopAccountCooldownHandler(content)
+        }
+
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = content.title

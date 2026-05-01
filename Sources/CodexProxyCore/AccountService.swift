@@ -1,6 +1,8 @@
 import Foundation
 
 public final class AccountService: @unchecked Sendable {
+    private static let refreshAllUsageConcurrencyLimit = 3
+
     private let store: SQLiteStore
     private let secretStore: SecretStore
 
@@ -320,9 +322,31 @@ public final class AccountService: @unchecked Sendable {
     public func refreshAllUsage(config: AppConfig, forceRefresh: Bool = true) async throws -> [AccountSummary] {
         try self.repairStoredManualAccountsIfNeeded()
         let records = try self.store.listAccountRecords()
-        for record in records {
-            let outcome = await self.refreshUsage(for: record, config: config, forceRefresh: forceRefresh)
-            try self.persistRefreshOutcome(record: record, outcome: outcome)
+        guard records.isEmpty == false else {
+            return try await self.listAccounts()
+        }
+
+        var nextIndex = 0
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            let initialTaskCount = min(Self.refreshAllUsageConcurrencyLimit, records.count)
+            for _ in 0..<initialTaskCount {
+                let record = records[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    let outcome = await self.refreshUsage(for: record, config: config, forceRefresh: forceRefresh)
+                    try self.persistRefreshOutcome(record: record, outcome: outcome)
+                }
+            }
+
+            while try await group.next() != nil {
+                guard nextIndex < records.count else { continue }
+                let record = records[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    let outcome = await self.refreshUsage(for: record, config: config, forceRefresh: forceRefresh)
+                    try self.persistRefreshOutcome(record: record, outcome: outcome)
+                }
+            }
         }
         return try await self.listAccounts()
     }
@@ -539,6 +563,36 @@ public final class AccountService: @unchecked Sendable {
         let outcome = await self.refreshUsage(for: record, config: config, forceRefresh: forceRefresh)
         try self.persistRefreshOutcome(record: record, outcome: outcome)
         return try self.summary(forID: id)
+    }
+
+    public func stopAccountCooldown(id: String) async throws -> AccountSummary {
+        let record: AccountRecord
+        do {
+            record = try self.repairedStoredManualAccountIfNeeded(id: id)
+        } catch {
+            throw ProxyError.message("停止账号冷却失败：读取现有账号时出错，\(error.localizedDescription)")
+        }
+        guard record.authMode.isManualAPIKey else {
+            throw ProxyError.message("停止账号冷却失败：仅支持 API Key 类型账号")
+        }
+
+        let usageError = Self.usageErrorByClearingCooldownMessage(record.usageError)
+        do {
+            try self.store.updateAccountFailureState(
+                id: record.id,
+                consecutiveFailureCount: 0,
+                cooldownUntil: nil,
+                usageError: usageError
+            )
+        } catch {
+            throw ProxyError.message("停止账号冷却失败：写入本地账号池时出错，\(error.localizedDescription)")
+        }
+
+        do {
+            return try self.summary(forID: id)
+        } catch {
+            throw ProxyError.message("停止账号冷却失败：回读账号摘要时出错，\(error.localizedDescription)")
+        }
     }
 
     private func persistRefreshOutcome(record: AccountRecord, outcome: RefreshOutcome) throws {
@@ -984,6 +1038,20 @@ public final class AccountService: @unchecked Sendable {
         guard record.authMode.isManualAPIKey, outcome.usageError == nil else { return }
         guard record.consecutiveFailureCount > 0 || record.cooldownUntil != nil else { return }
         try self.store.updateAccountFailureState(id: record.id, consecutiveFailureCount: 0, cooldownUntil: nil)
+    }
+
+    private static func usageErrorByClearingCooldownMessage(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+        let lower = trimmed.lowercased()
+        let patterns = [
+            "cooling down",
+            "cooldown",
+            "冷却",
+        ]
+        return patterns.contains(where: { lower.contains($0) }) ? nil : value
     }
 
     private func repairedManualAPIKeyRecord(_ record: AccountRecord) throws -> AccountRecord? {

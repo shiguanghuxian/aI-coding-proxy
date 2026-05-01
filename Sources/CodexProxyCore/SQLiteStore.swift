@@ -312,6 +312,31 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func updateAccountFailureState(
+        id: String,
+        consecutiveFailureCount: Int64,
+        cooldownUntil: Int64?,
+        usageError: String?
+    ) throws {
+        try self.execute(
+            """
+            UPDATE accounts
+            SET consecutive_failure_count = ?, cooldown_until = ?, usage_error = ?, updated_at = ?
+            WHERE id = ?;
+            """,
+            bindings: [
+                .int(consecutiveFailureCount),
+                .int(cooldownUntil),
+                .text(usageError),
+                .int(Helpers.now()),
+                .text(id),
+            ]
+        )
+        guard sqlite3_changes(self.db) > 0 else {
+            throw ProxyError.message("未找到要更新的账号")
+        }
+    }
+
     public func reorderAccounts(ids: [String]) throws {
         let trimmedIDs = ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard trimmedIDs.allSatisfy({ !$0.isEmpty }) else {

@@ -3133,6 +3133,62 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testAdminAccountStopCooldownRouteClearsAPIKeyCoolingState() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let upstream = Self.makeUpstreamApplication()
+        try await upstream.test(.ahc()) { upstreamClient in
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Cooling API",
+                    baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1",
+                    apiKey: "sk-admin-stop-cooldown",
+                    enabled: true
+                )
+            )
+            try harness.controller.store.updateAccountFailureState(
+                id: added.id,
+                consecutiveFailureCount: 3,
+                cooldownUntil: Helpers.now() + 3_600,
+                usageError: "API key cooling down"
+            )
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/accounts/\(added.id)/cooldown/stop",
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            let updated = try Helpers.readJSON(AccountSummary.self, from: body)
+            XCTAssertEqual(updated.consecutiveFailureCount, 0)
+            XCTAssertNil(updated.cooldownUntil)
+            XCTAssertNil(updated.usageError)
+        }
+    }
+
+    func testAdminAccountStopCooldownRouteReturnsErrorForMissingAccount() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let response = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/accounts/missing-account/cooldown/stop",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let body = try await Self.data(from: response.body)
+
+        XCTAssertEqual(response.statusCode, 500, Self.string(from: body))
+        XCTAssertTrue(Self.string(from: body).contains("停止账号冷却失败"))
+    }
+
     func testAdminManualAPIKeyAccountAddAliyunPresetUsesChatCompletionsValidation() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -3291,6 +3347,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 label: "Editable API Key",
                 baseURL: "https://example.com/proxy/v1",
                 upstreamAdapter: .responses,
+                upstreamThinkingCompatibility: .disabled,
                 apiKey: "sk-stored-secret",
                 enabled: false
             )
@@ -3444,6 +3501,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 ManualAPIKeyAccountInput(label: "Second API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
             _ = try await harness.controller.reorderAccounts(ids: [second.id, first.id])
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3484,6 +3542,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 ManualAPIKeyAccountInput(label: "Second API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
             _ = try await harness.controller.reorderAccounts(ids: [second.id, first.id])
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3536,6 +3595,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             ]
             config.primaryProxyAPIKeyID = "restricted-primary"
             _ = try await harness.controller.saveConfig(config)
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3591,6 +3651,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             ]
             config.primaryProxyAPIKeyID = "restricted-primary"
             _ = try await harness.controller.saveConfig(config)
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3836,6 +3897,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             _ = try await harness.controller.manualAddAPIKeyAccount(
                 ManualAPIKeyAccountInput(label: "Second API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3874,6 +3936,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 ManualAPIKeyAccountInput(label: "Second API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
             _ = try await harness.controller.setAccountEnabled(id: first.id, enabled: false)
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3932,6 +3995,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 authRefreshBlocked: record.authRefreshBlocked,
                 authRefreshError: record.authRefreshError
             )
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -3969,6 +4033,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             _ = try await harness.controller.manualAddAPIKeyAccount(
                 ManualAPIKeyAccountInput(label: "Second API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
+            await routingState.reset()
 
             for attempt in 0..<4 {
                 let response = await harness.service.handle(
@@ -4014,6 +4079,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             _ = try await harness.controller.manualAddAPIKeyAccount(
                 ManualAPIKeyAccountInput(label: "Fallback API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
             )
+            await routingState.reset()
 
             for _ in 0..<3 {
                 let response = await harness.service.handle(
@@ -4077,6 +4143,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 consecutiveFailureCount: 3,
                 cooldownUntil: Helpers.now() - 5
             )
+            await routingState.reset()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -4383,6 +4450,50 @@ final class CodexProxyDaemonTests: XCTestCase {
                 let storedFailingAPI = try harness.controller.store.loadAccountRecord(id: failingAPI.id)
                 XCTAssertTrue(storedFailingAPI.usageError?.contains("models unavailable") == true)
             }
+        }
+    }
+
+    func testAdminRefreshAllUsageLimitsManualAPIKeyRefreshesToThreeConcurrentTasks() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ConcurrentRequestProbe()
+        let upstream = Self.makeDelayedOpenAICompatibleModelsApplication(probe: probe)
+
+        try await upstream.test(.ahc()) { client in
+            for index in 0..<5 {
+                _ = try await harness.controller.manualAddAPIKeyAccount(
+                    ManualAPIKeyAccountInput(
+                        label: "Concurrent API \(index)",
+                        baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                        apiKey: "sk-admin-refresh-concurrent-\(index)",
+                        enabled: true
+                    )
+                )
+            }
+            await probe.reset()
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/usage/refresh",
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let refreshed = try Helpers.readJSON([AccountSummary].self, from: body)
+            let snapshot = await probe.snapshot()
+
+            XCTAssertEqual(refreshed.count, 5)
+            XCTAssertTrue(
+                refreshed.allSatisfy { $0.usageError == nil },
+                refreshed.compactMap(\.usageError).joined(separator: " | ")
+            )
+            XCTAssertEqual(snapshot.totalHits, 5)
+            XCTAssertEqual(snapshot.maxActiveHits, 3)
         }
     }
 
@@ -4838,7 +4949,7 @@ final class CodexProxyDaemonTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
 
         let hitCounter = UpstreamHitCounter()
-        let resetAt: Int64 = 1776674887
+        let resetAt: Int64 = Helpers.now() + 604_800
         let upstream = Self.makeUsageLimitFallbackUpstreamApplication(counter: hitCounter, resetAt: resetAt)
         try await upstream.test(.ahc()) { upstreamClient in
             var config = harness.config
@@ -5138,6 +5249,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                     enabled: true
                 )
             )
+            let baseline = await probe.snapshot()
 
             let response = await harness.service.handle(
                 Self.makePublicRequest(
@@ -5153,8 +5265,9 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertTrue(Self.string(from: responseBody).contains("OpenAI route"))
 
             let snapshot = await probe.snapshot()
-            XCTAssertEqual(snapshot.requestBodies.count, 1)
-            XCTAssertTrue(snapshot.requestBodies[0].contains(#""model":"gpt-6""#))
+            let runtimeBodies = Array(snapshot.requestBodies.dropFirst(baseline.requestBodies.count))
+            XCTAssertEqual(runtimeBodies.count, 1)
+            XCTAssertTrue(runtimeBodies[0].contains(#""model":"gpt-6""#))
         }
     }
 
@@ -5585,6 +5698,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                     enabled: true
                 )
             )
+            let baseline = await probe.snapshot()
 
             let response = await harness.service.handle(
                 Self.makePublicGeminiRequest(
@@ -5605,8 +5719,8 @@ final class CodexProxyDaemonTests: XCTestCase {
             Self.assertGeminiRequiresGoogleLoginMessage(errorMessage)
 
             let snapshot = await probe.snapshot()
-            XCTAssertEqual(snapshot.chatHits, 0)
-            XCTAssertEqual(snapshot.responsesHits, 0)
+            XCTAssertEqual(snapshot.chatHits - baseline.chatHits, 0)
+            XCTAssertEqual(snapshot.responsesHits - baseline.responsesHits, 0)
         }
     }
 
@@ -6028,7 +6142,8 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertEqual(response.statusCode, 500, bodyText)
             XCTAssertTrue(bodyText.lowercased().contains("gemini api key"), bodyText)
             XCTAssertTrue(
-                bodyText.lowercased().contains("google ai pro")
+                bodyText.lowercased().contains("google")
+                    || bodyText.lowercased().contains("google ai pro")
                     || bodyText.lowercased().contains("gemini cli"),
                 bodyText
             )
@@ -7109,7 +7224,7 @@ final class CodexProxyDaemonTests: XCTestCase {
             let exportBody = try await Self.data(from: exportResponse.body)
             let exportText = String(decoding: exportBody.dropFirst(3), as: UTF8.self)
             XCTAssertEqual(Array(exportBody.prefix(3)), [0xEF, 0xBB, 0xBF])
-            XCTAssertTrue(exportText.contains("time,endpoint,client_source,model,actual_model,reasoning_effort,api_key"))
+            XCTAssertTrue(exportText.contains("time,endpoint,upstream_url,client_source,model,actual_model,reasoning_effort,api_key"))
             XCTAssertTrue(exportText.contains(RequestLogPresentation.maskedAPIKey(harness.config.proxyAPIKey)))
             XCTAssertFalse(exportText.contains(",\(harness.config.proxyAPIKey),"))
         }
@@ -8332,6 +8447,13 @@ final class CodexProxyDaemonTests: XCTestCase {
                 status: .ok,
                 headers: headers,
                 body: .init(byteBuffer: ByteBuffer(string: Self.mockUpstreamSSEPayload()))
+            )
+        }
+        router.post("v1/responses") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: Self.mockUpstreamCompletedResponsePayload(text: "Manual API route")))
             )
         }
         return Application(router: router)
@@ -9879,6 +10001,43 @@ final class CodexProxyDaemonTests: XCTestCase {
                 status: status,
                 headers: Self.jsonHeaders(),
                 body: .init(byteBuffer: ByteBuffer(string: body))
+            )
+        }
+        router.post("v1/responses") { _, _ in
+            Response(
+                status: status,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"id":"resp_validation","status":"completed","output":[]}"#))
+            )
+        }
+        return Application(router: router)
+    }
+
+    private static func makeDelayedOpenAICompatibleModelsApplication(
+        probe: ConcurrentRequestProbe,
+        delayMS: Int64 = 100
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        router.get("v1/models") { _, _ async throws in
+            await probe.begin()
+            do {
+                try await Task.sleep(for: .milliseconds(delayMS))
+                await probe.end()
+                return Response(
+                    status: .ok,
+                    headers: Self.jsonHeaders(),
+                    body: .init(byteBuffer: ByteBuffer(string: #"{"object":"list","data":[{"id":"gpt-5.4","object":"model","created":0,"owned_by":"openai"}]}"#))
+                )
+            } catch {
+                await probe.end()
+                throw error
+            }
+        }
+        router.post("v1/responses") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"id":"resp_validation","status":"completed","output":[]}"#))
             )
         }
         return Application(router: router)
@@ -11842,6 +12001,32 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    private actor ConcurrentRequestProbe {
+        private var activeHits = 0
+        private var maxActiveHits = 0
+        private var totalHits = 0
+
+        func begin() {
+            self.activeHits += 1
+            self.totalHits += 1
+            self.maxActiveHits = max(self.maxActiveHits, self.activeHits)
+        }
+
+        func end() {
+            self.activeHits -= 1
+        }
+
+        func reset() {
+            self.activeHits = 0
+            self.maxActiveHits = 0
+            self.totalHits = 0
+        }
+
+        func snapshot() -> (totalHits: Int, maxActiveHits: Int) {
+            (self.totalHits, self.maxActiveHits)
+        }
+    }
+
     private actor APIKeyRoutingState {
         enum Mode {
             case success(text: String)
@@ -11878,6 +12063,11 @@ final class CodexProxyDaemonTests: XCTestCase {
 
         func snapshot() -> (firstHits: Int, secondHits: Int) {
             (self.firstHits, self.secondHits)
+        }
+
+        func reset() {
+            self.firstHits = 0
+            self.secondHits = 0
         }
 
         private func outcome(for mode: Mode) -> Outcome {

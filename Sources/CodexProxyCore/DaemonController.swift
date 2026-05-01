@@ -561,6 +561,7 @@ public final class DaemonController: @unchecked Sendable {
     private static let apiKeyFailureCooldownThreshold: Int64 = 3
     private static let apiKeyFailureCooldownSeconds: Int64 = 3_600
     private static let accountModelDiscoveryCacheTTLSeconds: Int64 = 300
+    private static let refreshAllUsageConcurrencyLimit = 3
 
     public let dataDirectory: URL
     public let secretStore: SecretStore
@@ -834,9 +835,32 @@ public final class DaemonController: @unchecked Sendable {
 
     public func refreshAllUsage(forceRefresh: Bool = true) async throws -> [AccountSummary] {
         let records = try self.store.listAccountRecords()
-        for record in records {
-            _ = try await self.withNetworkConfig(for: record) {
-                try await self.accountService.refreshUsage(id: record.id, config: $0, forceRefresh: forceRefresh)
+        guard records.isEmpty == false else {
+            return try await self.accountService.listAccounts()
+        }
+
+        var nextIndex = 0
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            let initialTaskCount = min(Self.refreshAllUsageConcurrencyLimit, records.count)
+            for _ in 0..<initialTaskCount {
+                let record = records[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    _ = try await self.withNetworkConfig(for: record) {
+                        try await self.accountService.refreshUsage(id: record.id, config: $0, forceRefresh: forceRefresh)
+                    }
+                }
+            }
+
+            while try await group.next() != nil {
+                guard nextIndex < records.count else { continue }
+                let record = records[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    _ = try await self.withNetworkConfig(for: record) {
+                        try await self.accountService.refreshUsage(id: record.id, config: $0, forceRefresh: forceRefresh)
+                    }
+                }
             }
         }
         return try await self.accountService.listAccounts()
@@ -847,6 +871,10 @@ public final class DaemonController: @unchecked Sendable {
         return try await self.withNetworkConfig(for: record) {
             try await self.accountService.refreshUsage(id: id, config: $0, forceRefresh: forceRefresh)
         }
+    }
+
+    public func stopAccountCooldown(id: String) async throws -> AccountSummary {
+        try await self.accountService.stopAccountCooldown(id: id)
     }
 
     public func setAccountEnabled(id: String, enabled: Bool) async throws -> AccountSummary {

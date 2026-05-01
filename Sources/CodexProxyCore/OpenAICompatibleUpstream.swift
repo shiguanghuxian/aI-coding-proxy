@@ -440,10 +440,10 @@ public enum OpenAICompatibleUpstream {
             _ = try self.decodeModelsResponse(response, providerPreset: providerPreset)
             return .validated
         }
-        if response.statusCode == 404 || response.statusCode == 405 {
+        let rawMessage = self.httpErrorMessage(from: response.body, statusCode: response.statusCode)
+        if self.isModelsEndpointUnavailable(statusCode: response.statusCode, message: rawMessage) {
             return .requiresRuntimeProbe
         }
-        let rawMessage = self.httpErrorMessage(from: response.body, statusCode: response.statusCode)
         throw ProxyError.message(
             self.humanizedUpstreamErrorMessage(
                 rawMessage,
@@ -451,6 +451,40 @@ public enum OpenAICompatibleUpstream {
                 apiKey: apiKey
             )
         )
+    }
+
+    private static func isModelsEndpointUnavailable(statusCode: Int, message: String) -> Bool {
+        if [401, 403, 429].contains(statusCode) {
+            return false
+        }
+        if [404, 405, 501].contains(statusCode) {
+            return true
+        }
+        if statusCode == 400, self.isModelsEndpointUnavailableMessage(message) {
+            return true
+        }
+        return self.isModelsEndpointUnavailableMessage(message)
+    }
+
+    private static func isModelsEndpointUnavailableMessage(_ message: String) -> Bool {
+        let lower = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard lower.isEmpty == false else {
+            return false
+        }
+        let patterns = [
+            "models missing",
+            "model list",
+            "models endpoint",
+            "unsupported endpoint",
+            "endpoint not supported",
+            "not implemented",
+            "not found",
+            "no route",
+            "route not found",
+            "cannot get",
+            "method not allowed",
+        ]
+        return patterns.contains(where: { lower.contains($0) })
     }
 
     public static func requestHeaders(

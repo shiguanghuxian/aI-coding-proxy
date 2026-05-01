@@ -668,6 +668,11 @@ final class DaemonHTTPService: @unchecked Sendable {
             return try self.codableResponse(try await self.controller.refreshAccountUsage(id: id))
         }
 
+        if request.method == "POST", components.count == 5, components[0] == "admin", components[1] == "accounts", components[3] == "cooldown", components[4] == "stop" {
+            let id = components[2].removingPercentEncoding ?? components[2]
+            return try self.codableResponse(try await self.controller.stopAccountCooldown(id: id))
+        }
+
         if request.method == "DELETE", components.count == 3, components[0] == "admin", components[1] == "accounts" {
             let id = components[2].removingPercentEncoding ?? components[2]
             return try self.codableResponse(try await self.controller.removeAccount(id: id))
