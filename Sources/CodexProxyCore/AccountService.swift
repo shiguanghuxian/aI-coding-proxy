@@ -49,7 +49,8 @@ public final class AccountService: @unchecked Sendable {
                         config: config,
                         enabled: candidate.enabled ?? true,
                         managedProxyNodeName: candidate.managedProxyNodeName,
-                        modelRouting: candidate.modelRouting
+                        modelRouting: candidate.modelRouting,
+                        automaticCooldownDisabled: candidate.automaticCooldownDisabled ?? false
                     )
                     if try self.store.upsertAccount(record) {
                         updated += 1
@@ -97,7 +98,8 @@ public final class AccountService: @unchecked Sendable {
                 text: authJSON,
                 sourceLabel: input.label,
                 config: config,
-                enabled: input.enabled
+                enabled: input.enabled,
+                automaticCooldownDisabled: input.automaticCooldownDisabled
             )
         } catch {
             throw ProxyError.message("手动添加 API Key 账号失败：准备账号数据时出错，\(error.localizedDescription)")
@@ -147,7 +149,8 @@ public final class AccountService: @unchecked Sendable {
             upstreamAdapter: extracted.upstreamAdapter,
             upstreamThinkingCompatibility: extracted.upstreamThinkingCompatibility,
             apiKey: extracted.accessToken,
-            enabled: record.enabled
+            enabled: record.enabled,
+            automaticCooldownDisabled: record.automaticCooldownDisabled
         )
     }
 
@@ -187,13 +190,15 @@ public final class AccountService: @unchecked Sendable {
                 text: authJSON,
                 sourceLabel: input.label,
                 config: config,
-                enabled: input.enabled
+                enabled: input.enabled,
+                automaticCooldownDisabled: input.automaticCooldownDisabled
             )
         } catch {
             throw ProxyError.message("编辑 API Key 账号失败：准备账号数据时出错，\(error.localizedDescription)")
         }
 
         let identityChanged = existingRecord.accountKey != prepared.accountKey
+        let clearsCooldown = identityChanged || input.automaticCooldownDisabled
         let updatedRecord = AccountRecord(
             id: existingRecord.id,
             label: prepared.label,
@@ -211,11 +216,14 @@ public final class AccountService: @unchecked Sendable {
             updatedAt: Helpers.now(),
             enabled: prepared.enabled,
             selectionOrder: existingRecord.selectionOrder,
-            consecutiveFailureCount: identityChanged ? 0 : existingRecord.consecutiveFailureCount,
-            cooldownUntil: identityChanged ? nil : existingRecord.cooldownUntil,
+            consecutiveFailureCount: clearsCooldown ? 0 : existingRecord.consecutiveFailureCount,
+            cooldownUntil: clearsCooldown ? nil : existingRecord.cooldownUntil,
+            automaticCooldownDisabled: input.automaticCooldownDisabled,
             usage: identityChanged ? nil : existingRecord.usage,
             usageWindowsVisible: identityChanged ? true : existingRecord.usageWindowsVisible,
-            usageError: identityChanged ? nil : existingRecord.usageError,
+            usageError: identityChanged
+                ? nil
+                : (input.automaticCooldownDisabled ? Self.usageErrorByClearingCooldownMessage(existingRecord.usageError) : existingRecord.usageError),
             authRefreshBlocked: identityChanged ? false : existingRecord.authRefreshBlocked,
             authRefreshError: identityChanged ? nil : existingRecord.authRefreshError
         )
@@ -595,6 +603,48 @@ public final class AccountService: @unchecked Sendable {
         }
     }
 
+    public func updateAccountCooldownPolicy(
+        id: String,
+        automaticCooldownDisabled: Bool
+    ) async throws -> AccountSummary {
+        let record: AccountRecord
+        do {
+            record = try self.repairedStoredManualAccountIfNeeded(id: id)
+        } catch {
+            throw ProxyError.message("更新账号冷却策略失败：读取现有账号时出错，\(error.localizedDescription)")
+        }
+        guard record.authMode.isManualAPIKey else {
+            throw ProxyError.message("更新账号冷却策略失败：仅支持 API Key 类型账号")
+        }
+
+        let usageError = automaticCooldownDisabled
+            ? Self.usageErrorByClearingCooldownMessage(record.usageError)
+            : record.usageError
+        do {
+            if automaticCooldownDisabled {
+                try self.store.updateAccountFailureState(
+                    id: record.id,
+                    consecutiveFailureCount: 0,
+                    cooldownUntil: nil,
+                    usageError: usageError
+                )
+            }
+            try self.store.updateAccountCooldownPolicy(
+                id: record.id,
+                automaticCooldownDisabled: automaticCooldownDisabled,
+                clearExistingCooldown: false
+            )
+        } catch {
+            throw ProxyError.message("更新账号冷却策略失败：写入本地账号池时出错，\(error.localizedDescription)")
+        }
+
+        do {
+            return try self.summary(forID: id)
+        } catch {
+            throw ProxyError.message("更新账号冷却策略失败：回读账号摘要时出错，\(error.localizedDescription)")
+        }
+    }
+
     private func persistRefreshOutcome(record: AccountRecord, outcome: RefreshOutcome) throws {
         try self.store.updateUsage(
             accountKey: record.accountKey,
@@ -640,7 +690,8 @@ public final class AccountService: @unchecked Sendable {
         config: AppConfig,
         enabled: Bool,
         managedProxyNodeName: String? = nil,
-        modelRouting: AccountModelRoutingConfig? = nil
+        modelRouting: AccountModelRoutingConfig? = nil,
+        automaticCooldownDisabled: Bool = false
     ) async throws -> AccountRecord {
         let normalized = try AuthService.normalizeImportedAuthJSON(text)
         let extracted = try AuthService.extractAuth(from: normalized, secretStore: self.secretStore)
@@ -718,6 +769,7 @@ public final class AccountService: @unchecked Sendable {
             modelRouting: modelRouting,
             authJSON: normalized,
             enabled: enabled,
+            automaticCooldownDisabled: extracted.authMode.isManualAPIKey ? automaticCooldownDisabled : false,
             usage: usage,
             usageError: usageError
         )
@@ -933,7 +985,9 @@ public final class AccountService: @unchecked Sendable {
                     managedProxyNodeName: (account["managedProxyNodeName"] as? String) ?? (account["managed_proxy_node_name"] as? String),
                     modelRouting: try Self.decodeAccountModelRouting(
                         from: account["modelRouting"] ?? account["model_routing"]
-                    )
+                    ),
+                    automaticCooldownDisabled: (account["automaticCooldownDisabled"] as? Bool)
+                        ?? (account["automatic_cooldown_disabled"] as? Bool)
                 )
             }
         }
@@ -944,7 +998,8 @@ public final class AccountService: @unchecked Sendable {
                     source: item.source,
                     content: String(decoding: authJSONData, as: UTF8.self),
                     label: item.label,
-                    enabled: item.enabled
+                    enabled: item.enabled,
+                    automaticCooldownDisabled: item.automaticCooldownDisabled
                 )
             }
         }
@@ -1084,6 +1139,7 @@ public final class AccountService: @unchecked Sendable {
             selectionOrder: record.selectionOrder,
             consecutiveFailureCount: record.consecutiveFailureCount,
             cooldownUntil: record.cooldownUntil,
+            automaticCooldownDisabled: record.automaticCooldownDisabled,
             usage: record.usage,
             usageError: record.usageError,
             authRefreshBlocked: record.authRefreshBlocked,

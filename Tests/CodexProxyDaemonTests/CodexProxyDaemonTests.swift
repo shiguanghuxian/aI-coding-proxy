@@ -3189,6 +3189,46 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertTrue(Self.string(from: body).contains("停止账号冷却失败"))
     }
 
+    func testAdminAccountCooldownPolicyRouteDisablesAutomaticCooldownAndClearsExistingState() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let upstream = Self.makeUpstreamApplication()
+        try await upstream.test(.ahc()) { upstreamClient in
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Policy API",
+                    baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1",
+                    apiKey: "sk-admin-policy",
+                    enabled: true
+                )
+            )
+            try harness.controller.store.updateAccountFailureState(
+                id: added.id,
+                consecutiveFailureCount: 3,
+                cooldownUntil: Helpers.now() + 3_600,
+                usageError: "API key cooling down"
+            )
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "PATCH",
+                    path: "/admin/accounts/\(added.id)/cooldown/policy",
+                    body: #"{"automatic_cooldown_disabled":true}"#,
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            let updated = try Helpers.readJSON(AccountSummary.self, from: body)
+            XCTAssertTrue(updated.automaticCooldownDisabled)
+            XCTAssertEqual(updated.consecutiveFailureCount, 0)
+            XCTAssertNil(updated.cooldownUntil)
+            XCTAssertNil(updated.usageError)
+        }
+    }
+
     func testAdminManualAPIKeyAccountAddAliyunPresetUsesChatCompletionsValidation() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -4058,6 +4098,58 @@ final class CodexProxyDaemonTests: XCTestCase {
 
             let hits = await routingState.snapshot()
             XCTAssertEqual(hits.firstHits, 3)
+            XCTAssertEqual(hits.secondHits, 4)
+        }
+    }
+
+    func testResponsesProxyDoesNotCooldownAPIKeyWhenAutomaticCooldownDisabled() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let routingState = APIKeyRoutingState(
+            firstMode: .failure(message: "upstream unavailable"),
+            secondMode: .success(text: "Fallback API route")
+        )
+        let upstream = Self.makeAPIKeyRoutingUpstreamApplication(state: routingState)
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let first = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Unstable API",
+                    baseURL: "\(baseURL)/v1",
+                    apiKey: "sk-route-first",
+                    enabled: true,
+                    automaticCooldownDisabled: true
+                )
+            )
+            _ = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(label: "Fallback API", baseURL: "\(baseURL)/v1", apiKey: "sk-route-second", enabled: true)
+            )
+            await routingState.reset()
+
+            for attempt in 0..<4 {
+                let response = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/responses",
+                        body: #"{"model":"gpt-5.4","input":"hello","stream":false}"#,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: ["session_id": "disabled-cooldown-\(attempt)"]
+                    ),
+                    kind: .publicAPI
+                )
+                let body = try await Self.data(from: response.body)
+                XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+                XCTAssertTrue(Self.string(from: body).contains("Fallback API route"))
+            }
+
+            let accounts = try await harness.controller.listAccounts()
+            let unstable = try XCTUnwrap(accounts.first(where: { $0.id == first.id }))
+            XCTAssertTrue(unstable.automaticCooldownDisabled)
+            XCTAssertEqual(unstable.consecutiveFailureCount, 0)
+            XCTAssertNil(unstable.cooldownUntil)
+
+            let hits = await routingState.snapshot()
+            XCTAssertEqual(hits.firstHits, 4)
             XCTAssertEqual(hits.secondHits, 4)
         }
     }

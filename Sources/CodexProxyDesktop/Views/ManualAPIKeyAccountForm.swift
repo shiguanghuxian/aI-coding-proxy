@@ -126,6 +126,19 @@ struct ManualAPIKeyAccountForm: View {
                     .foregroundStyle(palette.textPrimary)
             }
             .toggleStyle(.switch)
+
+            FormFieldPanel(
+                title: self.model.text(.labelAutomaticCooldown),
+                footer: self.model.text(.helperAutomaticCooldownPolicy),
+                compact: self.compact
+            ) {
+                Toggle(isOn: self.$draft.automaticCooldownDisabled) {
+                    Text(self.model.text(.actionDisableAutomaticCooldown))
+                        .font(.system(size: self.compact ? 11 : 12, weight: .semibold))
+                        .foregroundStyle(palette.textPrimary)
+                }
+                .toggleStyle(.switch)
+            }
         }
     }
 }

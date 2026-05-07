@@ -877,6 +877,13 @@ public final class DaemonController: @unchecked Sendable {
         try await self.accountService.stopAccountCooldown(id: id)
     }
 
+    public func updateAccountCooldownPolicy(id: String, input: UpdateAccountCooldownPolicyRequest) async throws -> AccountSummary {
+        try await self.accountService.updateAccountCooldownPolicy(
+            id: id,
+            automaticCooldownDisabled: input.automaticCooldownDisabled
+        )
+    }
+
     public func setAccountEnabled(id: String, enabled: Bool) async throws -> AccountSummary {
         let summary = try await self.accountService.setAccountEnabled(id: id, enabled: enabled)
         if !enabled {
@@ -5246,6 +5253,7 @@ public final class DaemonController: @unchecked Sendable {
 
     private func noteCandidateAttemptFailure(_ candidate: ProxyCandidate) throws {
         guard candidate.record.authMode.isManualAPIKey else { return }
+        guard candidate.record.automaticCooldownDisabled == false else { return }
         let nextCount = candidate.record.consecutiveFailureCount + 1
         let cooldownUntil = nextCount >= Self.apiKeyFailureCooldownThreshold
             ? Helpers.now() + Self.apiKeyFailureCooldownSeconds

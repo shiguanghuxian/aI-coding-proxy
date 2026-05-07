@@ -1215,6 +1215,12 @@ struct AccountPoolDetailSidebar: View {
                                     label: self.model.text(.labelEnabled),
                                     value: account.enabled ? self.model.text(.statusEnabled) : self.model.text(.statusDisabled)
                                 )
+                                if account.authMode.isManualAPIKey {
+                                    AccountMetaRow(
+                                        label: self.model.text(.labelAutomaticCooldown),
+                                        value: self.model.accountCooldownPolicyText(account)
+                                    )
+                                }
                                 AccountMetaRow(
                                     label: self.model.text(.labelStatus),
                                     value: self.model.accountRuntimeStatusText(account)
@@ -1236,6 +1242,7 @@ struct AccountPoolDetailSidebar: View {
                                 self.editActionButton(for: account)
                                 self.outboundNodeButton(for: account)
                                 self.modelRoutingButton(for: account)
+                                self.cooldownPolicyButton(for: account)
                                 self.stopCooldownButton(for: account)
                                 self.enableToggleButton(for: account)
                                 self.removeButton(for: account)
@@ -1418,6 +1425,16 @@ struct AccountPoolDetailSidebar: View {
         if self.model.canStopAccountCooldown(account) {
             Button(self.model.text(.actionStopAccountCooldown)) {
                 Task { await self.model.stopAccountCooldown(account) }
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+        }
+    }
+
+    @ViewBuilder
+    private func cooldownPolicyButton(for account: AccountSummary) -> some View {
+        if self.model.canUpdateAccountCooldownPolicy(account) {
+            Button(self.model.accountCooldownPolicyActionTitle(account)) {
+                Task { await self.model.toggleAccountCooldownPolicy(account) }
             }
             .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
         }
@@ -2471,6 +2488,12 @@ private struct AccountCard: View {
                     label: self.model.text(.labelEnabled),
                     value: self.account.enabled ? self.model.text(.statusEnabled) : self.model.text(.statusDisabled)
                 )
+                if self.account.authMode.isManualAPIKey {
+                    AccountMetaRow(
+                        label: self.model.text(.labelAutomaticCooldown),
+                        value: self.model.accountCooldownPolicyText(self.account)
+                    )
+                }
                 AccountMetaRow(
                     label: self.model.text(.labelStatus),
                     value: self.model.accountRuntimeStatusText(self.account)
@@ -2486,6 +2509,7 @@ private struct AccountCard: View {
                 self.editActionButton
                 self.outboundNodeButton
                 self.modelRoutingButton
+                self.cooldownPolicyButton
                 self.stopCooldownButton
                 Spacer(minLength: 0)
                 self.moreActionsMenu
@@ -2638,6 +2662,17 @@ private struct AccountCard: View {
         if self.model.canStopAccountCooldown(self.account) {
             Button(self.model.text(.actionStopAccountCooldown)) {
                 Task { await self.model.stopAccountCooldown(self.account) }
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    @ViewBuilder
+    private var cooldownPolicyButton: some View {
+        if self.model.canUpdateAccountCooldownPolicy(self.account) {
+            Button(self.model.accountCooldownPolicyActionTitle(self.account)) {
+                Task { await self.model.toggleAccountCooldownPolicy(self.account) }
             }
             .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
             .fixedSize(horizontal: true, vertical: false)

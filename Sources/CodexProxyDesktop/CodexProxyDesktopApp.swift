@@ -9,11 +9,17 @@ enum DesktopBrandIcon {
 }
 
 private enum MainWindowTitlebarControlsMetrics {
-    static let minimumWidth: CGFloat = 510
+    static let minimumWidth: CGFloat = 720
     static let minimumHeight: CGFloat = 44
     static let topInset: CGFloat = 4
     static let bottomInset: CGFloat = 2
     static let trailingInset: CGFloat = 8
+}
+
+private enum MenuBarPanelMetrics {
+    static let width: CGFloat = 300
+    static let height: CGFloat = 400
+    static let contentPadding: CGFloat = 12
 }
 
 @main
@@ -99,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        self.model.releaseKeepAwakeSilently()
         self.model.stopStatsAutoRefresh()
         self.statusPopover?.close()
     }
@@ -262,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 290, height: 280)
+        popover.contentSize = NSSize(width: MenuBarPanelMetrics.width, height: MenuBarPanelMetrics.height)
         popover.contentViewController = NSHostingController(rootView: MenuBarPanelHostView(model: self.model))
 
         self.statusItem = statusItem
@@ -479,6 +486,13 @@ private struct MainWindowTitlebarControlsHostView: View {
             onHelp: { self.model.openHelpWindow() },
             reloadTitle: self.model.text(.commonReload),
             onReload: { Task { await self.model.loadAll() } },
+            requestLogsTitle: self.model.text(.actionOpenRequestLogs),
+            requestLogsHelpText: self.model.text(.actionOpenRequestLogs),
+            onRequestLogs: { self.model.openRequestLogsWindow() },
+            keepAwakeTitle: self.model.keepAwakeActionTitle,
+            keepAwakeSymbol: self.model.keepAwakeSymbolName,
+            keepAwakeHelpText: self.model.keepAwakeHelperText,
+            onKeepAwake: { self.model.toggleKeepAwake() },
             modeEntryTitle: self.interfaceModeToolbarTitle,
             modeEntrySymbol: self.interfaceModeToolbarSymbol,
             modeEntryHelpText: self.interfaceModeToolbarHelpText,
@@ -561,6 +575,7 @@ struct MenuBarPanel: View {
             self.model.text(.menuOpenMinimalMode),
             self.model.text(.menuOpenFullMode),
             self.model.text(.actionOpenRequestLogs),
+            self.model.keepAwakeActionTitle,
             self.model.text(.menuReload),
             self.model.text(.menuQuit),
         ]
@@ -569,7 +584,20 @@ struct MenuBarPanel: View {
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                self.menuScrollableContent(palette: palette)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            self.menuBottomActionBar(palette: palette)
+        }
+        .frame(width: MenuBarPanelMetrics.width, height: MenuBarPanelMetrics.height)
+        .compactOverlayScrollbars()
+    }
+
+    private func menuScrollableContent(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -598,7 +626,11 @@ struct MenuBarPanel: View {
             Text(self.model.status?.publicBaseURL ?? self.model.text(.menuNoEndpoint))
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundStyle(palette.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .textSelection(.enabled)
+
+            self.keepAwakeRow(palette: palette)
 
             Divider()
 
@@ -622,21 +654,37 @@ struct MenuBarPanel: View {
             ) {
                 self.model.openRequestLogsFromMenu()
             }
+        }
+        .padding(MenuBarPanelMetrics.contentPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func menuBottomActionBar(palette: AppearancePalette) -> some View {
+        VStack(spacing: 0) {
+            Divider()
 
             HStack(spacing: 8) {
-                Button(self.model.text(.menuReload)) {
+                Button(action: {
                     Task { await self.model.loadAll() }
+                }) {
+                    Text(self.model.text(.menuReload))
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(AppActionButtonStyle(kind: .secondary))
+                .frame(maxWidth: .infinity)
 
-                Button(self.model.text(.menuQuit)) {
+                Button(action: {
                     NSApplication.shared.terminate(nil)
+                }) {
+                    Text(self.model.text(.menuQuit))
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(AppActionButtonStyle(kind: .danger))
+                .frame(maxWidth: .infinity)
             }
+            .padding(MenuBarPanelMetrics.contentPadding)
         }
-        .padding(14)
-        .frame(width: 290)
+        .background(palette.panel.opacity(self.colorScheme == .dark ? 0.94 : 0.98))
     }
 
     private func menuActionButton(
@@ -649,6 +697,56 @@ struct MenuBarPanel: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(AppActionButtonStyle(kind: kind))
+    }
+
+    private func keepAwakeRow(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: self.model.keepAwakeSymbolName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(self.model.isKeepAwakeEnabled ? palette.success : palette.textSecondary)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(self.model.text(.labelKeepAwake))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(palette.textPrimary)
+                    StatusPill(
+                        text: self.model.keepAwakeStatusText,
+                        tone: self.model.keepAwakeStatusTone,
+                        compact: true
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                Toggle(
+                    self.model.text(.labelKeepAwake),
+                    isOn: Binding(
+                        get: { self.model.isKeepAwakeEnabled },
+                        set: { self.model.setKeepAwakeEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            Text(self.model.keepAwakeHelperText)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.72 : 0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(palette.border, lineWidth: 1)
+        )
+        .accessibilityIdentifier("menu-bar-keep-awake-toggle")
     }
 }
 #endif

@@ -1284,6 +1284,13 @@ struct MainWindowTitlebarControls: View {
     let onHelp: () -> Void
     let reloadTitle: String
     let onReload: () -> Void
+    let requestLogsTitle: String
+    var requestLogsHelpText: String?
+    let onRequestLogs: () -> Void
+    let keepAwakeTitle: String
+    let keepAwakeSymbol: String
+    let keepAwakeHelpText: String
+    let onKeepAwake: () -> Void
     let modeEntryTitle: String
     let modeEntrySymbol: String
     let modeEntryHelpText: String
@@ -1313,6 +1320,22 @@ struct MainWindowTitlebarControls: View {
                 symbol: "arrow.clockwise",
                 accessibilityID: "titlebar-refresh-button",
                 action: self.onReload
+            )
+
+            TitlebarActionButton(
+                title: self.requestLogsTitle,
+                symbol: "list.bullet.rectangle",
+                accessibilityID: "titlebar-request-logs-button",
+                helpText: self.requestLogsHelpText,
+                action: self.onRequestLogs
+            )
+
+            TitlebarActionButton(
+                title: self.keepAwakeTitle,
+                symbol: self.keepAwakeSymbol,
+                accessibilityID: "titlebar-keep-awake-button",
+                helpText: self.keepAwakeHelpText,
+                action: self.onKeepAwake
             )
 
             TitlebarModeEntryButton(
@@ -1444,6 +1467,7 @@ private struct TitlebarActionButton: View {
     let title: String
     let symbol: String
     let accessibilityID: String
+    var helpText: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -1458,7 +1482,7 @@ private struct TitlebarActionButton: View {
             .frame(height: TitlebarControlMetrics.controlHeight)
         }
         .buttonStyle(TitlebarActionButtonStyle(isHovered: self.isHovered))
-        .help(self.title)
+        .help(self.helpText ?? self.title)
         .accessibilityIdentifier(self.accessibilityID)
         .fixedSize(horizontal: true, vertical: false)
         .onHover { hovering in

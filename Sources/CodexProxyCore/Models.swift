@@ -804,6 +804,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
     public var selectionOrder: Int64
     public var consecutiveFailureCount: Int64
     public var cooldownUntil: Int64?
+    public var automaticCooldownDisabled: Bool
     public var usage: UsageSnapshot?
     public var usageWindowsVisible: Bool
     public var todayTokenUsage: AccountTodayTokenUsage?
@@ -831,6 +832,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         selectionOrder: Int64 = 0,
         consecutiveFailureCount: Int64 = 0,
         cooldownUntil: Int64? = nil,
+        automaticCooldownDisabled: Bool = false,
         usage: UsageSnapshot?,
         usageWindowsVisible: Bool = true,
         todayTokenUsage: AccountTodayTokenUsage? = nil,
@@ -857,6 +859,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         self.selectionOrder = selectionOrder
         self.consecutiveFailureCount = consecutiveFailureCount
         self.cooldownUntil = cooldownUntil
+        self.automaticCooldownDisabled = automaticCooldownDisabled
         self.usage = usage
         self.usageWindowsVisible = usageWindowsVisible
         self.todayTokenUsage = todayTokenUsage
@@ -890,6 +893,8 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         case selectionOrder
         case consecutiveFailureCount
         case cooldownUntil
+        case automaticCooldownDisabled
+        case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
         case usage
         case usageWindowsVisible
         case todayTokenUsage
@@ -926,6 +931,9 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
             selectionOrder: try container.decodeIfPresent(Int64.self, forKey: .selectionOrder) ?? 0,
             consecutiveFailureCount: try container.decodeIfPresent(Int64.self, forKey: .consecutiveFailureCount) ?? 0,
             cooldownUntil: try container.decodeIfPresent(Int64.self, forKey: .cooldownUntil),
+            automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
+                ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false,
             usage: try container.decodeIfPresent(UsageSnapshot.self, forKey: .usage),
             usageWindowsVisible: try container.decodeIfPresent(Bool.self, forKey: .usageWindowsVisible) ?? true,
             todayTokenUsage: try container.decodeIfPresent(AccountTodayTokenUsage.self, forKey: .todayTokenUsage),
@@ -956,6 +964,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         try container.encode(self.selectionOrder, forKey: .selectionOrder)
         try container.encode(self.consecutiveFailureCount, forKey: .consecutiveFailureCount)
         try container.encodeIfPresent(self.cooldownUntil, forKey: .cooldownUntil)
+        try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
         try container.encodeIfPresent(self.usage, forKey: .usage)
         try container.encode(self.usageWindowsVisible, forKey: .usageWindowsVisible)
         try container.encodeIfPresent(self.todayTokenUsage, forKey: .todayTokenUsage)
@@ -979,6 +988,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
     }
 
     public func isCoolingDown(now: Int64 = Helpers.now()) -> Bool {
+        guard self.automaticCooldownDisabled == false else { return false }
         guard let cooldownUntil else { return false }
         return cooldownUntil > now
     }
@@ -2656,6 +2666,7 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
     public var enabled: Bool?
     public var managedProxyNodeName: String?
     public var modelRouting: AccountModelRoutingConfig?
+    public var automaticCooldownDisabled: Bool?
 
     public init(
         source: String,
@@ -2663,7 +2674,8 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
         label: String? = nil,
         enabled: Bool? = nil,
         managedProxyNodeName: String? = nil,
-        modelRouting: AccountModelRoutingConfig? = nil
+        modelRouting: AccountModelRoutingConfig? = nil,
+        automaticCooldownDisabled: Bool? = nil
     ) {
         self.source = source
         self.content = content
@@ -2671,6 +2683,7 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
         self.enabled = enabled
         self.managedProxyNodeName = AccountSummary.normalizedManagedProxyNodeName(managedProxyNodeName)
         self.modelRouting = AccountSummary.normalizedModelRouting(modelRouting)
+        self.automaticCooldownDisabled = automaticCooldownDisabled
     }
 }
 
@@ -2698,6 +2711,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
     public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
+    public var automaticCooldownDisabled: Bool
 
     public init(
         label: String? = nil,
@@ -2707,7 +2721,8 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
-        enabled: Bool = true
+        enabled: Bool = true,
+        automaticCooldownDisabled: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -2717,6 +2732,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
+        self.automaticCooldownDisabled = automaticCooldownDisabled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2734,6 +2750,8 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
+        case automaticCooldownDisabled
+        case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2753,7 +2771,10 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
             upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
                 ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decode(String.self, forKey: .apiKey),
-            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
+                ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false
         )
     }
 
@@ -2767,6 +2788,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
     }
 }
 
@@ -2779,6 +2801,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
     public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
+    public var automaticCooldownDisabled: Bool
 
     public init(
         label: String? = nil,
@@ -2788,7 +2811,8 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
-        enabled: Bool = true
+        enabled: Bool = true,
+        automaticCooldownDisabled: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -2798,6 +2822,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
+        self.automaticCooldownDisabled = automaticCooldownDisabled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2815,6 +2840,8 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
+        case automaticCooldownDisabled
+        case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2834,7 +2861,10 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
             upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
                 ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decode(String.self, forKey: .apiKey),
-            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
+                ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false
         )
     }
 
@@ -2848,6 +2878,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
     }
 }
 
@@ -2860,6 +2891,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
     public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
+    public var automaticCooldownDisabled: Bool
 
     public init(
         label: String,
@@ -2869,7 +2901,8 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
-        enabled: Bool
+        enabled: Bool,
+        automaticCooldownDisabled: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -2879,6 +2912,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
+        self.automaticCooldownDisabled = automaticCooldownDisabled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2896,6 +2930,8 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
+        case automaticCooldownDisabled
+        case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2915,7 +2951,10 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
             upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
                 ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey) ?? "",
-            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
+                ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false
         )
     }
 
@@ -2929,6 +2968,34 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
+    }
+}
+
+public struct UpdateAccountCooldownPolicyRequest: Codable, Sendable, Equatable {
+    public var automaticCooldownDisabled: Bool
+
+    public init(automaticCooldownDisabled: Bool) {
+        self.automaticCooldownDisabled = automaticCooldownDisabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case automaticCooldownDisabled
+        case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
+                ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
     }
 }
 
@@ -3639,6 +3706,7 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
     public var selectionOrder: Int64
     public var consecutiveFailureCount: Int64
     public var cooldownUntil: Int64?
+    public var automaticCooldownDisabled: Bool
     public var usage: UsageSnapshot?
     public var usageWindowsVisible: Bool
     public var usageError: String?
@@ -3665,6 +3733,7 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
         selectionOrder: Int64 = 0,
         consecutiveFailureCount: Int64 = 0,
         cooldownUntil: Int64? = nil,
+        automaticCooldownDisabled: Bool = false,
         usage: UsageSnapshot? = nil,
         usageWindowsVisible: Bool = true,
         usageError: String? = nil,
@@ -3690,6 +3759,7 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
         self.selectionOrder = selectionOrder
         self.consecutiveFailureCount = consecutiveFailureCount
         self.cooldownUntil = cooldownUntil
+        self.automaticCooldownDisabled = automaticCooldownDisabled
         self.usage = usage
         self.usageWindowsVisible = usageWindowsVisible
         self.usageError = usageError
@@ -3706,6 +3776,7 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
     }
 
     public func isCoolingDown(now: Int64 = Helpers.now()) -> Bool {
+        guard self.automaticCooldownDisabled == false else { return false }
         guard let cooldownUntil else { return false }
         return cooldownUntil > now
     }

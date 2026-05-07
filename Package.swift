@@ -75,6 +75,7 @@ targets.append(
         ],
         linkerSettings: [
             .linkedFramework("AppKit"),
+            .linkedFramework("IOKit"),
             .linkedFramework("SwiftUI"),
         ]
     )

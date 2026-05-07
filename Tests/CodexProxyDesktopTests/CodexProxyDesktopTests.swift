@@ -76,6 +76,35 @@ private final class OnboardingWindowControllerSpy: OnboardingWindowControlling {
     }
 }
 
+private enum KeepAwakeTestError: LocalizedError {
+    case failed
+
+    var errorDescription: String? {
+        "simulated keep awake failure"
+    }
+}
+
+private final class DesktopKeepAwakeControllerSpy: DesktopKeepAwakeControlling {
+    private(set) var requestedStates: [Bool] = []
+    var isEnabled = false
+    var enableError: Error?
+    var disableError: Error?
+
+    func setEnabled(_ isEnabled: Bool) throws {
+        self.requestedStates.append(isEnabled)
+
+        if isEnabled, let enableError {
+            throw enableError
+        }
+
+        if !isEnabled, let disableError {
+            throw disableError
+        }
+
+        self.isEnabled = isEnabled
+    }
+}
+
 @MainActor
 private final class RemoteAdminWindowControllerSpy: RemoteAdminWindowControlling {
     let hostID: String
@@ -565,6 +594,42 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(appSource.contains("modeEntrySymbol: self.interfaceModeToolbarSymbol"))
         XCTAssertTrue(appSource.contains("modeEntryHelpText: self.interfaceModeToolbarHelpText"))
         XCTAssertTrue(appSource.contains("onModeEntry: { self.model.switchInterfaceMode(target: self.interfaceModeToolbarTarget) }"))
+        XCTAssertTrue(appSource.contains("requestLogsTitle: self.model.text(.actionOpenRequestLogs)"))
+        XCTAssertTrue(appSource.contains("requestLogsHelpText: self.model.text(.actionOpenRequestLogs)"))
+        XCTAssertTrue(appSource.contains("onRequestLogs: { self.model.openRequestLogsWindow() }"))
+    }
+
+    func testMainWindowRequestLogsEntryIsCentralizedInTitlebar() throws {
+        let overviewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let proxySource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ProxyView.swift")
+        let sharedUISource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SharedUI.swift")
+        let appSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
+        let mainMenuSource = try Self.repoFileText("Sources/CodexProxyDesktop/DesktopMainMenuController.swift")
+
+        XCTAssertFalse(overviewSource.contains("actionOpenRequestLogs"))
+        XCTAssertFalse(overviewSource.contains("openRequestLogsWindow"))
+        XCTAssertFalse(proxySource.contains("actionOpenRequestLogs"))
+        XCTAssertFalse(proxySource.contains("openRequestLogsWindow"))
+
+        XCTAssertTrue(sharedUISource.contains("\"titlebar-request-logs-button\""))
+        XCTAssertTrue(sharedUISource.contains("\"list.bullet.rectangle\""))
+        XCTAssertTrue(appSource.contains("requestLogsTitle: self.model.text(.actionOpenRequestLogs)"))
+        XCTAssertTrue(appSource.contains("onRequestLogs: { self.model.openRequestLogsWindow() }"))
+
+        XCTAssertTrue(appSource.contains("self.model.openRequestLogsFromMenu()"))
+        XCTAssertTrue(mainMenuSource.contains("self.openRequestLogs = model.text(.actionOpenRequestLogs)"))
+        XCTAssertTrue(mainMenuSource.contains("self.model?.openRequestLogsFromMenu()"))
+    }
+
+    func testManualAPIKeyFormIncludesAutomaticCooldownPolicyControls() throws {
+        let formSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ManualAPIKeyAccountForm.swift")
+        let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+
+        XCTAssertTrue(formSource.contains("labelAutomaticCooldown"))
+        XCTAssertTrue(formSource.contains("helperAutomaticCooldownPolicy"))
+        XCTAssertTrue(formSource.contains("$draft.automaticCooldownDisabled"))
+        XCTAssertTrue(accountsSource.contains("canUpdateAccountCooldownPolicy"))
+        XCTAssertTrue(accountsSource.contains("accountCooldownPolicyActionTitle"))
     }
 
     func testRootShellViewMapsMinimalModeToolbarEntryToFullModeCopy() throws {
@@ -650,17 +715,36 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         XCTAssertTrue(metrics.isCompact)
         XCTAssertEqual(metrics.contentMaxWidth, 1180)
-        XCTAssertEqual(metrics.outerHorizontalPadding, 14)
+        XCTAssertEqual(metrics.outerHorizontalPadding, 12)
         XCTAssertEqual(metrics.outerTopPadding, 30)
-        XCTAssertEqual(metrics.sectionSpacing, 12)
-        XCTAssertEqual(metrics.columnSpacing, 12)
+        XCTAssertEqual(metrics.sectionSpacing, 10)
+        XCTAssertEqual(metrics.columnSpacing, 10)
         XCTAssertEqual(metrics.primaryColumnMinimumWidth, 336)
         XCTAssertEqual(metrics.detailLabelWidth, 90)
         XCTAssertEqual(metrics.actionSpacing, 6)
         XCTAssertEqual(metrics.primaryCardLayoutMode, .threeColumns)
         XCTAssertEqual(metrics.statusBarLayoutMode, .singleLine)
         XCTAssertEqual(metrics.accountActionColumns, 2)
-        XCTAssertEqual(metrics.accessValueLabelWidth, 86)
+        XCTAssertEqual(metrics.accessValueLabelWidth, 90)
+        XCTAssertEqual(metrics.accountListMaxHeight, 176)
+        XCTAssertEqual(metrics.inlinePanelSpacing, 8)
+        XCTAssertEqual(metrics.insetPanelPadding, 12)
+        XCTAssertEqual(metrics.insetPanelCornerRadius, 14)
+    }
+
+    func testMinimalLayoutMetricsUsesCompactDensityForMinimumDesktopWindow() {
+        let metrics = MinimalLayoutMetrics(width: 1160, height: 760, safeAreaTop: 24, safeAreaBottom: 0)
+
+        XCTAssertTrue(metrics.isCompact)
+        XCTAssertEqual(metrics.outerHorizontalPadding, 12)
+        XCTAssertEqual(metrics.outerTopPadding, 30)
+        XCTAssertEqual(metrics.sectionSpacing, 10)
+        XCTAssertEqual(metrics.columnSpacing, 10)
+        XCTAssertEqual(metrics.primaryCardLayoutMode, .twoPlusOne)
+        XCTAssertEqual(metrics.statusBarLayoutMode, .stacked)
+        XCTAssertEqual(metrics.accountActionColumns, 2)
+        XCTAssertEqual(metrics.accountListMaxHeight, 176)
+        XCTAssertEqual(metrics.insetPanelPadding, 12)
     }
 
     func testMinimalLayoutMetricsUsesTwoPlusOneLayoutForMediumWindow() {
@@ -670,6 +754,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(metrics.primaryCardLayoutMode, .twoPlusOne)
         XCTAssertEqual(metrics.statusBarLayoutMode, .stacked)
         XCTAssertEqual(metrics.accountActionColumns, 2)
+        XCTAssertEqual(metrics.accountListMaxHeight, 176)
+        XCTAssertEqual(metrics.inlinePanelSpacing, 8)
     }
 
     func testMinimalLayoutMetricsUsesRegularDensityForLargeWindow() {
@@ -677,16 +763,20 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         XCTAssertFalse(metrics.isCompact)
         XCTAssertEqual(metrics.contentMaxWidth, 1220)
-        XCTAssertEqual(metrics.outerHorizontalPadding, 18)
+        XCTAssertEqual(metrics.outerHorizontalPadding, 16)
         XCTAssertEqual(metrics.outerTopPadding, 32)
-        XCTAssertEqual(metrics.sectionSpacing, 16)
-        XCTAssertEqual(metrics.columnSpacing, 16)
+        XCTAssertEqual(metrics.sectionSpacing, 14)
+        XCTAssertEqual(metrics.columnSpacing, 14)
         XCTAssertEqual(metrics.primaryColumnMinimumWidth, 360)
         XCTAssertEqual(metrics.detailLabelWidth, 118)
         XCTAssertEqual(metrics.actionSpacing, 8)
         XCTAssertEqual(metrics.primaryCardLayoutMode, .threeColumns)
         XCTAssertEqual(metrics.statusBarLayoutMode, .singleLine)
-        XCTAssertEqual(metrics.accessValueLabelWidth, 96)
+        XCTAssertEqual(metrics.accessValueLabelWidth, 100)
+        XCTAssertEqual(metrics.accountListMaxHeight, 192)
+        XCTAssertEqual(metrics.inlinePanelSpacing, 12)
+        XCTAssertEqual(metrics.insetPanelPadding, 14)
+        XCTAssertEqual(metrics.insetPanelCornerRadius, 16)
     }
 
     func testMinimalLayoutMetricsFallsBackToSingleColumnForNarrowWindow() {
@@ -784,18 +874,17 @@ final class CodexProxyDesktopTests: XCTestCase {
     func testSidebarPageRowStyleUsesBrandHighlightForDarkSelection() {
         let style = SidebarPageRowStyle.resolve(colorScheme: .dark, isSelected: true, isHovered: false)
 
-        XCTAssertEqual(style.rowFillTop, SidebarPageRowStyleLayer(.accentSoft))
-        XCTAssertEqual(style.rowFillBottom, SidebarPageRowStyleLayer(.panelEmphasis, opacity: 0.98))
-        XCTAssertEqual(style.rowBorder, SidebarPageRowStyleLayer(.accent, opacity: 0.52))
+        XCTAssertEqual(style.rowFillTop, SidebarPageRowStyleLayer(.accentSoft, opacity: 0.98))
+        XCTAssertEqual(style.rowFillBottom, SidebarPageRowStyleLayer(.panel, opacity: 0.98))
+        XCTAssertEqual(style.rowBorder, SidebarPageRowStyleLayer(.accent, opacity: 0.42))
         XCTAssertEqual(style.iconFillTop, SidebarPageRowStyleLayer(.accent))
         XCTAssertEqual(style.iconForeground, SidebarPageRowStyleLayer(.white, opacity: 0.98))
         XCTAssertEqual(style.subtitleForeground, SidebarPageRowStyleLayer(.accent, opacity: 0.92))
-        XCTAssertEqual(style.indicatorWidth, 5)
-        XCTAssertEqual(style.indicatorLeadingInset, 3)
-        XCTAssertEqual(style.indicatorVerticalInset, 12)
-        XCTAssertEqual(style.indicatorTrailingGap, 4)
-        XCTAssertEqual(style.indicatorLeadingInset + style.indicatorWidth + style.indicatorTrailingGap, 12)
-        XCTAssertEqual(style.shadow, SidebarPageRowStyleLayer(.accentGlow, opacity: 0.28))
+        XCTAssertEqual(style.indicatorWidth, 0)
+        XCTAssertEqual(style.indicatorLeadingInset, 0)
+        XCTAssertEqual(style.indicatorVerticalInset, 0)
+        XCTAssertEqual(style.indicatorTrailingGap, 0)
+        XCTAssertEqual(style.shadow, SidebarPageRowStyleLayer(.accentGlow, opacity: 0.20))
     }
 
     func testSidebarPageRowStyleKeepsLightSelectionSofterThanDarkSelection() {
@@ -803,14 +892,13 @@ final class CodexProxyDesktopTests: XCTestCase {
         let lightStyle = SidebarPageRowStyle.resolve(colorScheme: .light, isSelected: true, isHovered: false)
 
         XCTAssertEqual(lightStyle.rowFillTop, SidebarPageRowStyleLayer(.accentSoft))
-        XCTAssertEqual(lightStyle.rowFillBottom, SidebarPageRowStyleLayer(.panel, opacity: 0.99))
-        XCTAssertEqual(lightStyle.rowBorder, SidebarPageRowStyleLayer(.accent, opacity: 0.22))
-        XCTAssertEqual(lightStyle.indicatorWidth, 4)
-        XCTAssertEqual(lightStyle.indicatorLeadingInset, 4)
-        XCTAssertEqual(lightStyle.indicatorVerticalInset, 12)
-        XCTAssertEqual(lightStyle.indicatorTrailingGap, 4)
-        XCTAssertEqual(lightStyle.indicatorLeadingInset + lightStyle.indicatorWidth + lightStyle.indicatorTrailingGap, 12)
-        XCTAssertEqual(lightStyle.shadow, SidebarPageRowStyleLayer(.accentGlow, opacity: 0.14))
+        XCTAssertEqual(lightStyle.rowFillBottom, SidebarPageRowStyleLayer(.panel))
+        XCTAssertEqual(lightStyle.rowBorder, SidebarPageRowStyleLayer(.accent, opacity: 0.16))
+        XCTAssertEqual(lightStyle.indicatorWidth, 0)
+        XCTAssertEqual(lightStyle.indicatorLeadingInset, 0)
+        XCTAssertEqual(lightStyle.indicatorVerticalInset, 0)
+        XCTAssertEqual(lightStyle.indicatorTrailingGap, 0)
+        XCTAssertEqual(lightStyle.shadow, SidebarPageRowStyleLayer(.accentGlow, opacity: 0.10))
         XCTAssertLessThan(lightStyle.rowBorder.opacity, darkStyle.rowBorder.opacity)
         XCTAssertLessThan(lightStyle.shadow.opacity, darkStyle.shadow.opacity)
     }
@@ -3006,7 +3094,8 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
-    func testManagedProxyManagerViewDrawerRenderShowsOverlayScrollAndLatencyText() {
+    func testManagedProxyManagerViewDrawerRenderShowsOverlayScrollAndLatencyText() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ManagedProxyManagerView.swift")
         let baseSnapshot = ManagedProxySnapshot(
             mode: .subscription,
             subscriptionConfigured: true,
@@ -3087,18 +3176,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Self.hostedSubviewCount(in: openHostingView, named: "NSView"), 1)
         XCTAssertEqual(openModel.managedProxyFocusedNode?.name, "Tokyo")
         XCTAssertEqual(openModel.managedProxyFocusedNode?.lastDelayMS, 68)
-        XCTAssertNotNil(
-            Self.hostedAccessibilityObject(
-                withAccessibilityIdentifier: "managed-proxy-drawer-focused-node-summary",
-                in: openHostingView
-            )
-        )
-        let renderedTextValues = Self.hostedTextValues(in: openHostingView)
-        let renderedText = renderedTextValues.joined(separator: "\n")
-        XCTAssertTrue(renderedText.contains("Tokyo"))
-        XCTAssertTrue(renderedText.contains("68 ms"))
-        XCTAssertFalse(renderedTextValues.contains("Last Check"))
-        XCTAssertFalse(renderedTextValues.contains("LAST CHECK"))
+        XCTAssertEqual(openModel.managedProxyNodeDelayText(openModel.managedProxyFocusedNode!), "68 ms")
+        XCTAssertTrue(source.contains("\"managed-proxy-drawer-focused-node-summary\""))
+        XCTAssertTrue(source.contains("self.model.managedProxyNodeDelayText(node)"))
     }
 
     @MainActor
@@ -3382,6 +3462,124 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("title: self.model.text(.labelMenuBarTokenUsage)"))
         XCTAssertTrue(source.contains("footer: self.model.text(.helperMenuBarTokenUsage)"))
         XCTAssertTrue(source.contains("self.model.updateShowsMenuBarTokenUsage($0)"))
+    }
+
+    @MainActor
+    func testTitlebarDeclaresKeepAwakeButton() throws {
+        let appSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
+        let sharedSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SharedUI.swift")
+
+        XCTAssertTrue(appSource.contains("keepAwakeTitle: self.model.keepAwakeActionTitle"))
+        XCTAssertTrue(appSource.contains("onKeepAwake: { self.model.toggleKeepAwake() }"))
+        XCTAssertTrue(sharedSource.contains("accessibilityID: \"titlebar-keep-awake-button\""))
+    }
+
+    @MainActor
+    func testMenuBarPanelDeclaresKeepAwakeToggle() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
+
+        XCTAssertTrue(source.contains("self.keepAwakeRow(palette: palette)"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"menu-bar-keep-awake-toggle\")"))
+        XCTAssertTrue(source.contains("set: { self.model.setKeepAwakeEnabled($0) }"))
+    }
+
+    @MainActor
+    func testMenuBarPanelKeepAwakeUsesTallerScrollablePopover() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
+
+        XCTAssertTrue(source.contains("static let width: CGFloat = 300"))
+        XCTAssertTrue(source.contains("static let height: CGFloat = 400"))
+        XCTAssertTrue(source.contains("popover.contentSize = NSSize(width: MenuBarPanelMetrics.width, height: MenuBarPanelMetrics.height)"))
+        XCTAssertTrue(source.contains("ScrollView(.vertical, showsIndicators: false)"))
+        XCTAssertTrue(source.contains("self.menuScrollableContent(palette: palette)"))
+        XCTAssertTrue(source.contains(".frame(width: MenuBarPanelMetrics.width, height: MenuBarPanelMetrics.height)"))
+        XCTAssertTrue(source.contains(".compactOverlayScrollbars()"))
+    }
+
+    @MainActor
+    func testMenuBarPanelKeepAwakePinsBottomActionBar() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
+
+        XCTAssertTrue(source.contains("VStack(spacing: 0)"))
+        XCTAssertTrue(source.contains("self.menuBottomActionBar(palette: palette)"))
+        XCTAssertTrue(source.contains("private func menuBottomActionBar(palette: AppearancePalette) -> some View"))
+        XCTAssertTrue(source.contains("HStack(spacing: 8)"))
+        XCTAssertTrue(source.contains("Text(self.model.text(.menuReload))\n                        .frame(maxWidth: .infinity)"))
+        XCTAssertTrue(source.contains("Text(self.model.text(.menuQuit))\n                        .frame(maxWidth: .infinity)"))
+        XCTAssertTrue(source.contains(".buttonStyle(AppActionButtonStyle(kind: .secondary))\n                .frame(maxWidth: .infinity)"))
+        XCTAssertTrue(source.contains(".buttonStyle(AppActionButtonStyle(kind: .danger))\n                .frame(maxWidth: .infinity)"))
+    }
+
+    @MainActor
+    func testKeepAwakeEnablesControllerAndPublishesState() {
+        let keepAwakeController = DesktopKeepAwakeControllerSpy()
+        let model = DesktopAppModel(keepAwakeController: keepAwakeController)
+
+        model.setKeepAwakeEnabled(true)
+
+        XCTAssertEqual(keepAwakeController.requestedStates, [true])
+        XCTAssertTrue(keepAwakeController.isEnabled)
+        XCTAssertTrue(model.isKeepAwakeEnabled)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successKeepAwakeEnabled))
+    }
+
+    @MainActor
+    func testKeepAwakeDisablesControllerAndPublishesState() {
+        let keepAwakeController = DesktopKeepAwakeControllerSpy()
+        let model = DesktopAppModel(keepAwakeController: keepAwakeController)
+
+        model.setKeepAwakeEnabled(true)
+        model.setKeepAwakeEnabled(false)
+
+        XCTAssertEqual(keepAwakeController.requestedStates, [true, false])
+        XCTAssertFalse(keepAwakeController.isEnabled)
+        XCTAssertFalse(model.isKeepAwakeEnabled)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successKeepAwakeDisabled))
+    }
+
+    @MainActor
+    func testKeepAwakeEnableFailureRollsBackStateAndPublishesError() {
+        let keepAwakeController = DesktopKeepAwakeControllerSpy()
+        keepAwakeController.enableError = KeepAwakeTestError.failed
+        let model = DesktopAppModel(keepAwakeController: keepAwakeController)
+
+        model.setKeepAwakeEnabled(true)
+
+        XCTAssertEqual(keepAwakeController.requestedStates, [true])
+        XCTAssertFalse(keepAwakeController.isEnabled)
+        XCTAssertFalse(model.isKeepAwakeEnabled)
+        XCTAssertEqual(model.banners.first?.tone, .error)
+        XCTAssertEqual(model.banners.first?.title, model.text(.errorKeepAwakeFailed))
+        XCTAssertEqual(model.banners.first?.detail, "simulated keep awake failure")
+    }
+
+    @MainActor
+    func testReleaseKeepAwakeSilentlyDisablesWithoutPublishingNotice() {
+        let keepAwakeController = DesktopKeepAwakeControllerSpy()
+        let model = DesktopAppModel(keepAwakeController: keepAwakeController)
+
+        model.setKeepAwakeEnabled(true)
+        let bannerCount = model.banners.count
+
+        model.releaseKeepAwakeSilently()
+
+        XCTAssertEqual(keepAwakeController.requestedStates, [true, false])
+        XCTAssertFalse(keepAwakeController.isEnabled)
+        XCTAssertFalse(model.isKeepAwakeEnabled)
+        XCTAssertEqual(model.banners.count, bannerCount)
+    }
+
+    @MainActor
+    func testDesktopPreferencesDoNotPersistKeepAwakeState() throws {
+        let encodedPreferences = String(
+            data: try Helpers.encodeJSON(DesktopPreferences(), pretty: true),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(encodedPreferences?.localizedCaseInsensitiveContains("keepAwake") ?? true)
+        XCTAssertFalse(encodedPreferences?.localizedCaseInsensitiveContains("keep_awake") ?? true)
     }
 
     @MainActor
@@ -6003,7 +6201,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.tunnelStatusText, "Connected :9911")
         XCTAssertEqual(model.reachabilityText, "Reachable")
         XCTAssertEqual(model.daemonStatusText, "Running")
-        XCTAssertGreaterThanOrEqual(Self.remoteAdminTopBarItemFrames(in: hostingView).count, 4)
+        XCTAssertGreaterThanOrEqual(Self.remoteAdminTopBarItemFrames(in: hostingView).count, 3)
         XCTAssertFalse(source.contains("DashboardHeader("))
         XCTAssertFalse(source.contains("remote-admin-tab-strip"))
         XCTAssertFalse(source.contains("RemoteAdminSectionStrip"))
@@ -7762,7 +7960,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                     providerPreset: .aliyunQwenCodingPlan,
                     baseURL: "https://loaded.example.com/root",
                     apiKey: "sk-loaded-secret",
-                    enabled: false
+                    enabled: false,
+                    automaticCooldownDisabled: true
                 )
             }
         )
@@ -7777,6 +7976,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.manualAPIKeyDraft?.baseURL, "https://loaded.example.com/root")
         XCTAssertEqual(model.manualAPIKeyDraft?.apiKey, "sk-loaded-secret")
         XCTAssertEqual(model.manualAPIKeyDraft?.enabled, false)
+        XCTAssertEqual(model.manualAPIKeyDraft?.automaticCooldownDisabled, true)
         let draft = try XCTUnwrap(model.manualAPIKeyDraft)
         XCTAssertEqual(model.manualAPIKeySheetTitle(for: draft), model.text(.actionEditAPIKey))
     }
@@ -7983,6 +8183,7 @@ final class CodexProxyDesktopTests: XCTestCase {
             upstreamAdapter: .chatCompletions,
             apiKey: "sk-original",
             enabled: false,
+            automaticCooldownDisabled: true,
             editingAccountID: updatedAccount.id,
             originalAccountKey: "key-before-edit"
         )
@@ -8000,7 +8201,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                 upstreamAdapter: .chatCompletions,
                 upstreamThinkingCompatibility: .disabled,
                 apiKey: "sk-original",
-                enabled: false
+                enabled: false,
+                automaticCooldownDisabled: true
             )
         )
         XCTAssertNil(model.manualAPIKeyDraft)
@@ -8513,6 +8715,48 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testToggleAccountCooldownPolicyCallsAdminReloadsAccountsAndShowsSuccess() async {
+        let apiKeyAccount = Self.makeAccount(
+            id: "cooldown-policy-api-key",
+            label: "Cooldown Policy API Key",
+            accountID: "acct-cooldown-policy-api-key",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://example.com/v1"
+        )
+        let probe = AccountCooldownPolicyUpdateProbe(account: apiKeyAccount)
+        let admin = AdminAPIClient(
+            accountsHandler: { await probe.accounts() },
+            getStatusHandler: { Self.makeProxyStatus(running: false) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            updateAccountCooldownPolicyHandler: { id, input in
+                try await probe.update(id: id, input: input)
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.accounts = [apiKeyAccount]
+
+        XCTAssertTrue(model.canUpdateAccountCooldownPolicy(apiKeyAccount))
+        XCTAssertEqual(model.accountCooldownPolicyText(apiKeyAccount), model.localized(zh: "自动", en: "Automatic"))
+        XCTAssertEqual(model.accountCooldownPolicyActionTitle(apiKeyAccount), model.text(.actionDisableAutomaticCooldown))
+
+        await model.toggleAccountCooldownPolicy(apiKeyAccount)
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.id, apiKeyAccount.id)
+        XCTAssertEqual(snapshot.input, UpdateAccountCooldownPolicyRequest(automaticCooldownDisabled: true))
+        guard let updated = model.accounts.first else {
+            XCTFail("Expected account list to be reloaded.")
+            return
+        }
+        XCTAssertTrue(updated.automaticCooldownDisabled)
+        XCTAssertEqual(model.accountCooldownPolicyText(updated), model.localized(zh: "已禁用", en: "Disabled"))
+        XCTAssertEqual(model.accountCooldownPolicyActionTitle(updated), model.text(.actionEnableAutomaticCooldown))
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successAccountCooldownPolicyUpdated))
+        XCTAssertTrue(model.banners.first?.detail?.contains(updated.label) == true)
+    }
+
+    @MainActor
     func testRefreshUsageForAccountFailureClearsRefreshingStateAndPublishesError() async {
         let account = Self.makeAccount(
             id: "oauth-account",
@@ -8582,10 +8826,9 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         let task = Task { await model.refreshUsage(for: updatedAccount) }
 
-        await Self.waitForCondition {
-            Self.renderHostedView(hostingView)
-            return Self.hostedProgressIndicatorCount(in: hostingView) > 0
-        }
+        await Self.waitForCondition { model.isRefreshingUsage(for: updatedAccount.id) }
+        Self.renderHostedView(hostingView)
+        XCTAssertEqual(model.refreshUsageButtonText(for: updatedAccount.id), model.text(.actionRefreshingUsage))
 
         _ = await task.value
 
@@ -9180,6 +9423,7 @@ final class CodexProxyDesktopTests: XCTestCase {
     func testMainWindowInstallsSharedTitlebarControlsInNativeRightAccessory() throws {
         let appSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
         let rootShellSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RootShellView.swift")
+        let sharedUISource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SharedUI.swift")
 
         XCTAssertTrue(appSource.contains("private var mainTitlebarControlsAccessory: NSTitlebarAccessoryViewController?"))
         XCTAssertTrue(appSource.contains("private var mainTitlebarControlsHostingController: NSHostingController<MainWindowTitlebarControlsHostView>?"))
@@ -9187,7 +9431,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(appSource.contains("newHostingController.sizingOptions = [.intrinsicContentSize, .preferredContentSize]"))
         XCTAssertTrue(appSource.contains("private func sizeMainTitlebarControlsView(_ view: NSView)"))
         XCTAssertTrue(appSource.contains("MainWindowTitlebarControlsMetrics.minimumWidth"))
-        XCTAssertTrue(appSource.contains("static let minimumWidth: CGFloat = 510"))
+        XCTAssertTrue(appSource.contains("static let minimumWidth: CGFloat = 720"))
         XCTAssertTrue(appSource.contains("static let minimumHeight: CGFloat = 44"))
         XCTAssertTrue(appSource.contains("static let topInset: CGFloat = 4"))
         XCTAssertTrue(appSource.contains("static let bottomInset: CGFloat = 2"))
@@ -9200,6 +9444,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(appSource.contains("window.titlebarAccessoryViewControllers.contains(where: { $0 === accessory }) == false"))
         XCTAssertTrue(appSource.contains("window.addTitlebarAccessoryViewController(accessory)"))
         XCTAssertTrue(appSource.contains("MainWindowTitlebarControls("))
+        XCTAssertTrue(sharedUISource.contains("titlebar-request-logs-button"))
         XCTAssertFalse(rootShellSource.contains("MainWindowTitlebarControlsFrameProbe"))
         XCTAssertFalse(rootShellSource.contains("\"main-window-titlebar-controls\""))
     }
@@ -9305,7 +9550,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.preferences.languageMode = .english
         XCTAssertEqual(model.accountCardRefreshActionTitle(for: account.id), "Refresh")
         XCTAssertEqual(model.accountCardEditActionTitle(for: account), "Edit")
-        XCTAssertEqual(model.accountCardNodeActionTitle, "Node")
+        XCTAssertEqual(model.accountCardNodeActionTitle, "Outbound Node")
         XCTAssertEqual(model.accountCardMoreActionTitle, "More")
 
         model.refreshingAccountIDs.insert(account.id)
@@ -9315,7 +9560,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.refreshingAccountIDs.remove(account.id)
         XCTAssertEqual(model.accountCardRefreshActionTitle(for: account.id), "刷新")
         XCTAssertEqual(model.accountCardEditActionTitle(for: account), "编辑")
-        XCTAssertEqual(model.accountCardNodeActionTitle, "节点")
+        XCTAssertEqual(model.accountCardNodeActionTitle, "出站节点")
         XCTAssertEqual(model.accountCardMoreActionTitle, "更多")
 
         model.refreshingAccountIDs.insert(account.id)
@@ -14111,6 +14356,7 @@ private extension CodexProxyDesktopTests {
         todayTokenUsage: AccountTodayTokenUsage? = nil,
         consecutiveFailureCount: Int64 = 0,
         cooldownUntil: Int64? = nil,
+        automaticCooldownDisabled: Bool = false,
         usageError: String? = nil,
         authRefreshBlocked: Bool = false,
         authRefreshError: String? = nil
@@ -14133,6 +14379,7 @@ private extension CodexProxyDesktopTests {
             selectionOrder: selectionOrder,
             consecutiveFailureCount: consecutiveFailureCount,
             cooldownUntil: cooldownUntil,
+            automaticCooldownDisabled: automaticCooldownDisabled,
             usage: usage,
             usageWindowsVisible: usageWindowsVisible,
             todayTokenUsage: todayTokenUsage,
@@ -14609,6 +14856,39 @@ private actor AccountCooldownStopProbe {
 
     func callCount() -> Int {
         self.stopCalls
+    }
+}
+
+private actor AccountCooldownPolicyUpdateProbe {
+    private var storedAccount: AccountSummary
+    private var id: String?
+    private var input: UpdateAccountCooldownPolicyRequest?
+
+    init(account: AccountSummary) {
+        self.storedAccount = account
+    }
+
+    func accounts() -> [AccountSummary] {
+        [self.storedAccount]
+    }
+
+    func update(id: String, input: UpdateAccountCooldownPolicyRequest) throws -> AccountSummary {
+        guard id == self.storedAccount.id else {
+            throw ProxyError.message("unexpected account id \(id)")
+        }
+        self.id = id
+        self.input = input
+        self.storedAccount.automaticCooldownDisabled = input.automaticCooldownDisabled
+        if input.automaticCooldownDisabled {
+            self.storedAccount.consecutiveFailureCount = 0
+            self.storedAccount.cooldownUntil = nil
+            self.storedAccount.usageError = nil
+        }
+        return self.storedAccount
+    }
+
+    func snapshot() -> (id: String?, input: UpdateAccountCooldownPolicyRequest?) {
+        (self.id, self.input)
     }
 }
 

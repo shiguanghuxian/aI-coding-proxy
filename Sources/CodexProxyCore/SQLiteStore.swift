@@ -108,6 +108,7 @@ public final class SQLiteStore: @unchecked Sendable {
         }
         let consecutiveFailureCount = existing?.consecutiveFailureCount ?? record.consecutiveFailureCount
         let cooldownUntil = existing?.cooldownUntil ?? record.cooldownUntil
+        let automaticCooldownDisabled = existing?.automaticCooldownDisabled ?? record.automaticCooldownDisabled
         let usageWindowsVisible = existing?.usageWindowsVisible ?? record.usageWindowsVisible
         let managedProxyNodeName = existing?.managedProxyNodeName ?? record.managedProxyNodeName
         let modelRouting = existing?.modelRouting ?? modelRoutingJSON
@@ -117,8 +118,8 @@ public final class SQLiteStore: @unchecked Sendable {
             id, label, principal_id, email, account_id, plan_type, auth_blob, added_at, updated_at,
             enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
             auth_refresh_blocked, auth_refresh_error, auth_mode, provider_preset, upstream_base_url, usage_windows_visible,
-            managed_proxy_node_name, model_routing_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            managed_proxy_node_name, model_routing_json, automatic_cooldown_disabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         try self.execute(sql, bindings: [
             .text(existing?.id ?? record.id),
@@ -144,6 +145,7 @@ public final class SQLiteStore: @unchecked Sendable {
             .int(usageWindowsVisible ? 1 : 0),
             .text(managedProxyNodeName),
             .text(modelRouting),
+            .int(automaticCooldownDisabled ? 1 : 0),
         ])
         return existing != nil
     }
@@ -257,7 +259,8 @@ public final class SQLiteStore: @unchecked Sendable {
             SET label = ?, principal_id = ?, email = ?, account_id = ?, plan_type = ?, auth_blob = ?, updated_at = ?,
                 enabled = ?, selection_order = ?, consecutive_failure_count = ?, cooldown_until = ?, usage_json = ?,
                 usage_error = ?, auth_refresh_blocked = ?, auth_refresh_error = ?, auth_mode = ?, provider_preset = ?,
-                upstream_base_url = ?, usage_windows_visible = ?, managed_proxy_node_name = ?, model_routing_json = ?
+                upstream_base_url = ?, usage_windows_visible = ?, managed_proxy_node_name = ?, model_routing_json = ?,
+                automatic_cooldown_disabled = ?
             WHERE id = ?;
             """,
             bindings: [
@@ -282,6 +285,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 .int(record.usageWindowsVisible ? 1 : 0),
                 .text(record.managedProxyNodeName),
                 .text(modelRoutingJSON),
+                .int(record.automaticCooldownDisabled ? 1 : 0),
                 .text(id),
             ]
         )
@@ -337,6 +341,45 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func updateAccountCooldownPolicy(
+        id: String,
+        automaticCooldownDisabled: Bool,
+        clearExistingCooldown: Bool
+    ) throws {
+        let sql: String
+        let bindings: [Binding]
+        if clearExistingCooldown {
+            sql = """
+            UPDATE accounts
+            SET automatic_cooldown_disabled = ?, consecutive_failure_count = ?, cooldown_until = ?, usage_error = ?, updated_at = ?
+            WHERE id = ?;
+            """
+            bindings = [
+                .int(automaticCooldownDisabled ? 1 : 0),
+                .int(0),
+                .int(nil),
+                .text(nil),
+                .int(Helpers.now()),
+                .text(id),
+            ]
+        } else {
+            sql = """
+            UPDATE accounts
+            SET automatic_cooldown_disabled = ?, updated_at = ?
+            WHERE id = ?;
+            """
+            bindings = [
+                .int(automaticCooldownDisabled ? 1 : 0),
+                .int(Helpers.now()),
+                .text(id),
+            ]
+        }
+        try self.execute(sql, bindings: bindings)
+        guard sqlite3_changes(self.db) > 0 else {
+            throw ProxyError.message("未找到要更新的账号")
+        }
+    }
+
     public func reorderAccounts(ids: [String]) throws {
         let trimmedIDs = ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard trimmedIDs.allSatisfy({ !$0.isEmpty }) else {
@@ -371,7 +414,7 @@ public final class SQLiteStore: @unchecked Sendable {
                    enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
                    auth_refresh_blocked, auth_refresh_error, auth_mode, provider_preset, upstream_base_url,
                    managed_proxy_node_name, model_routing_json,
-                   usage_windows_visible
+                   usage_windows_visible, automatic_cooldown_disabled
             FROM accounts
             ORDER BY selection_order ASC, label COLLATE NOCASE ASC, id ASC;
             """
@@ -414,6 +457,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 selectionOrder: row.int("selection_order"),
                 consecutiveFailureCount: row.int("consecutive_failure_count"),
                 cooldownUntil: row.optionalInt("cooldown_until"),
+                automaticCooldownDisabled: row.int("automatic_cooldown_disabled") == 1,
                 usage: usage,
                 usageWindowsVisible: row.int("usage_windows_visible") == 1,
                 usageError: row.optionalText("usage_error"),
@@ -434,7 +478,7 @@ public final class SQLiteStore: @unchecked Sendable {
                    enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
                    auth_refresh_blocked, auth_refresh_error, auth_blob, auth_mode, provider_preset, upstream_base_url,
                    managed_proxy_node_name, model_routing_json,
-                   usage_windows_visible
+                   usage_windows_visible, automatic_cooldown_disabled
             FROM accounts
             ORDER BY selection_order ASC, label COLLATE NOCASE ASC, id ASC;
             """
@@ -485,6 +529,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 selectionOrder: row.int("selection_order"),
                 consecutiveFailureCount: row.int("consecutive_failure_count"),
                 cooldownUntil: row.optionalInt("cooldown_until"),
+                automaticCooldownDisabled: row.int("automatic_cooldown_disabled") == 1,
                 usage: usage,
                 usageWindowsVisible: row.int("usage_windows_visible") == 1,
                 todayTokenUsage: todayTokenUsage,
@@ -545,6 +590,7 @@ public final class SQLiteStore: @unchecked Sendable {
             var addedAt: Int64
             var updatedAt: Int64
             var enabled: Bool
+            var automaticCooldownDisabled: Bool
             var usage: UsageSnapshot?
             var usageError: String?
             var authRefreshBlocked: Bool
@@ -568,6 +614,7 @@ public final class SQLiteStore: @unchecked Sendable {
                     addedAt: $0.addedAt,
                     updatedAt: $0.updatedAt,
                     enabled: $0.enabled,
+                    automaticCooldownDisabled: $0.automaticCooldownDisabled,
                     usage: $0.usage,
                     usageError: $0.usageError,
                     authRefreshBlocked: $0.authRefreshBlocked,
@@ -908,6 +955,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 added_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                automatic_cooldown_disabled INTEGER NOT NULL DEFAULT 0,
                 selection_order INTEGER NOT NULL DEFAULT 0,
                 consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
                 cooldown_until INTEGER,
@@ -927,6 +975,9 @@ public final class SQLiteStore: @unchecked Sendable {
         )
         if try !self.columnExists("enabled", in: "accounts", on: db) {
             try self.execute("ALTER TABLE accounts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;", on: db)
+        }
+        if try !self.columnExists("automatic_cooldown_disabled", in: "accounts", on: db) {
+            try self.execute("ALTER TABLE accounts ADD COLUMN automatic_cooldown_disabled INTEGER NOT NULL DEFAULT 0;", on: db)
         }
         if try !self.columnExists("selection_order", in: "accounts", on: db) {
             try self.execute("ALTER TABLE accounts ADD COLUMN selection_order INTEGER NOT NULL DEFAULT 0;", on: db)
@@ -1144,14 +1195,15 @@ public final class SQLiteStore: @unchecked Sendable {
         selectionOrder: Int64,
         consecutiveFailureCount: Int64,
         cooldownUntil: Int64?,
+        automaticCooldownDisabled: Bool,
         usageWindowsVisible: Bool,
         managedProxyNodeName: String?,
         modelRouting: String?
     )? {
         guard let row = try self.querySingle(
             """
-            SELECT id, enabled, added_at, selection_order, consecutive_failure_count, cooldown_until, usage_windows_visible,
-                   managed_proxy_node_name, model_routing_json
+            SELECT id, enabled, added_at, selection_order, consecutive_failure_count, cooldown_until,
+                   automatic_cooldown_disabled, usage_windows_visible, managed_proxy_node_name, model_routing_json
             FROM accounts
             WHERE principal_id || '|' || account_id = ?;
             """,
@@ -1166,6 +1218,7 @@ public final class SQLiteStore: @unchecked Sendable {
             row.int("selection_order"),
             row.int("consecutive_failure_count"),
             row.optionalInt("cooldown_until"),
+            row.int("automatic_cooldown_disabled") == 1,
             row.int("usage_windows_visible") == 1,
             row.optionalText("managed_proxy_node_name"),
             row.optionalText("model_routing_json")

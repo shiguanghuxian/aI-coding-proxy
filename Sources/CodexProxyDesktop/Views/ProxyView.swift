@@ -378,7 +378,6 @@ private struct ProxyTopUtilityControls: View {
     var body: some View {
         HStack(spacing: 10) {
             self.actionButton(title: self.model.actionOpenClientConfigManager, action: self.openClientConfigManager)
-            self.actionButton(title: self.model.text(.actionOpenRequestLogs), action: self.openRequestLogs)
             if self.model.adminSupportsProxyTesting {
                 self.actionButton(title: self.model.text(.actionTestProxy), action: self.openTestConsole)
                     .accessibilityIdentifier("proxy-test-proxy-button")
@@ -401,10 +400,6 @@ private struct ProxyTopUtilityControls: View {
 
     private func openClientConfigManager() {
         self.model.openClientConfigManagerWindow()
-    }
-
-    private func openRequestLogs() {
-        self.model.openRequestLogsWindow()
     }
 }
 
@@ -689,11 +684,6 @@ struct ProxyAPIKeyUsageCard: View {
 
             Button(self.model.text(.commonReload)) {
                 Task { await self.model.refreshProxyAPIKeyUsage() }
-            }
-            .buttonStyle(AppActionButtonStyle(kind: .secondary))
-
-            Button(self.model.text(.actionOpenRequestLogs)) {
-                self.model.openRequestLogsWindow()
             }
             .buttonStyle(AppActionButtonStyle(kind: .secondary))
         }

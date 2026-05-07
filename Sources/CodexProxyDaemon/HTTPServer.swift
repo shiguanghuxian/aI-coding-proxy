@@ -663,6 +663,12 @@ final class DaemonHTTPService: @unchecked Sendable {
             return try self.codableResponse(try await self.controller.updateManualAPIKeyAccount(id: id, input: payload))
         }
 
+        if request.method == "PATCH", components.count == 5, components[0] == "admin", components[1] == "accounts", components[3] == "cooldown", components[4] == "policy" {
+            let id = components[2].removingPercentEncoding ?? components[2]
+            let payload = try self.decode(UpdateAccountCooldownPolicyRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.updateAccountCooldownPolicy(id: id, input: payload))
+        }
+
         if request.method == "POST", components.count == 5, components[0] == "admin", components[1] == "accounts", components[3] == "usage", components[4] == "refresh" {
             let id = components[2].removingPercentEncoding ?? components[2]
             return try self.codableResponse(try await self.controller.refreshAccountUsage(id: id))

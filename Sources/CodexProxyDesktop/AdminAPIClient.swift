@@ -90,6 +90,7 @@ final class AdminAPIClient {
     typealias RefreshUsageHandler = @Sendable () async throws -> [AccountSummary]
     typealias RefreshAccountUsageHandler = @Sendable (String) async throws -> AccountSummary
     typealias StopAccountCooldownHandler = @Sendable (String) async throws -> AccountSummary
+    typealias UpdateAccountCooldownPolicyHandler = @Sendable (String, UpdateAccountCooldownPolicyRequest) async throws -> AccountSummary
     typealias UpdateAccountLabelHandler = @Sendable (String, UpdateAccountLabelRequest) async throws -> AccountSummary
     typealias UpdateAccountManagedProxyNodeHandler = @Sendable (String, UpdateAccountManagedProxyNodeRequest) async throws -> AccountSummary
     typealias ClearAccountManagedProxyNodesHandler = @Sendable () async throws -> ClearAccountManagedProxyNodesResult
@@ -129,6 +130,7 @@ final class AdminAPIClient {
     private let refreshUsageHandler: RefreshUsageHandler?
     private let refreshAccountUsageHandler: RefreshAccountUsageHandler?
     private let stopAccountCooldownHandler: StopAccountCooldownHandler?
+    private let updateAccountCooldownPolicyHandler: UpdateAccountCooldownPolicyHandler?
     private let updateAccountLabelHandler: UpdateAccountLabelHandler?
     private let updateAccountManagedProxyNodeHandler: UpdateAccountManagedProxyNodeHandler?
     private let clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler?
@@ -175,6 +177,7 @@ final class AdminAPIClient {
         refreshUsageHandler: RefreshUsageHandler? = nil,
         refreshAccountUsageHandler: RefreshAccountUsageHandler? = nil,
         stopAccountCooldownHandler: StopAccountCooldownHandler? = nil,
+        updateAccountCooldownPolicyHandler: UpdateAccountCooldownPolicyHandler? = nil,
         updateAccountLabelHandler: UpdateAccountLabelHandler? = nil,
         updateAccountManagedProxyNodeHandler: UpdateAccountManagedProxyNodeHandler? = nil,
         clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler? = nil,
@@ -214,6 +217,7 @@ final class AdminAPIClient {
         self.refreshUsageHandler = refreshUsageHandler
         self.refreshAccountUsageHandler = refreshAccountUsageHandler
         self.stopAccountCooldownHandler = stopAccountCooldownHandler
+        self.updateAccountCooldownPolicyHandler = updateAccountCooldownPolicyHandler
         self.updateAccountLabelHandler = updateAccountLabelHandler
         self.updateAccountManagedProxyNodeHandler = updateAccountManagedProxyNodeHandler
         self.clearAccountManagedProxyNodesHandler = clearAccountManagedProxyNodesHandler
@@ -417,6 +421,21 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().stopAccountCooldown(id: id)
+    }
+
+    func updateAccountCooldownPolicy(id: String, input: UpdateAccountCooldownPolicyRequest) async throws -> AccountSummary {
+        if let updateAccountCooldownPolicyHandler {
+            return try await updateAccountCooldownPolicyHandler(id, input)
+        }
+        let encodedID = Self.encodePathComponent(id)
+        if let result: AccountSummary = try await self.httpRequest(
+            "/accounts/\(encodedID)/cooldown/policy",
+            method: "PATCH",
+            body: input
+        ) {
+            return result
+        }
+        return try await self.controller().updateAccountCooldownPolicy(id: id, input: input)
     }
 
     func setAccountEnabled(id: String, enabled: Bool) async throws -> AccountSummary {

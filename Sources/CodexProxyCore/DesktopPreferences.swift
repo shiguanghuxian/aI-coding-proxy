@@ -179,6 +179,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case statusFailed
     case statusCancelled
     case statusNotApplicable
+    case statusKeepAwakeEnabled
+    case statusKeepAwakeDisabled
     case labelStatus
     case labelTime
     case labelTimeRange
@@ -242,6 +244,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelTheme
     case labelDisplay
     case labelMenuBarTokenUsage
+    case labelKeepAwake
     case labelPlan
     case labelEmail
     case labelIssue
@@ -269,6 +272,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelRunning
     case labelLaunchctlState
     case labelEnabled
+    case labelAutomaticCooldown
     case labelArchitecture
     case labelRemoteUser
     case labelSystemctl
@@ -337,6 +341,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionAccountCardNode
     case actionAccountCardMore
     case actionStopAccountCooldown
+    case actionDisableAutomaticCooldown
+    case actionEnableAutomaticCooldown
     case actionSaveAccount
     case actionRotateAPIKey
     case actionOpenRequestLogs
@@ -404,6 +410,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionCopyReasoningEffort
     case actionCopyAccountLabel
     case actionCopyRowCSV
+    case actionEnableKeepAwake
+    case actionDisableKeepAwake
     case placeholderNoEndpoint
     case placeholderNoAccounts
     case placeholderSearchAccounts
@@ -437,6 +445,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperLanguageOptionChinese
     case helperLanguageOptionEnglish
     case helperMenuBarTokenUsage
+    case helperKeepAwake
     case helperQuickActionOAuth
     case helperQuickActionImportCurrent
     case helperQuickActionImportLocalAccountsToRemote
@@ -447,6 +456,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperQuickActionRefreshUsage
     case helperSelectionPolicy
     case helperManualAPIKeyAccount
+    case helperAutomaticCooldownPolicy
     case helperManualAccountGenericOpenAICompatible
     case helperManualAccountUpstreamAdapter
     case helperManualAccountThinkingCompatibility
@@ -637,6 +647,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorProxyTestFailed
     case errorProxyAPIKeyFailed
     case errorProxyAPIKeyUsageFailed
+    case errorKeepAwakeFailed
     case successDaemonStarted
     case successDaemonStopped
     case successAuthImported
@@ -650,6 +661,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAccountManagedProxyNodesCleared
     case successAccountModelRoutingUpdated
     case successAccountCooldownStopped
+    case successAccountCooldownPolicyUpdated
     case successUsageRefreshed
     case successAccountUsageRefreshed
     case successProxyKeyRotated
@@ -692,6 +704,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successProxyAPIKeyRemoved
     case successProxyAPIKeyRegenerated
     case successProxyAPIKeyPrimaryChanged
+    case successKeepAwakeEnabled
+    case successKeepAwakeDisabled
 }
 
 public enum OperationContext: String, Sendable {
@@ -710,6 +724,7 @@ public enum OperationContext: String, Sendable {
     case clearAccountManagedProxyNodes
     case updateAccountModelRouting
     case stopAccountCooldown
+    case updateAccountCooldownPolicy
     case refreshUsage
     case refreshAccountUsage
     case rotateProxyKey
@@ -1068,6 +1083,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAccountModelRoutingUpdated)
         case .stopAccountCooldown:
             return self.text(.successAccountCooldownStopped)
+        case .updateAccountCooldownPolicy:
+            return self.text(.successAccountCooldownPolicyUpdated)
         case .refreshUsage:
             return self.text(.successUsageRefreshed)
         case .refreshAccountUsage:
@@ -1160,7 +1177,7 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .saveSettings || context == .saveRemoteHost || context == .deleteRemoteHost || lower.contains("config") || lower.contains("settings") {
             return self.text(.errorConfigurationFailed)
         }
-        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .reorderAccounts {
+        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .reorderAccounts {
             return self.text(.errorAccountManagementFailed)
         }
         if context == .copyEndpoint || context == .copyAPIKey || context == .copyClaudeCodeEnv || context == .copyGeminiCLIEnv || context == .copyOAuthLink || context == .copyManagedProxyTerminalCommand {
@@ -1863,6 +1880,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .statusFailed: "Failed",
             .statusCancelled: "Cancelled",
             .statusNotApplicable: "N/A",
+            .statusKeepAwakeEnabled: "Keeping Awake",
+            .statusKeepAwakeDisabled: "Off",
             .labelStatus: "Status",
             .labelTime: "Time",
             .labelTimeRange: "Time Range",
@@ -1942,6 +1961,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelTheme: "Theme",
             .labelDisplay: "Display",
             .labelMenuBarTokenUsage: "Menu Bar Token Usage",
+            .labelKeepAwake: "Keep Awake",
             .labelPlan: "Plan",
             .labelEmail: "Email",
             .labelIssue: "Issue",
@@ -1953,6 +1973,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRunning: "Running",
             .labelLaunchctlState: "launchctl State",
             .labelEnabled: "Enabled",
+            .labelAutomaticCooldown: "Automatic Cooldown",
             .labelArchitecture: "Architecture",
             .labelRemoteUser: "Remote User",
             .labelSystemctl: "systemctl",
@@ -2021,6 +2042,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardNode: "Outbound Node",
             .actionAccountCardMore: "More",
             .actionStopAccountCooldown: "Stop Cooldown",
+            .actionDisableAutomaticCooldown: "Disable Cooldown",
+            .actionEnableAutomaticCooldown: "Restore Cooldown",
             .actionSaveAccount: "Save Account",
             .actionRotateAPIKey: "Rotate API Key",
             .actionOpenRequestLogs: "Detailed Logs",
@@ -2088,6 +2111,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionCopyReasoningEffort: "Copy Reasoning Effort",
             .actionCopyAccountLabel: "Copy Account Label",
             .actionCopyRowCSV: "Copy Row CSV",
+            .actionEnableKeepAwake: "Keep Awake",
+            .actionDisableKeepAwake: "Allow Sleep",
             .placeholderNoEndpoint: "No public endpoint yet",
             .placeholderNoAccounts: "No accounts imported yet.",
             .placeholderSearchAccounts: "Search label, email, or account ID",
@@ -2121,6 +2146,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperLanguageOptionChinese: "Show the desktop app in simplified Chinese.",
             .helperLanguageOptionEnglish: "Show the desktop app in English.",
             .helperMenuBarTokenUsage: "Show today's input and output token counts next to the menu bar icon.",
+            .helperKeepAwake: "Prevent display sleep and idle system sleep while this desktop app is running.",
             .helperQuickActionOAuth: "Open the browser sign-in flow and import the account after authorization.",
             .helperQuickActionImportCurrent: "Read the current local auth and add it to the account pool.",
             .helperQuickActionImportLocalAccountsToRemote: "Sync the current desktop app's local account pool to this remote host and refresh matching remote authorizations.",
@@ -2131,6 +2157,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
             .helperManualAPIKeyAccount: "Add a compatible API key account with its own upstream base URL and API key. OAuth accounts still use browser authorization.",
+            .helperAutomaticCooldownPolicy: "When disabled, this API key account keeps participating in routing even if its upstream returns intermittent errors.",
             .helperManualAccountGenericOpenAICompatible: "Use the standard OpenAI-compatible flow. Enter the final upstream API prefix exactly as your provider expects, including `/v1` when needed, and Codex Proxy will use it as-is. Choose Responses for providers that support the OpenAI Responses API, or Chat Completions for providers that only expose `/chat/completions`. If you're using Google's official Gemini compatibility root, switch Provider to `Google Gemini Compatible` instead.",
             .helperManualAccountUpstreamAdapter: "Responses is the default. Choose Chat Completions when the upstream provider does not support `/responses`.",
             .helperManualAccountThinkingCompatibility: "Default off. Enable only for providers that require `thinking` and `reasoning_content` to be preserved across tool-call turns; providers that do not support this field should keep it disabled.",
@@ -2321,6 +2348,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorProxyTestFailed: "Proxy test failed",
             .errorProxyAPIKeyFailed: "API key update failed",
             .errorProxyAPIKeyUsageFailed: "API key usage failed to load",
+            .errorKeepAwakeFailed: "Keep awake failed",
             .successDaemonStarted: "Daemon started",
             .successDaemonStopped: "Daemon stopped",
             .successAuthImported: "Current auth imported",
@@ -2334,6 +2362,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodesCleared: "Account outbound nodes cleared",
             .successAccountModelRoutingUpdated: "Account model routing updated",
             .successAccountCooldownStopped: "Account cooldown stopped",
+            .successAccountCooldownPolicyUpdated: "Account cooldown policy updated",
             .successUsageRefreshed: "Usage refreshed",
             .successAccountUsageRefreshed: "Account usage refreshed",
             .successProxyKeyRotated: "API key rotated",
@@ -2376,6 +2405,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .successProxyAPIKeyRemoved: "API key removed",
             .successProxyAPIKeyRegenerated: "API key regenerated",
             .successProxyAPIKeyPrimaryChanged: "Primary API key changed",
+            .successKeepAwakeEnabled: "Keep awake enabled",
+            .successKeepAwakeDisabled: "Keep awake disabled",
         ],
         .zhHans: [
             .brandName: "AI Coding Proxy",
@@ -2448,6 +2479,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .statusFailed: "失败",
             .statusCancelled: "已取消",
             .statusNotApplicable: "N/A",
+            .statusKeepAwakeEnabled: "保持常亮",
+            .statusKeepAwakeDisabled: "已关闭",
             .labelStatus: "状态",
             .labelTime: "时间",
             .labelTimeRange: "时间范围",
@@ -2527,6 +2560,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelTheme: "主题",
             .labelDisplay: "显示",
             .labelMenuBarTokenUsage: "菜单栏 Token 用量",
+            .labelKeepAwake: "屏幕常亮",
             .labelPlan: "套餐",
             .labelEmail: "邮箱",
             .labelIssue: "异常",
@@ -2538,6 +2572,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRunning: "运行状态",
             .labelLaunchctlState: "launchctl 状态",
             .labelEnabled: "已启用",
+            .labelAutomaticCooldown: "自动冷却",
             .labelArchitecture: "架构",
             .labelRemoteUser: "远程用户",
             .labelSystemctl: "systemctl",
@@ -2606,6 +2641,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardNode: "出站节点",
             .actionAccountCardMore: "更多",
             .actionStopAccountCooldown: "停止冷却",
+            .actionDisableAutomaticCooldown: "禁用冷却",
+            .actionEnableAutomaticCooldown: "恢复冷却",
             .actionSaveAccount: "保存账号",
             .actionRotateAPIKey: "轮换 API Key",
             .actionOpenRequestLogs: "查看详细日志",
@@ -2673,6 +2710,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionCopyReasoningEffort: "复制思维等级",
             .actionCopyAccountLabel: "复制账号标签",
             .actionCopyRowCSV: "复制 CSV 行",
+            .actionEnableKeepAwake: "开启常亮",
+            .actionDisableKeepAwake: "关闭常亮",
             .placeholderNoEndpoint: "暂未生成公开接入地址",
             .placeholderNoAccounts: "还没有导入任何账号。",
             .placeholderSearchAccounts: "搜索名称、邮箱或账号 ID",
@@ -2706,6 +2745,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperLanguageOptionChinese: "桌面应用界面显示为简体中文。",
             .helperLanguageOptionEnglish: "桌面应用界面显示为英文。",
             .helperMenuBarTokenUsage: "在菜单栏图标右侧显示今日输入和输出 token 数。",
+            .helperKeepAwake: "本次运行期间阻止屏幕熄灭和电脑空闲休眠，退出应用后自动释放。",
             .helperQuickActionOAuth: "打开浏览器完成登录授权，成功后立即导入账号。",
             .helperQuickActionImportCurrent: "读取当前本地授权，并把它加入账号池。",
             .helperQuickActionImportLocalAccountsToRemote: "把当前桌面端本地账号池同步到这台远端主机，并刷新远端相同账号的授权信息。",
@@ -2716,6 +2756,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
             .helperManualAPIKeyAccount: "手动添加兼容 API Key 账号，并为该账号单独保存上游根地址。OAuth 账号仍只支持浏览器授权登录。",
+            .helperAutomaticCooldownPolicy: "禁用后，即使上游偶发报错，这个 API Key 账号也会继续参与路由，不会被自动冷却跳过。",
             .helperManualAccountGenericOpenAICompatible: "使用标准 OpenAI 兼容模式。请直接填写上游要求的最终 API 前缀；如果对方要求带 `/v1`，这里就保留 `/v1`，后续会按你填写的前缀原样请求。支持 Responses API 的厂商选 Responses；只提供 `/chat/completions` 的厂商选 Chat Completions。如果你填的是 Google 官方 Gemini OpenAI 兼容根地址，请改选 `Google Gemini Compatible`。",
             .helperManualAccountUpstreamAdapter: "默认使用 Responses。如果上游厂商不支持 `/responses`，请选择 Chat Completions。",
             .helperManualAccountThinkingCompatibility: "默认关闭。仅当上游要求发送 `thinking`，并要求在工具调用多轮里回传 `reasoning_content` 时开启；不支持该字段的兼容厂商请保持关闭。",
@@ -2906,6 +2947,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorProxyTestFailed: "代理测试失败",
             .errorProxyAPIKeyFailed: "API Key 更新失败",
             .errorProxyAPIKeyUsageFailed: "API Key 用量加载失败",
+            .errorKeepAwakeFailed: "常亮开启失败",
             .successDaemonStarted: "服务已启动",
             .successDaemonStopped: "服务已停止",
             .successAuthImported: "当前授权已导入",
@@ -2919,6 +2961,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodesCleared: "账号出站节点已清空",
             .successAccountModelRoutingUpdated: "账号模型转换已更新",
             .successAccountCooldownStopped: "账号冷却已停止",
+            .successAccountCooldownPolicyUpdated: "账号冷却策略已更新",
             .successUsageRefreshed: "用量已刷新",
             .successAccountUsageRefreshed: "账号用量已刷新",
             .successProxyKeyRotated: "API Key 已轮换",
@@ -2961,6 +3004,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .successProxyAPIKeyRemoved: "API Key 已删除",
             .successProxyAPIKeyRegenerated: "API Key 已重新生成",
             .successProxyAPIKeyPrimaryChanged: "默认 API Key 已切换",
+            .successKeepAwakeEnabled: "已开启屏幕常亮",
+            .successKeepAwakeDisabled: "已关闭屏幕常亮",
         ],
     ]
 }

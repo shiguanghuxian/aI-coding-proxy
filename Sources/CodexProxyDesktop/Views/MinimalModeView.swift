@@ -99,6 +99,358 @@ struct MinimalModeView: View {
 
 }
 
+private enum MinimalTypography {
+    static func sectionTitleSize(compact: Bool) -> CGFloat {
+        compact ? 16 : 18
+    }
+
+    static func subtitleSize(compact: Bool) -> CGFloat {
+        compact ? 11.5 : 12.5
+    }
+
+    static func bodySize(compact: Bool) -> CGFloat {
+        compact ? 11.5 : 12.5
+    }
+
+    static func labelSize(compact: Bool) -> CGFloat {
+        compact ? 10 : 10.5
+    }
+
+    static func valueSize(compact: Bool) -> CGFloat {
+        compact ? 12 : 13
+    }
+
+    static func monospacedValueSize(compact: Bool) -> CGFloat {
+        compact ? 11.5 : 12.5
+    }
+
+    static func controlSize(compact: Bool) -> CGFloat {
+        compact ? 10.5 : 11.5
+    }
+}
+
+private struct MinimalSectionCard<Content: View, Accessory: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let subtitle: String?
+    let accessory: Accessory
+    let compact: Bool
+    @ViewBuilder var content: Content
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        accessory: Accessory,
+        compact: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.accessory = accessory
+        self.compact = compact
+        self.content = content()
+    }
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        VStack(alignment: .leading, spacing: self.compact ? 10 : 13) {
+            HStack(alignment: .top, spacing: self.compact ? 8 : 10) {
+                VStack(alignment: .leading, spacing: self.compact ? 3 : 5) {
+                    Text(self.title)
+                        .font(.system(size: MinimalTypography.sectionTitleSize(compact: self.compact), weight: .bold))
+                        .foregroundStyle(palette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: MinimalTypography.subtitleSize(compact: self.compact), weight: .medium))
+                            .foregroundStyle(palette.textSecondary)
+                            .lineLimit(self.compact ? 2 : 3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .layoutPriority(1)
+
+                Spacer(minLength: 0)
+
+                self.accessory
+                    .layoutPriority(2)
+            }
+
+            self.content
+        }
+        .padding(self.compact ? 12 : 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: self.compact ? 14 : 16, style: .continuous)
+                .fill(palette.panel.opacity(self.colorScheme == .dark ? 0.97 : 0.99))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: self.compact ? 14 : 16, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95), lineWidth: 1)
+        )
+        .shadow(
+            color: palette.shadow.opacity(self.colorScheme == .dark ? (self.compact ? 0.12 : 0.15) : (self.compact ? 0.035 : 0.055)),
+            radius: self.compact ? 6 : 9,
+            x: 0,
+            y: self.compact ? 2 : 4
+        )
+    }
+}
+
+private struct MinimalStatusPill: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let text: String
+    let tone: StatusPill.Tone
+    var compact = false
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+        let colors = self.colors(palette)
+
+        HStack(spacing: self.compact ? 5 : 6) {
+            Circle()
+                .fill(colors.foreground)
+                .frame(width: self.compact ? 5 : 6, height: self.compact ? 5 : 6)
+
+            Text(self.text)
+                .font(.system(size: self.compact ? 10.5 : 11.5, weight: .semibold))
+                .foregroundStyle(colors.foreground)
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
+        }
+        .padding(.horizontal, self.compact ? 8 : 9)
+        .padding(.vertical, self.compact ? 4 : 5)
+        .background(Capsule().fill(colors.background.opacity(self.colorScheme == .dark ? 0.98 : 1.0)))
+        .overlay(Capsule().stroke(colors.border, lineWidth: 1))
+    }
+
+    private func colors(_ palette: AppearancePalette) -> (foreground: Color, background: Color, border: Color) {
+        switch self.tone {
+        case .accent:
+            return (palette.accent, palette.accentSoft, palette.accent.opacity(0.30))
+        case .success:
+            return (palette.success, palette.successSoft, palette.success.opacity(0.30))
+        case .warning:
+            return (palette.warning, palette.warningSoft, palette.warning.opacity(0.30))
+        case .danger:
+            return (palette.danger, palette.dangerSoft, palette.danger.opacity(0.30))
+        case .neutral:
+            return (palette.textSecondary, palette.panelRaised, palette.border.opacity(1.0))
+        }
+    }
+}
+
+private struct MinimalActionToolbarButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    let title: String
+    let helpText: String
+    let symbol: String
+    let tone: StatusPill.Tone
+    let action: () -> Void
+    var compact = false
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        Button(action: self.action) {
+            HStack(spacing: self.compact ? 5 : 6) {
+                Image(systemName: self.symbol)
+                    .font(.system(size: self.compact ? 10.5 : 11, weight: .semibold))
+                    .foregroundStyle(self.iconForegroundColor(palette))
+
+                Text(self.title)
+                    .font(.system(size: MinimalTypography.controlSize(compact: self.compact), weight: .semibold))
+                    .foregroundStyle(palette.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .minimumScaleFactor(0.88)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, self.compact ? 8 : 9)
+            .padding(.vertical, self.compact ? 5 : 6)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(MinimalActionToolbarButtonStyle(tone: self.tone, isHovered: self.isHovered, compact: self.compact))
+        .interactiveCursor(isEnabled: self.isEnabled)
+        .help("\(self.title)\n\(self.helpText)")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.16)) {
+                self.isHovered = hovering
+            }
+        }
+    }
+
+    private func iconForegroundColor(_ palette: AppearancePalette) -> Color {
+        switch self.tone {
+        case .accent:
+            return palette.accent
+        case .success:
+            return palette.success
+        case .warning:
+            return palette.warning
+        case .danger:
+            return palette.danger
+        case .neutral:
+            return palette.textSecondary
+        }
+    }
+}
+
+private struct MinimalActionToolbarButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    let tone: StatusPill.Tone
+    let isHovered: Bool
+    let compact: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+        let colors = self.colors(palette: palette)
+        let isPressed = configuration.isPressed && self.isEnabled
+        let hoverActive = self.isHovered && self.isEnabled
+
+        return configuration.label
+            .background(
+                Capsule(style: .continuous)
+                    .fill(colors.fill.opacity(isPressed ? 0.90 : 1.0))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(colors.border, lineWidth: hoverActive ? 1.25 : 1)
+            )
+            .shadow(
+                color: colors.shadow.opacity(isPressed ? 0.04 : (hoverActive ? 0.10 : 0.045)),
+                radius: self.compact ? (hoverActive ? 3 : 2) : (hoverActive ? 5 : 3),
+                x: 0,
+                y: self.compact ? 1 : 2
+            )
+            .scaleEffect(isPressed ? 0.99 : (hoverActive ? 1.002 : 1.0))
+            .opacity(self.isEnabled ? 1.0 : 0.86)
+            .animation(.easeOut(duration: 0.14), value: isPressed)
+            .animation(.easeOut(duration: 0.18), value: hoverActive)
+    }
+
+    private func colors(palette: AppearancePalette) -> (fill: Color, border: Color, shadow: Color) {
+        guard self.isEnabled else {
+            return (
+                palette.panelRaised.opacity(self.colorScheme == .dark ? 0.92 : 1.0),
+                palette.border.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.shadow.opacity(0.04)
+            )
+        }
+
+        switch self.tone {
+        case .accent:
+            return (
+                palette.panel.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.accent.opacity(0.30),
+                palette.accent
+            )
+        case .success:
+            return (
+                palette.panel.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.success.opacity(0.30),
+                palette.success
+            )
+        case .warning:
+            return (
+                palette.panel.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.warning.opacity(0.30),
+                palette.warning
+            )
+        case .danger:
+            return (
+                palette.panel.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.danger.opacity(0.30),
+                palette.danger
+            )
+        case .neutral:
+            return (
+                palette.panelRaised.opacity(self.colorScheme == .dark ? 0.94 : 1.0),
+                palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95),
+                palette.shadow.opacity(0.06)
+            )
+        }
+    }
+}
+
+private struct MinimalQuietCapsuleButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    let tint: Color
+    var compact = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        return configuration.label
+            .font(.system(size: MinimalTypography.controlSize(compact: self.compact), weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(self.tint)
+            .padding(.horizontal, self.compact ? 8 : 10)
+            .padding(.vertical, self.compact ? 4.5 : 6)
+            .background(
+                Capsule()
+                    .fill(palette.panel.opacity(configuration.isPressed ? 0.92 : 1.0))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(self.tint.opacity(self.colorScheme == .dark ? 0.38 : 0.24), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.99 : 1.0)
+            .opacity(self.isEnabled ? 1.0 : 0.72)
+            .interactiveCursor(isEnabled: self.isEnabled)
+    }
+}
+
+private struct MinimalNavigationHintCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let detail: String
+    let actionTitle: String
+    let isCompact: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        VStack(alignment: .leading, spacing: self.isCompact ? 6 : 9) {
+            Text(self.title.uppercased())
+                .font(.system(size: MinimalTypography.labelSize(compact: self.isCompact), weight: .bold))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(1)
+
+            Text(self.detail)
+                .font(.system(size: MinimalTypography.bodySize(compact: self.isCompact), weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(self.isCompact ? 2 : 4)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(self.actionTitle, action: self.action)
+                .buttonStyle(MinimalQuietCapsuleButtonStyle(tint: palette.accent, compact: self.isCompact))
+        }
+        .padding(self.isCompact ? 10 : 14)
+        .background(
+            RoundedRectangle(cornerRadius: self.isCompact ? 12 : 14, style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.96 : 0.99))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: self.isCompact ? 12 : 14, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.94), lineWidth: 1)
+        )
+    }
+}
+
 private struct MinimalStatusBarCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -137,8 +489,8 @@ private struct MinimalStatusBarCard: View {
                 .fill(
                     LinearGradient(
                         colors: [
-                            palette.panel.opacity(self.colorScheme == .dark ? 0.96 : 0.94),
-                            palette.panelRaised.opacity(self.colorScheme == .dark ? 0.94 : 0.90),
+                            palette.panel.opacity(self.colorScheme == .dark ? 0.98 : 0.99),
+                            palette.panelRaised.opacity(self.colorScheme == .dark ? 0.96 : 0.97),
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -149,7 +501,10 @@ private struct MinimalStatusBarCard: View {
             RoundedRectangle(cornerRadius: self.metrics.insetPanelCornerRadius, style: .continuous)
                 .stroke(
                     LinearGradient(
-                        colors: [palette.border, Color.white.opacity(self.colorScheme == .dark ? 0.04 : 0.18)],
+                        colors: [
+                            palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95),
+                            Color.white.opacity(self.colorScheme == .dark ? 0.05 : 0.22),
+                        ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -157,10 +512,10 @@ private struct MinimalStatusBarCard: View {
                 )
         )
         .shadow(
-            color: palette.shadow.opacity(self.colorScheme == .dark ? 0.16 : 0.05),
-            radius: 10,
+            color: palette.shadow.opacity(self.colorScheme == .dark ? 0.12 : 0.035),
+            radius: 6,
             x: 0,
-            y: 4
+            y: 2
         )
     }
 
@@ -195,14 +550,16 @@ private struct MinimalStatusBarCard: View {
     }
 
     private var titleTag: some View {
-        Text(self.model.localized(zh: "当前运行状态", en: "Current Status"))
-            .font(.system(size: self.metrics.isCompact ? 10 : 11, weight: .semibold))
-            .foregroundStyle(.secondary)
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        return Text(self.model.localized(zh: "当前运行状态", en: "Current Status"))
+            .font(.system(size: MinimalTypography.labelSize(compact: self.metrics.isCompact), weight: .semibold))
+            .foregroundStyle(palette.textSecondary)
             .lineLimit(1)
     }
 
     private var servicePill: some View {
-        StatusPill(
+        MinimalStatusPill(
             text: self.model.localServicePrimaryStatusText,
             tone: self.model.localServiceSummaryTone,
             compact: true
@@ -272,13 +629,12 @@ private struct MinimalStatusInlineMetric: View {
 
         HStack(alignment: .firstTextBaseline, spacing: self.compact ? 6 : 8) {
             Text(self.label.uppercased())
-                .font(.system(size: self.compact ? 9 : 10, weight: .bold))
-                .tracking(0.7)
-                .foregroundStyle(palette.textMuted)
+                .font(.system(size: MinimalTypography.labelSize(compact: self.compact), weight: .bold))
+                .foregroundStyle(palette.textSecondary)
                 .lineLimit(1)
 
             Text(self.value)
-                .font(.system(size: self.compact ? 11 : 12, weight: .semibold))
+                .font(.system(size: MinimalTypography.valueSize(compact: self.compact), weight: .semibold))
                 .foregroundStyle(self.valueColor(palette: palette))
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
@@ -310,13 +666,13 @@ private struct MinimalAccountsSection: View {
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        SectionCard(
+        MinimalSectionCard(
             title: self.model.localized(zh: "账号添加", en: "Accounts"),
             subtitle: self.model.localized(
                 zh: "先导入一种账号来源，已有账号也可继续补充。",
                 en: "Import one account source first, then add more if needed."
             ),
-            accessory: StatusPill(
+            accessory: MinimalStatusPill(
                 text: self.model.accounts.isEmpty
                     ? self.model.localized(zh: "未配置", en: "Not Ready")
                     : self.model.localized(zh: "已导入 \(self.model.accounts.count)", en: "\(self.model.accounts.count) Imported"),
@@ -414,10 +770,10 @@ private struct MinimalAccountsSection: View {
                     HStack(alignment: .top, spacing: self.metrics.inlinePanelSpacing) {
                         VStack(alignment: .leading, spacing: self.metrics.isCompact ? 4 : 5) {
                             Text(self.model.localized(zh: "手动添加兼容 API Key 账号", en: "Add a compatible API key account"))
-                                .font(.system(size: self.metrics.isCompact ? 15 : 16, weight: .bold))
+                                .font(.system(size: MinimalTypography.sectionTitleSize(compact: self.metrics.isCompact), weight: .bold))
                                 .foregroundStyle(palette.textPrimary)
                             Text(self.model.text(.helperManualAPIKeyAccount))
-                                .font(.system(size: self.metrics.isCompact ? 11 : 12, weight: .medium))
+                                .font(.system(size: MinimalTypography.bodySize(compact: self.metrics.isCompact), weight: .medium))
                                 .foregroundStyle(palette.textSecondary)
                                 .lineLimit(self.metrics.isCompact ? 2 : 3)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -425,7 +781,7 @@ private struct MinimalAccountsSection: View {
 
                         Spacer(minLength: 0)
 
-                        StatusPill(text: self.model.planText("api_key"), tone: .warning, compact: self.metrics.isCompact)
+                        MinimalStatusPill(text: self.model.planText("api_key"), tone: .warning, compact: self.metrics.isCompact)
                     }
 
                     ManualAPIKeyAccountForm(
@@ -472,11 +828,11 @@ private struct MinimalAccountsSection: View {
                 .padding(self.metrics.insetPanelPadding)
                 .background(
                     RoundedRectangle(cornerRadius: self.metrics.insetPanelCornerRadius, style: .continuous)
-                        .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.96 : 0.98))
+                        .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.97 : 0.99))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: self.metrics.insetPanelCornerRadius, style: .continuous)
-                        .stroke(palette.border, lineWidth: 1)
+                        .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95), lineWidth: 1)
                 )
             }
 
@@ -488,7 +844,7 @@ private struct MinimalAccountsSection: View {
                 )
             }
 
-            DashboardNavigationHintCard(
+            MinimalNavigationHintCard(
                 title: self.model.localized(zh: "完整功能", en: "Full View"),
                 detail: self.model.localized(
                     zh: "账号启停、排序和额度刷新继续在全功能账号页维护。",
@@ -528,7 +884,7 @@ private struct MinimalAccountsSection: View {
         tone: StatusPill.Tone,
         action: @escaping () -> Void
     ) -> some View {
-        CompactActionToolbarButton(
+        MinimalActionToolbarButton(
             title: title,
             helpText: helpText,
             symbol: symbol,
@@ -541,17 +897,21 @@ private struct MinimalAccountsSection: View {
 }
 
 private struct MinimalProxySection: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     @ObservedObject var model: DesktopAppModel
     let metrics: MinimalLayoutMetrics
 
     var body: some View {
-        SectionCard(
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        MinimalSectionCard(
             title: self.model.localized(zh: "出站代理", en: "Outbound Proxy"),
             subtitle: self.model.localized(
                 zh: "这里只保留直连和手工代理，订阅代理继续在全功能页管理。",
                 en: "Keep direct and manual proxying here. Subscription proxying stays on the full Settings page."
             ),
-            accessory: StatusPill(
+            accessory: MinimalStatusPill(
                 text: self.model.label(for: self.model.settings.outboundProxyMode),
                 tone: self.proxyTone,
                 compact: self.metrics.isCompact
@@ -565,7 +925,7 @@ private struct MinimalProxySection: View {
             )
 
             if self.model.settings.outboundProxyMode == .subscription {
-                DashboardNavigationHintCard(
+                MinimalNavigationHintCard(
                     title: self.model.localized(zh: "高级模式", en: "Advanced Path"),
                     detail: self.model.localized(
                         zh: "当前正在使用订阅代理。详细配置、节点切换和测速仍在全功能设置页。",
@@ -596,8 +956,8 @@ private struct MinimalProxySection: View {
                 }
 
                 Text(self.model.minimalProxyChoiceHelp(self.model.minimalProxyDraft.choice))
-                    .font(.system(size: self.metrics.isCompact ? 11 : 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: MinimalTypography.bodySize(compact: self.metrics.isCompact), weight: .medium))
+                    .foregroundStyle(palette.textSecondary)
                     .lineLimit(1)
 
                 if self.model.minimalProxyDraft.choice == .manual {
@@ -662,7 +1022,7 @@ private struct MinimalProxySection: View {
                     Spacer(minLength: 0)
                 }
 
-                DashboardNavigationHintCard(
+                MinimalNavigationHintCard(
                     title: self.model.localized(zh: "完整功能", en: "Full View"),
                     detail: self.model.localized(
                         zh: "需要订阅代理、节点切换或更细的网络策略时，切到全功能设置页继续处理。",
@@ -722,17 +1082,19 @@ private struct MinimalProxySection: View {
 }
 
 private struct MinimalAccessSection: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     @ObservedObject var model: DesktopAppModel
     let metrics: MinimalLayoutMetrics
 
     var body: some View {
-        SectionCard(
+        MinimalSectionCard(
             title: self.model.text(.sectionAccessInfo),
             subtitle: self.model.localized(
                 zh: "三套客户端的地址和本地 API Key 都在这里直接复制。",
                 en: "Copy the essential endpoints and local API key for all three client styles here."
             ),
-            accessory: StatusPill(
+            accessory: MinimalStatusPill(
                 text: self.model.shellServiceStatusText,
                 tone: self.model.shellServiceStatusTone,
                 compact: self.metrics.isCompact
@@ -826,7 +1188,7 @@ private struct MinimalAccessSection: View {
                 }
             }
 
-            DashboardNavigationHintCard(
+            MinimalNavigationHintCard(
                 title: self.model.localized(zh: "完整功能", en: "Full View"),
                 detail: self.model.localized(
                     zh: "环境变量片段、多 Key 分配、Usage 和高级设置都继续在全功能代理页里。",
@@ -841,8 +1203,10 @@ private struct MinimalAccessSection: View {
     }
 
     private var groupDivider: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.12))
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        return Rectangle()
+            .fill(palette.divider.opacity(self.colorScheme == .dark ? 1.0 : 0.9))
             .frame(height: 1)
     }
 }
@@ -870,15 +1234,15 @@ private struct MinimalInsetPanel<Content: View>: View {
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        VStack(alignment: .leading, spacing: self.compact ? 10 : 12) {
+        VStack(alignment: .leading, spacing: self.compact ? 8 : 11) {
             VStack(alignment: .leading, spacing: self.compact ? 4 : 5) {
                 Text(self.title.uppercased())
-                    .font(.system(size: self.compact ? 9 : 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(palette.textMuted)
+                    .font(.system(size: MinimalTypography.labelSize(compact: self.compact), weight: .bold))
+                    .foregroundStyle(palette.textSecondary)
+                    .lineLimit(1)
 
                 Text(self.subtitle)
-                    .font(.system(size: self.compact ? 10 : 11, weight: .medium))
+                    .font(.system(size: MinimalTypography.bodySize(compact: self.compact), weight: .medium))
                     .foregroundStyle(palette.textSecondary)
                     .lineLimit(self.compact ? 2 : 3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -886,14 +1250,14 @@ private struct MinimalInsetPanel<Content: View>: View {
 
             self.content
         }
-        .padding(self.compact ? 12 : 14)
+        .padding(self.compact ? 10 : 12)
         .background(
-            RoundedRectangle(cornerRadius: self.compact ? 16 : 18, style: .continuous)
-                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.94 : 0.98))
+            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.96 : 0.99))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: self.compact ? 16 : 18, style: .continuous)
-                .stroke(palette.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95), lineWidth: 1)
         )
     }
 }
@@ -910,24 +1274,24 @@ private struct MinimalSummaryPanel: View {
 
         VStack(alignment: .leading, spacing: self.compact ? 4 : 5) {
             Text(self.title.uppercased())
-                .font(.system(size: self.compact ? 9 : 10, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(palette.textMuted)
+                .font(.system(size: MinimalTypography.labelSize(compact: self.compact), weight: .bold))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(1)
 
             Text(self.summary)
-                .font(.system(size: self.compact ? 10 : 11, weight: .medium))
+                .font(.system(size: MinimalTypography.bodySize(compact: self.compact), weight: .medium))
                 .foregroundStyle(palette.textSecondary)
                 .lineLimit(self.compact ? 2 : 3)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(self.compact ? 12 : 14)
+        .padding(self.compact ? 10 : 12)
         .background(
-            RoundedRectangle(cornerRadius: self.compact ? 16 : 18, style: .continuous)
-                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.94 : 0.98))
+            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.96 : 0.99))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: self.compact ? 16 : 18, style: .continuous)
-                .stroke(palette.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95), lineWidth: 1)
         )
     }
 }
@@ -945,14 +1309,14 @@ private struct MinimalAccountListPanel: View {
         VStack(alignment: .leading, spacing: self.metrics.actionSpacing) {
             HStack(alignment: .center, spacing: self.metrics.actionSpacing) {
                 Text(self.model.localized(zh: "已导入账号", en: "Imported Accounts").uppercased())
-                    .font(.system(size: self.metrics.isCompact ? 9 : 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(palette.textMuted)
+                    .font(.system(size: MinimalTypography.labelSize(compact: self.metrics.isCompact), weight: .bold))
+                    .foregroundStyle(palette.textSecondary)
+                    .lineLimit(1)
 
                 Spacer(minLength: 0)
 
                 Text("\(self.accounts.count)")
-                    .font(.system(size: self.metrics.isCompact ? 10 : 11, weight: .semibold))
+                    .font(.system(size: MinimalTypography.valueSize(compact: self.metrics.isCompact), weight: .semibold))
                     .foregroundStyle(palette.textSecondary)
             }
 
@@ -974,14 +1338,14 @@ private struct MinimalAccountListPanel: View {
             }
             .frame(maxHeight: self.metrics.accountListMaxHeight)
         }
-        .padding(self.metrics.isCompact ? 10 : 12)
+        .padding(self.metrics.isCompact ? 9 : 11)
         .background(
-            RoundedRectangle(cornerRadius: self.metrics.isCompact ? 16 : 18, style: .continuous)
-                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.80 : 0.86))
+            RoundedRectangle(cornerRadius: self.metrics.isCompact ? 12 : 14, style: .continuous)
+                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.88 : 0.94))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: self.metrics.isCompact ? 16 : 18, style: .continuous)
-                .stroke(palette.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: self.metrics.isCompact ? 12 : 14, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.95), lineWidth: 1)
         )
     }
 }
@@ -1000,7 +1364,7 @@ private struct MinimalAccountListRow: View {
 
         HStack(alignment: .center, spacing: self.metrics.actionSpacing) {
             Text(self.account.label)
-                .font(.system(size: self.metrics.isCompact ? 11 : 12, weight: .semibold))
+                .font(.system(size: MinimalTypography.valueSize(compact: self.metrics.isCompact), weight: .semibold))
                 .foregroundStyle(palette.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1009,14 +1373,14 @@ private struct MinimalAccountListRow: View {
             Spacer(minLength: self.metrics.actionSpacing)
 
             Text(usageSummary)
-                .font(.system(size: self.metrics.isCompact ? 10 : 11, weight: .medium, design: .monospaced))
+                .font(.system(size: MinimalTypography.monospacedValueSize(compact: self.metrics.isCompact), weight: .medium, design: .monospaced))
                 .foregroundStyle(palette.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(width: self.metrics.accountListUsageWidth, alignment: .trailing)
                 .help(usageSummary)
 
-            StatusPill(text: status.text, tone: status.tone, compact: true)
+            MinimalStatusPill(text: status.text, tone: status.tone, compact: true)
         }
         .frame(minHeight: self.metrics.accountListRowMinHeight, alignment: .leading)
     }
@@ -1045,15 +1409,15 @@ private struct MinimalAccessClientGroup<Content: View>: View {
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        VStack(alignment: .leading, spacing: self.compact ? 8 : 10) {
+        VStack(alignment: .leading, spacing: self.compact ? 7 : 9) {
             VStack(alignment: .leading, spacing: self.compact ? 2 : 3) {
                 Text(self.title)
-                    .font(.system(size: self.compact ? 12 : 13, weight: .semibold))
+                    .font(.system(size: self.compact ? 13 : 14, weight: .semibold))
                     .foregroundStyle(palette.textPrimary)
                     .lineLimit(1)
 
                 Text(self.subtitle)
-                    .font(.system(size: self.compact ? 10 : 11, weight: .medium))
+                    .font(.system(size: MinimalTypography.bodySize(compact: self.compact), weight: .medium))
                     .foregroundStyle(palette.textSecondary)
                     .lineLimit(1)
             }
@@ -1080,13 +1444,12 @@ private struct MinimalAccessValueRow: View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: self.compact ? 8 : 10) {
                 Text(self.label.uppercased())
-                    .font(.system(size: self.compact ? 9 : 10, weight: .bold))
-                    .tracking(0.7)
-                    .foregroundStyle(palette.textMuted)
+                    .font(.system(size: MinimalTypography.labelSize(compact: self.compact), weight: .bold))
+                    .foregroundStyle(palette.textSecondary)
                     .frame(width: self.labelWidth, alignment: .leading)
 
                 Text(self.value)
-                    .font(.system(size: self.compact ? 11 : 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: MinimalTypography.monospacedValueSize(compact: self.compact), weight: .semibold, design: .monospaced))
                     .foregroundStyle(palette.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1096,42 +1459,41 @@ private struct MinimalAccessValueRow: View {
 
                 if let actionTitle, let action {
                     Button(actionTitle, action: action)
-                        .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent, compact: self.compact))
+                        .buttonStyle(MinimalQuietCapsuleButtonStyle(tint: palette.accent, compact: self.compact))
                 }
             }
 
             VStack(alignment: .leading, spacing: self.compact ? 6 : 8) {
                 HStack(alignment: .firstTextBaseline, spacing: self.compact ? 8 : 10) {
                     Text(self.label.uppercased())
-                        .font(.system(size: self.compact ? 9 : 10, weight: .bold))
-                        .tracking(0.7)
-                        .foregroundStyle(palette.textMuted)
+                        .font(.system(size: MinimalTypography.labelSize(compact: self.compact), weight: .bold))
+                        .foregroundStyle(palette.textSecondary)
 
                     Spacer(minLength: 0)
 
                     if let actionTitle, let action {
                         Button(actionTitle, action: action)
-                            .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent, compact: self.compact))
+                            .buttonStyle(MinimalQuietCapsuleButtonStyle(tint: palette.accent, compact: self.compact))
                     }
                 }
 
                 Text(self.value)
-                    .font(.system(size: self.compact ? 11 : 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: MinimalTypography.monospacedValueSize(compact: self.compact), weight: .semibold, design: .monospaced))
                     .foregroundStyle(palette.textPrimary)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
         }
-        .padding(.horizontal, self.compact ? 10 : 12)
-        .padding(.vertical, self.compact ? 8 : 10)
+        .padding(.horizontal, self.compact ? 9 : 10)
+        .padding(.vertical, self.compact ? 6 : 8)
         .background(
-            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
-                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.84 : 0.88))
+            RoundedRectangle(cornerRadius: self.compact ? 10 : 12, style: .continuous)
+                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.90 : 0.96))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: self.compact ? 12 : 14, style: .continuous)
-                .stroke(palette.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: self.compact ? 10 : 12, style: .continuous)
+                .stroke(palette.border.opacity(self.colorScheme == .dark ? 1.0 : 0.94), lineWidth: 1)
         )
     }
 }
@@ -1184,13 +1546,13 @@ struct MinimalLayoutMetrics: Equatable {
         self.windowWidth = width
         self.windowHeight = height
         self.contentMaxWidth = self.isCompact ? 1180 : 1220
-        self.outerHorizontalPadding = self.isCompact ? 14 : 18
-        self.outerTopPadding = max(self.isCompact ? 12 : 16, safeAreaTop + (self.isCompact ? 6 : 8))
-        self.outerBottomPadding = max(self.isCompact ? 14 : 18, safeAreaBottom + (self.isCompact ? 8 : 10))
-        self.sectionSpacing = self.isCompact ? 12 : 16
-        self.columnSpacing = self.isCompact ? 12 : 16
-        self.summarySpacing = self.isCompact ? 10 : 14
-        self.summaryGridSpacing = self.isCompact ? 10 : 12
+        self.outerHorizontalPadding = self.isCompact ? 12 : 16
+        self.outerTopPadding = max(self.isCompact ? 10 : 14, safeAreaTop + (self.isCompact ? 6 : 8))
+        self.outerBottomPadding = max(self.isCompact ? 12 : 16, safeAreaBottom + (self.isCompact ? 8 : 10))
+        self.sectionSpacing = self.isCompact ? 10 : 14
+        self.columnSpacing = self.isCompact ? 10 : 14
+        self.summarySpacing = self.isCompact ? 8 : 12
+        self.summaryGridSpacing = self.isCompact ? 8 : 10
         self.summaryGridMinimumWidth = self.isCompact ? 150 : 160
         self.summaryGridMaximumWidth = self.isCompact ? 208 : 220
         self.primaryColumnMinimumWidth = self.isCompact ? 336 : 360
@@ -1198,16 +1560,16 @@ struct MinimalLayoutMetrics: Equatable {
         self.servicePanelMaximumWidth = self.isCompact ? 320 : 360
         self.accessCardMinimumWidth = self.isCompact ? 228 : 260
         self.accessCardMaximumWidth = self.isCompact ? 320 : 360
-        self.accessValueLabelWidth = self.isCompact ? 86 : 96
+        self.accessValueLabelWidth = self.isCompact ? 90 : 100
         self.accountActionColumns = width < 760 ? 1 : 2
         self.accountListUsageWidth = self.isCompact ? 124 : 136
         self.accountListRowMinHeight = self.isCompact ? 30 : 34
-        self.accountListMaxHeight = self.isCompact ? 152 : 168
+        self.accountListMaxHeight = self.isCompact ? 176 : 192
         self.detailLabelWidth = self.isCompact ? 90 : 118
         self.actionSpacing = self.isCompact ? 6 : 8
-        self.inlinePanelSpacing = self.isCompact ? 10 : 14
-        self.insetPanelPadding = self.isCompact ? 14 : 18
-        self.insetPanelCornerRadius = self.isCompact ? 18 : 22
+        self.inlinePanelSpacing = self.isCompact ? 8 : 12
+        self.insetPanelPadding = self.isCompact ? 12 : 14
+        self.insetPanelCornerRadius = self.isCompact ? 14 : 16
 
         if width >= 1400 {
             self.primaryCardLayoutMode = .threeColumns

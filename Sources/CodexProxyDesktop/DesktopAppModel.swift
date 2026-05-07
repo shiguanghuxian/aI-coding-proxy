@@ -128,6 +128,7 @@ final class DesktopAppModel: ObservableObject {
         var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode = .disabled
         var apiKey = ""
         var enabled = true
+        var automaticCooldownDisabled = false
         var editingAccountID: String?
         var originalAccountKey: String?
 
@@ -377,6 +378,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var isManagedProxyLogsExpanded = false
     @Published var banners: [BannerState] = []
     @Published var isBusy = false
+    @Published private(set) var isKeepAwakeEnabled = false
     @Published var localServiceOperation: LocalServiceOperation = .idle
     @Published var remoteOperation: RemoteOperation = .idle
     @Published var managedProxyOperation: ManagedProxyOperation = .idle
@@ -449,6 +451,7 @@ final class DesktopAppModel: ObservableObject {
     let managedProxyWebsiteProbeClient: ManagedProxyWebsiteProbeClient
     let clientConfigFileService: ClientConfigFileService
     private let preferencesStore: DesktopPreferencesStore
+    private let keepAwakeController: any DesktopKeepAwakeControlling
     private let confirmStopDaemonHandler: ConfirmStopDaemonHandler?
     private let confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler?
     private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
@@ -498,6 +501,7 @@ final class DesktopAppModel: ObservableObject {
         managedProxyWebsiteProbeClient: ManagedProxyWebsiteProbeClient = ManagedProxyWebsiteProbeClient(),
         clientConfigFileService: ClientConfigFileService = ClientConfigFileService(),
         preferencesStore: DesktopPreferencesStore = DesktopPreferencesStore(),
+        keepAwakeController: any DesktopKeepAwakeControlling = DesktopKeepAwakeController(),
         clientConfigManagerWindowFactory: @escaping ClientConfigManagerWindowFactory = { ClientConfigManagerWindowController(model: $0) },
         remoteAdminWindowFactory: @escaping RemoteAdminWindowFactory = {
             RemoteAdminWindowController(
@@ -524,6 +528,7 @@ final class DesktopAppModel: ObservableObject {
         self.managedProxyWebsiteProbeClient = managedProxyWebsiteProbeClient
         self.clientConfigFileService = clientConfigFileService
         self.preferencesStore = preferencesStore
+        self.keepAwakeController = keepAwakeController
         self.clientConfigManagerWindowFactory = clientConfigManagerWindowFactory
         self.remoteAdminWindowFactory = remoteAdminWindowFactory
         self.aboutWindowFactory = aboutWindowFactory
@@ -536,6 +541,7 @@ final class DesktopAppModel: ObservableObject {
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.preferences = preferencesStore.load()
         self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
+        self.isKeepAwakeEnabled = keepAwakeController.isEnabled
         let initialRequestLogsFilterState = RequestLogFilterState.defaultState()
         self.requestLogsDraftFilterState = initialRequestLogsFilterState
         self.requestLogsAppliedFilterState = initialRequestLogsFilterState
@@ -1448,6 +1454,22 @@ final class DesktopAppModel: ObservableObject {
         account.authMode.isManualAPIKey && account.isCoolingDown()
     }
 
+    func canUpdateAccountCooldownPolicy(_ account: AccountSummary) -> Bool {
+        account.authMode.isManualAPIKey
+    }
+
+    func accountCooldownPolicyText(_ account: AccountSummary) -> String {
+        account.automaticCooldownDisabled
+            ? self.localized(zh: "已禁用", en: "Disabled")
+            : self.localized(zh: "自动", en: "Automatic")
+    }
+
+    func accountCooldownPolicyActionTitle(_ account: AccountSummary) -> String {
+        account.automaticCooldownDisabled
+            ? self.text(.actionEnableAutomaticCooldown)
+            : self.text(.actionDisableAutomaticCooldown)
+    }
+
     var accountCardMoreActionTitle: String {
         self.text(.actionAccountCardMore)
     }
@@ -1503,6 +1525,7 @@ final class DesktopAppModel: ObservableObject {
                 upstreamThinkingCompatibility: details.upstreamThinkingCompatibility ?? .disabled,
                 apiKey: details.apiKey,
                 enabled: details.enabled,
+                automaticCooldownDisabled: details.automaticCooldownDisabled,
                 editingAccountID: account.id,
                 originalAccountKey: account.accountKey
             )
@@ -2798,6 +2821,56 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
+    var keepAwakeActionTitle: String {
+        self.text(self.isKeepAwakeEnabled ? .actionDisableKeepAwake : .actionEnableKeepAwake)
+    }
+
+    var keepAwakeSymbolName: String {
+        "display"
+    }
+
+    var keepAwakeStatusText: String {
+        self.text(self.isKeepAwakeEnabled ? .statusKeepAwakeEnabled : .statusKeepAwakeDisabled)
+    }
+
+    var keepAwakeStatusTone: StatusPill.Tone {
+        self.isKeepAwakeEnabled ? .success : .neutral
+    }
+
+    var keepAwakeHelperText: String {
+        self.text(.helperKeepAwake)
+    }
+
+    func toggleKeepAwake() {
+        self.setKeepAwakeEnabled(!self.isKeepAwakeEnabled)
+    }
+
+    func setKeepAwakeEnabled(_ isEnabled: Bool) {
+        guard self.isKeepAwakeEnabled != isEnabled else { return }
+
+        do {
+            try self.keepAwakeController.setEnabled(isEnabled)
+            self.isKeepAwakeEnabled = self.keepAwakeController.isEnabled
+            self.publishBanner(
+                .success,
+                title: self.text(isEnabled ? .successKeepAwakeEnabled : .successKeepAwakeDisabled),
+                detail: nil
+            )
+        } catch {
+            self.isKeepAwakeEnabled = self.keepAwakeController.isEnabled
+            self.publishBanner(
+                .error,
+                title: self.text(.errorKeepAwakeFailed),
+                detail: error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+    }
+
+    func releaseKeepAwakeSilently() {
+        try? self.keepAwakeController.setEnabled(false)
+        self.isKeepAwakeEnabled = self.keepAwakeController.isEnabled
+    }
+
     var switchToMinimalModeButtonTitle: String {
         self.localized(zh: "切换到极简模式", en: "Switch to Minimal Mode")
     }
@@ -3192,7 +3265,8 @@ final class DesktopAppModel: ObservableObject {
                     upstreamAdapter: payload.upstreamAdapter,
                     upstreamThinkingCompatibility: payload.upstreamThinkingCompatibility,
                     apiKey: payload.apiKey,
-                    enabled: draft.enabled
+                    enabled: draft.enabled,
+                    automaticCooldownDisabled: draft.automaticCooldownDisabled
                 )
             )
             return (saved, .manualUpdateAccount)
@@ -3207,7 +3281,8 @@ final class DesktopAppModel: ObservableObject {
                 upstreamAdapter: payload.upstreamAdapter,
                 upstreamThinkingCompatibility: payload.upstreamThinkingCompatibility,
                 apiKey: payload.apiKey,
-                enabled: draft.enabled
+                enabled: draft.enabled,
+                automaticCooldownDisabled: draft.automaticCooldownDisabled
             )
         )
         return (saved, .manualAddAccount)
@@ -3453,6 +3528,25 @@ final class DesktopAppModel: ObservableObject {
             self.publishSuccess(.stopAccountCooldown, detail: updated.label)
         } catch {
             self.present(error: error, context: .stopAccountCooldown)
+        }
+    }
+
+    func toggleAccountCooldownPolicy(_ account: AccountSummary) async {
+        guard self.canUpdateAccountCooldownPolicy(account) else { return }
+
+        self.isBusy = true
+        defer { self.isBusy = false }
+        do {
+            let updated = try await self.admin.updateAccountCooldownPolicy(
+                id: account.id,
+                input: UpdateAccountCooldownPolicyRequest(
+                    automaticCooldownDisabled: !account.automaticCooldownDisabled
+                )
+            )
+            try await self.reloadAccountState()
+            self.publishSuccess(.updateAccountCooldownPolicy, detail: updated.label)
+        } catch {
+            self.present(error: error, context: .updateAccountCooldownPolicy)
         }
     }
 

@@ -5010,6 +5010,82 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
+    func testUpdateAccountCooldownPolicyDisablesAutomaticCooldownAndClearsExistingState() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let service = AccountService(store: store, secretStore: secretStore)
+        var record = try Self.makeManualAPIKeyRecordFixture(
+            baseURL: "https://example.com/v1",
+            apiKey: "sk-disable-cooldown",
+            label: "Unstable API"
+        )
+        record.consecutiveFailureCount = 3
+        record.cooldownUntil = Helpers.now() + 3_600
+        record.usageError = "API key cooling down"
+        XCTAssertFalse(try store.upsertAccount(record))
+
+        let disabled = try await service.updateAccountCooldownPolicy(
+            id: record.id,
+            automaticCooldownDisabled: true
+        )
+
+        XCTAssertTrue(disabled.automaticCooldownDisabled)
+        XCTAssertEqual(disabled.consecutiveFailureCount, 0)
+        XCTAssertNil(disabled.cooldownUntil)
+        XCTAssertNil(disabled.usageError)
+        XCTAssertFalse(disabled.isCoolingDown())
+
+        let storedDisabled = try store.loadAccountRecord(id: record.id)
+        XCTAssertTrue(storedDisabled.automaticCooldownDisabled)
+        XCTAssertEqual(storedDisabled.consecutiveFailureCount, 0)
+        XCTAssertNil(storedDisabled.cooldownUntil)
+        XCTAssertNil(storedDisabled.usageError)
+
+        let restored = try await service.updateAccountCooldownPolicy(
+            id: record.id,
+            automaticCooldownDisabled: false
+        )
+
+        XCTAssertFalse(restored.automaticCooldownDisabled)
+    }
+
+    func testUpdateAccountCooldownPolicyRejectsNonAPIKeyAccount() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let service = AccountService(store: store, secretStore: secretStore)
+        let record = try self.makeChatGPTAccountRecord(label: "OAuth Account")
+        XCTAssertFalse(try store.upsertAccount(record))
+
+        do {
+            _ = try await service.updateAccountCooldownPolicy(id: record.id, automaticCooldownDisabled: true)
+            XCTFail("Expected non-API-key cooldown policy update to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("仅支持 API Key 类型账号"))
+        }
+    }
+
+    func testUpdateAccountCooldownPolicyRequestDecodesSnakeCaseWithDefaultFalse() throws {
+        let snake = try Helpers.readJSON(
+            UpdateAccountCooldownPolicyRequest.self,
+            from: Data(#"{"automatic_cooldown_disabled":true}"#.utf8)
+        )
+        XCTAssertTrue(snake.automaticCooldownDisabled)
+
+        let missing = try Helpers.readJSON(
+            UpdateAccountCooldownPolicyRequest.self,
+            from: Data(#"{}"#.utf8)
+        )
+        XCTAssertFalse(missing.automaticCooldownDisabled)
+    }
+
     func testRefreshManualAPIKeyUsageFallsBackToGeminiConfigurationErrorForDamagedLegacyRecord() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
