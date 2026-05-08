@@ -72,6 +72,8 @@ struct OverviewNaturalTokenCard: Identifiable, Equatable {
     let totalTokens: Int64
     let inputTokens: Int64
     let outputTokens: Int64
+    let cacheHitTokens: Int64
+    let cacheMissTokens: Int64
 }
 
 struct OverviewRecentWeekOption: Identifiable, Equatable {
@@ -94,6 +96,8 @@ struct OverviewTrafficTrendPoint: Identifiable, Equatable {
     let totalTokens: Int64?
     let inputTokens: Int64?
     let outputTokens: Int64?
+    let cacheHitTokens: Int64?
+    let cacheMissTokens: Int64?
     let requestCount: Int64?
     let isFuture: Bool
 
@@ -263,6 +267,8 @@ extension DesktopAppModel {
                 totalTokens: self.combineOverviewTokenValues(inputTokens: inputTokens, outputTokens: outputTokens),
                 inputTokens: inputTokens,
                 outputTokens: outputTokens,
+                cacheHitTokens: isFuture ? nil : (bucket?.cacheHitTokens ?? 0),
+                cacheMissTokens: isFuture ? nil : (bucket?.cacheMissTokens ?? 0),
                 requestCount: isFuture ? nil : (bucket?.requestCount ?? 0),
                 isFuture: isFuture
             )
@@ -311,6 +317,8 @@ extension DesktopAppModel {
                 totalTokens: self.combineOverviewTokenValues(inputTokens: inputTokens, outputTokens: outputTokens),
                 inputTokens: inputTokens,
                 outputTokens: outputTokens,
+                cacheHitTokens: bucket?.cacheHitTokens ?? 0,
+                cacheMissTokens: bucket?.cacheMissTokens ?? 0,
                 requestCount: bucket?.requestCount ?? 0,
                 isFuture: false
             )
@@ -319,9 +327,9 @@ extension DesktopAppModel {
 
     var overviewHasTrafficTrendData: Bool {
         self.stats.naturalTokenUsage.dailyTrend.contains { bucket in
-            bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0
+            bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0 || bucket.cacheHitTokens > 0 || bucket.cacheMissTokens > 0
         } || self.stats.naturalTokenUsage.weeklyTrend.contains { bucket in
-            bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0
+            bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0 || bucket.cacheHitTokens > 0 || bucket.cacheMissTokens > 0
         }
     }
 
@@ -417,7 +425,9 @@ extension DesktopAppModel {
             requestCount: usage.requestCount,
             totalTokens: usage.inputTokens + usage.outputTokens,
             inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens
+            outputTokens: usage.outputTokens,
+            cacheHitTokens: usage.cacheHitTokens,
+            cacheMissTokens: usage.cacheMissTokens
         )
     }
 

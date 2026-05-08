@@ -632,6 +632,76 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(accountsSource.contains("accountCooldownPolicyActionTitle"))
     }
 
+
+    func testOverviewTrafficTrendIncludesCacheHitAndMissSeries() throws {
+        let overviewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let supportSource = try Self.repoFileText("Sources/CodexProxyDesktop/OverviewSupport.swift")
+
+        // Series enum includes cacheHit/cacheMiss
+        XCTAssertTrue(overviewSource.contains("case cacheHit"))
+        XCTAssertTrue(overviewSource.contains("case cacheMiss"))
+
+        // Chart series use palette.info and palette.danger
+        XCTAssertTrue(overviewSource.contains("case .cacheHit:"))
+        XCTAssertTrue(overviewSource.contains("return palette.info"))
+        XCTAssertTrue(overviewSource.contains("return palette.danger"))
+
+        // Legend includes cache hit/miss labels
+        XCTAssertTrue(overviewSource.contains("cacheHitLabel:"))
+        XCTAssertTrue(overviewSource.contains("cacheMissLabel:"))
+
+        // Tooltip includes cache hit/miss metric rows
+        XCTAssertTrue(overviewSource.contains("labelCacheHitTokens"))
+        XCTAssertTrue(overviewSource.contains("labelCacheMissTokens"))
+
+        // OverviewNaturalTokenCard has cacheHitTokens/cacheMissTokens
+        XCTAssertTrue(supportSource.contains("let cacheHitTokens: Int64"))
+        XCTAssertTrue(supportSource.contains("let cacheMissTokens: Int64"))
+
+        // OverviewTrafficTrendPoint has cacheHitTokens/cacheMissTokens
+        XCTAssertTrue(supportSource.contains("let cacheHitTokens: Int64?"))
+        XCTAssertTrue(supportSource.contains("let cacheMissTokens: Int64?"))
+
+        // Card breakdown rows include cache hit/miss rows
+        XCTAssertTrue(overviewSource.contains("self.card.cacheHitTokens"))
+        XCTAssertTrue(overviewSource.contains("self.card.cacheMissTokens"))
+    }
+
+
+    func testTrafficTrendLegendSupportsInteractiveSeriesToggle() throws {
+        let overviewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+
+        // Panel maintains hiddenSeries state
+        XCTAssertTrue(overviewSource.contains("@State private var hiddenSeries: Set<OverviewTrafficTrendSeriesKind>"))
+
+        // Legend receives hiddenSeries binding
+        XCTAssertTrue(overviewSource.contains("hiddenSeries: self.$hiddenSeries"))
+
+        // Legend struct declares Binding parameter
+        XCTAssertTrue(overviewSource.contains("@Binding var hiddenSeries: Set<OverviewTrafficTrendSeriesKind>"))
+
+        // Legend items are interactive Buttons
+        XCTAssertTrue(overviewSource.contains("Button {"))
+        XCTAssertTrue(overviewSource.contains(".buttonStyle(.plain)"))
+
+        // Hidden state applies reduced opacity
+        XCTAssertTrue(overviewSource.contains("isHidden ? 0.35 : 1.0"))
+
+        // Hidden series are filtered from Chart ForEach
+        XCTAssertTrue(overviewSource.contains("OverviewTrafficTrendSeriesKind.allCases.filter { !self.hiddenSeries.contains($0) }"))
+
+        // Tooltip receives hiddenSeries
+        XCTAssertTrue(overviewSource.contains("hiddenSeries: self.hiddenSeries"))
+        XCTAssertTrue(overviewSource.contains("let hiddenSeries: Set<OverviewTrafficTrendSeriesKind>"))
+    }
+
+    func testLabelCacheMissTokensHasEnglishAndChineseTranslations() throws {
+        let prefsSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+        XCTAssertTrue(prefsSource.contains("case labelCacheMissTokens"))
+        XCTAssertTrue(prefsSource.contains(".labelCacheMissTokens: \"Cache Miss\""))
+        XCTAssertTrue(prefsSource.contains(".labelCacheMissTokens: \"缓存未命中\""))
+    }
+
     func testRootShellViewMapsMinimalModeToolbarEntryToFullModeCopy() throws {
         let source = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
 
@@ -7208,6 +7278,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(cards.map(\.inputTokens), [12, 48, 120])
         XCTAssertEqual(cards.map(\.outputTokens), [8, 16, 40])
         XCTAssertEqual(cards.map(\.totalTokens), [20, 64, 160])
+        XCTAssertEqual(cards.map(\.cacheHitTokens), [0, 0, 0])
+        XCTAssertEqual(cards.map(\.cacheMissTokens), [0, 0, 0])
     }
 
     @MainActor
@@ -7382,18 +7454,28 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(points[0].totalTokens, 15)
         XCTAssertEqual(points[0].inputTokens, 10)
         XCTAssertEqual(points[0].outputTokens, 5)
+        XCTAssertEqual(points[0].cacheHitTokens, 0)
+        XCTAssertEqual(points[0].cacheMissTokens, 0)
         XCTAssertEqual(points[1].totalTokens, 0)
         XCTAssertEqual(points[1].inputTokens, 0)
         XCTAssertEqual(points[1].outputTokens, 0)
+        XCTAssertEqual(points[1].cacheHitTokens, 0)
+        XCTAssertEqual(points[1].cacheMissTokens, 0)
         XCTAssertEqual(points[2].totalTokens, 26)
         XCTAssertEqual(points[2].inputTokens, 20)
         XCTAssertEqual(points[2].outputTokens, 6)
+        XCTAssertEqual(points[2].cacheHitTokens, 0)
+        XCTAssertEqual(points[2].cacheMissTokens, 0)
         XCTAssertNil(points[3].totalTokens)
         XCTAssertNil(points[3].inputTokens)
         XCTAssertNil(points[3].outputTokens)
+        XCTAssertNil(points[3].cacheHitTokens)
+        XCTAssertNil(points[3].cacheMissTokens)
         XCTAssertNil(points[6].totalTokens)
         XCTAssertNil(points[6].inputTokens)
         XCTAssertNil(points[6].outputTokens)
+        XCTAssertNil(points[6].cacheHitTokens)
+        XCTAssertNil(points[6].cacheMissTokens)
     }
 
     @MainActor
@@ -7497,6 +7579,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(points.map { $0.totalTokens ?? -1 }, [12, 24, 36, 48])
         XCTAssertEqual(points.map { $0.inputTokens ?? -1 }, [11, 22, 33, 44])
         XCTAssertEqual(points.map { $0.outputTokens ?? -1 }, [1, 2, 3, 4])
+        XCTAssertEqual(points.map { $0.cacheHitTokens ?? -1 }, [0, 0, 0, 0])
+        XCTAssertEqual(points.map { $0.cacheMissTokens ?? -1 }, [0, 0, 0, 0])
         XCTAssertTrue(points.map(\.bucketStart) == points.map(\.bucketStart).sorted())
 
         model.selectedOverviewTrafficWeekOffset = 2
@@ -7572,6 +7656,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                 totalTokens: 15,
                 inputTokens: 10,
                 outputTokens: 5,
+                cacheHitTokens: 0,
+                cacheMissTokens: 0,
                 requestCount: 1,
                 isFuture: false
             ),
@@ -7585,6 +7671,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                 totalTokens: 26,
                 inputTokens: 20,
                 outputTokens: 6,
+                cacheHitTokens: 0,
+                cacheMissTokens: 0,
                 requestCount: 2,
                 isFuture: false
             ),
@@ -8323,6 +8411,92 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testRefreshAccountListOnlyReloadsAccountsAndPublishesSuccess() async {
+        let originalAccount = Self.makeAccount(
+            id: "stale-list-account",
+            label: "Stale List Account",
+            accountID: "acct-stale-list"
+        )
+        let updatedAccount = Self.makeAccount(
+            id: "fresh-list-account",
+            label: "Fresh List Account",
+            accountID: "acct-fresh-list"
+        )
+        let probe = AccountListRefreshProbe(accounts: [updatedAccount], delayMilliseconds: 80)
+        let admin = AdminAPIClient(
+            accountsHandler: { await probe.accounts() },
+            refreshUsageHandler: { try await probe.refreshUsage() },
+            refreshAccountUsageHandler: { id in try await probe.refreshAccountUsage(id: id) }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.accounts = [originalAccount]
+
+        let task = Task { await model.refreshAccountList() }
+
+        await Self.waitForCondition { model.isRefreshingAccountList }
+        XCTAssertEqual(model.refreshAccountListButtonText, model.text(.actionRefreshingAccountList))
+
+        _ = await task.value
+        let snapshot = await probe.snapshot()
+
+        XCTAssertFalse(model.isRefreshingAccountList)
+        XCTAssertEqual(model.refreshAccountListButtonText, model.text(.actionRefreshAccountList))
+        XCTAssertEqual(model.accounts, [updatedAccount])
+        XCTAssertEqual(snapshot.accountsCalls, 1)
+        XCTAssertEqual(snapshot.refreshUsageCalls, 0)
+        XCTAssertTrue(snapshot.refreshAccountUsageIDs.isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successAccountListRefreshed))
+    }
+
+    @MainActor
+    func testRefreshAccountListFailureKeepsExistingAccountsAndClearsRefreshingState() async {
+        let existingAccount = Self.makeAccount(
+            id: "existing-list-account",
+            label: "Existing List Account",
+            accountID: "acct-existing-list"
+        )
+        let probe = AccountListRefreshProbe(errorMessage: "cannot load account list", delayMilliseconds: 80)
+        let admin = AdminAPIClient(
+            accountsHandler: { try await probe.failingAccounts() },
+            refreshUsageHandler: { try await probe.refreshUsage() },
+            refreshAccountUsageHandler: { id in try await probe.refreshAccountUsage(id: id) }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.accounts = [existingAccount]
+
+        let task = Task { await model.refreshAccountList() }
+
+        await Self.waitForCondition { model.isRefreshingAccountList }
+        _ = await task.value
+        let snapshot = await probe.snapshot()
+
+        XCTAssertFalse(model.isRefreshingAccountList)
+        XCTAssertEqual(model.accounts, [existingAccount])
+        XCTAssertEqual(snapshot.accountsCalls, 1)
+        XCTAssertEqual(snapshot.refreshUsageCalls, 0)
+        XCTAssertTrue(snapshot.refreshAccountUsageIDs.isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .error)
+        XCTAssertEqual(model.banners.first?.title, model.text(.errorAccountManagementFailed))
+        XCTAssertTrue(model.banners.first?.detail?.contains("cannot load account list") == true)
+    }
+
+    @MainActor
+    func testRefreshAccountListCopyIsDistinctFromUsageRefreshCopy() {
+        let model = DesktopAppModel()
+
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.text(.actionRefreshAccountList), "Refresh List")
+        XCTAssertEqual(model.text(.actionRefreshUsage), "Refresh Usage")
+        XCTAssertEqual(model.text(.helperRefreshAccountList), "Reload the latest account pool data without checking usage or calling upstream APIs.")
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.text(.actionRefreshAccountList), "刷新列表")
+        XCTAssertEqual(model.text(.actionRefreshUsage), "刷新用量")
+        XCTAssertEqual(model.text(.helperRefreshAccountList), "重新加载最新的账号池数据，不检查用量，也不调用上游接口。")
+    }
+
+    @MainActor
     func testRefreshUsageForAccountPublishesManualAPIKeySuccessAndClearsRefreshingState() async {
         let updatedAccount = Self.makeAccount(
             id: "api-account",
@@ -8842,12 +9016,25 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountsViewShowsRefreshAccountListToolbarAction() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        XCTAssertTrue(source.contains("private var refreshAccountListButton: some View"))
+        XCTAssertTrue(source.contains("self.refreshAccountListButton"))
+        XCTAssertTrue(source.contains(".refreshAccountList"))
+        XCTAssertTrue(source.contains(".refreshAccountListButtonText"))
+        XCTAssertTrue(source.contains("isRefreshingAccountList"))
+    }
+
+    @MainActor
     func testAccountPoolToolbarSourcePrefersSharedFilterAndActionSecondRow() throws {
         let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
 
         XCTAssertTrue(source.contains("self.twoLinePreferredToolbarLayout(palette: palette)"))
         XCTAssertTrue(source.contains("self.narrowToolbarLayout(palette: palette)"))
         XCTAssertTrue(source.contains("private func twoLinePreferredToolbarLayout(palette: AppearancePalette) -> some View"))
+        XCTAssertTrue(source.contains("private var refreshAccountListButton: some View"))
+        XCTAssertTrue(source.contains("self.refreshAccountListButton"))
+        XCTAssertFalse(source.contains("case refreshAccountList"))
         XCTAssertTrue(
             source.contains(
                 """
@@ -14783,6 +14970,60 @@ private actor AccountManagedProxyNodeClearProbe {
 
     func callCount() -> Int {
         self.clearCalls
+    }
+}
+
+private actor AccountListRefreshProbe {
+    private let storedAccounts: [AccountSummary]
+    private let errorMessage: String?
+    private let delayMilliseconds: Int
+    private var accountsCallCount = 0
+    private var refreshUsageCallCount = 0
+    private var refreshAccountUsageIDs: [String] = []
+
+    init(
+        accounts: [AccountSummary] = [],
+        errorMessage: String? = nil,
+        delayMilliseconds: Int = 0
+    ) {
+        self.storedAccounts = accounts
+        self.errorMessage = errorMessage
+        self.delayMilliseconds = delayMilliseconds
+    }
+
+    func accounts() async -> [AccountSummary] {
+        self.accountsCallCount += 1
+        await self.waitIfNeeded()
+        return self.storedAccounts
+    }
+
+    func failingAccounts() async throws -> [AccountSummary] {
+        self.accountsCallCount += 1
+        await self.waitIfNeeded()
+        throw ProxyError.message(self.errorMessage ?? "account list refresh failed")
+    }
+
+    func refreshUsage() throws -> [AccountSummary] {
+        self.refreshUsageCallCount += 1
+        throw ProxyError.message("refresh usage should not be called")
+    }
+
+    func refreshAccountUsage(id: String) throws -> AccountSummary {
+        self.refreshAccountUsageIDs.append(id)
+        throw ProxyError.message("refresh account usage should not be called")
+    }
+
+    func snapshot() -> (accountsCalls: Int, refreshUsageCalls: Int, refreshAccountUsageIDs: [String]) {
+        (
+            self.accountsCallCount,
+            self.refreshUsageCallCount,
+            self.refreshAccountUsageIDs
+        )
+    }
+
+    private func waitIfNeeded() async {
+        guard self.delayMilliseconds > 0 else { return }
+        try? await Task.sleep(for: .milliseconds(self.delayMilliseconds))
     }
 }
 

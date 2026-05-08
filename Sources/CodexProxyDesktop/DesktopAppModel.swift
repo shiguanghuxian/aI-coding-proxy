@@ -395,6 +395,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var accountManagedProxyNodeIsSubmitting = false
     @Published var accountModelRoutingIsSubmitting = false
     @Published var refreshingAccountIDs: Set<String> = []
+    @Published var isRefreshingAccountList = false
     @Published var isProxyTestPresented = false
     @Published var proxyTestDraft = ProxyTestDraft()
     @Published var proxyTestModelCatalog = ProxyTestModelCatalog.defaultCatalog
@@ -1432,6 +1433,12 @@ final class DesktopAppModel: ObservableObject {
         self.isRefreshingUsage(for: accountID)
             ? self.text(.actionRefreshingUsage)
             : self.text(.actionRefreshUsage)
+    }
+
+    var refreshAccountListButtonText: String {
+        self.isRefreshingAccountList
+            ? self.text(.actionRefreshingAccountList)
+            : self.text(.actionRefreshAccountList)
     }
 
     func accountCardRefreshActionTitle(for accountID: String) -> String {
@@ -3416,6 +3423,19 @@ final class DesktopAppModel: ObservableObject {
             self.publishSuccess(.refreshUsage)
         } catch {
             self.present(error: error, context: .refreshUsage)
+        }
+    }
+
+    func refreshAccountList() async {
+        guard self.isRefreshingAccountList == false else { return }
+        self.isRefreshingAccountList = true
+        defer { self.isRefreshingAccountList = false }
+
+        do {
+            self.accounts = try await self.admin.getAccounts()
+            self.publishSuccess(.refreshAccountList)
+        } catch {
+            self.present(error: error, context: .refreshAccountList)
         }
     }
 

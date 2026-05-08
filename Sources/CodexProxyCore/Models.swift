@@ -1794,19 +1794,25 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
         public var requestCount: Int64
         public var inputTokens: Int64
         public var outputTokens: Int64
+        public var cacheHitTokens: Int64
+        public var cacheMissTokens: Int64
 
         public init(
             bucketStart: Int64,
             windowSeconds: Int64,
             requestCount: Int64 = 0,
             inputTokens: Int64 = 0,
-            outputTokens: Int64 = 0
+            outputTokens: Int64 = 0,
+            cacheHitTokens: Int64 = 0,
+            cacheMissTokens: Int64 = 0
         ) {
             self.bucketStart = bucketStart
             self.windowSeconds = windowSeconds
             self.requestCount = requestCount
             self.inputTokens = inputTokens
             self.outputTokens = outputTokens
+            self.cacheHitTokens = cacheHitTokens
+            self.cacheMissTokens = cacheMissTokens
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -1815,6 +1821,8 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             case requestCount
             case inputTokens
             case outputTokens
+            case cacheHitTokens
+            case cacheMissTokens
         }
 
         public init(from decoder: Decoder) throws {
@@ -1824,7 +1832,9 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
                 windowSeconds: try container.decode(Int64.self, forKey: .windowSeconds),
                 requestCount: try container.decodeIfPresent(Int64.self, forKey: .requestCount) ?? 0,
                 inputTokens: try container.decodeIfPresent(Int64.self, forKey: .inputTokens) ?? 0,
-                outputTokens: try container.decodeIfPresent(Int64.self, forKey: .outputTokens) ?? 0
+                outputTokens: try container.decodeIfPresent(Int64.self, forKey: .outputTokens) ?? 0,
+                cacheHitTokens: try container.decodeIfPresent(Int64.self, forKey: .cacheHitTokens) ?? 0,
+                cacheMissTokens: try container.decodeIfPresent(Int64.self, forKey: .cacheMissTokens) ?? 0
             )
         }
 
@@ -1835,6 +1845,8 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             try container.encode(self.requestCount, forKey: .requestCount)
             try container.encode(self.inputTokens, forKey: .inputTokens)
             try container.encode(self.outputTokens, forKey: .outputTokens)
+            try container.encode(self.cacheHitTokens, forKey: .cacheHitTokens)
+            try container.encode(self.cacheMissTokens, forKey: .cacheMissTokens)
         }
     }
 
@@ -1842,17 +1854,23 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
         public var requestCount: Int64
         public var inputTokens: Int64
         public var outputTokens: Int64
+        public var cacheHitTokens: Int64
+        public var cacheMissTokens: Int64
 
-        public init(requestCount: Int64 = 0, inputTokens: Int64 = 0, outputTokens: Int64 = 0) {
+        public init(requestCount: Int64 = 0, inputTokens: Int64 = 0, outputTokens: Int64 = 0, cacheHitTokens: Int64 = 0, cacheMissTokens: Int64 = 0) {
             self.requestCount = requestCount
             self.inputTokens = inputTokens
             self.outputTokens = outputTokens
+            self.cacheHitTokens = cacheHitTokens
+            self.cacheMissTokens = cacheMissTokens
         }
 
         private enum CodingKeys: String, CodingKey {
             case requestCount
             case inputTokens
             case outputTokens
+            case cacheHitTokens
+            case cacheMissTokens
         }
 
         public init(from decoder: Decoder) throws {
@@ -1860,7 +1878,9 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             self.init(
                 requestCount: try container.decodeIfPresent(Int64.self, forKey: .requestCount) ?? 0,
                 inputTokens: try container.decodeIfPresent(Int64.self, forKey: .inputTokens) ?? 0,
-                outputTokens: try container.decodeIfPresent(Int64.self, forKey: .outputTokens) ?? 0
+                outputTokens: try container.decodeIfPresent(Int64.self, forKey: .outputTokens) ?? 0,
+                cacheHitTokens: try container.decodeIfPresent(Int64.self, forKey: .cacheHitTokens) ?? 0,
+                cacheMissTokens: try container.decodeIfPresent(Int64.self, forKey: .cacheMissTokens) ?? 0
             )
         }
 
@@ -1869,6 +1889,8 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             try container.encode(self.requestCount, forKey: .requestCount)
             try container.encode(self.inputTokens, forKey: .inputTokens)
             try container.encode(self.outputTokens, forKey: .outputTokens)
+            try container.encode(self.cacheHitTokens, forKey: .cacheHitTokens)
+            try container.encode(self.cacheMissTokens, forKey: .cacheMissTokens)
         }
     }
 

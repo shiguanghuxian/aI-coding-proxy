@@ -1532,7 +1532,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 date(created_at, 'unixepoch', 'localtime') AS local_day,
                 COUNT(*) AS request_count,
                 COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS total_output_tokens
+                COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                COALESCE(SUM(COALESCE(cache_hit_tokens, 0)), 0) AS total_cache_hit_tokens,
+                COALESCE(SUM(CASE WHEN input_tokens - COALESCE(cache_hit_tokens, 0) > 0 THEN input_tokens - COALESCE(cache_hit_tokens, 0) ELSE 0 END), 0) AS total_cache_miss_tokens
             FROM request_logs
             WHERE created_at >= ? AND created_at <= ?
             GROUP BY local_day
@@ -1550,7 +1552,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 windowSeconds: 86_400,
                 requestCount: row.int("request_count"),
                 inputTokens: row.int("total_input_tokens"),
-                outputTokens: row.int("total_output_tokens")
+                outputTokens: row.int("total_output_tokens"),
+                cacheHitTokens: row.int("total_cache_hit_tokens"),
+                cacheMissTokens: row.int("total_cache_miss_tokens")
             )
         }
     }
@@ -1575,7 +1579,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 windowSeconds: 604_800,
                 requestCount: existing.requestCount + bucket.requestCount,
                 inputTokens: existing.inputTokens + bucket.inputTokens,
-                outputTokens: existing.outputTokens + bucket.outputTokens
+                outputTokens: existing.outputTokens + bucket.outputTokens,
+                cacheHitTokens: existing.cacheHitTokens + bucket.cacheHitTokens,
+                cacheMissTokens: existing.cacheMissTokens + bucket.cacheMissTokens
             )
         }
 
@@ -1600,7 +1606,9 @@ public final class SQLiteStore: @unchecked Sendable {
             SELECT
                 COUNT(*) AS request_count,
                 COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS total_output_tokens
+                COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                COALESCE(SUM(COALESCE(cache_hit_tokens, 0)), 0) AS total_cache_hit_tokens,
+                COALESCE(SUM(CASE WHEN input_tokens - COALESCE(cache_hit_tokens, 0) > 0 THEN input_tokens - COALESCE(cache_hit_tokens, 0) ELSE 0 END), 0) AS total_cache_miss_tokens
             FROM request_logs
             WHERE created_at >= ? AND created_at <= ?;
             """,
@@ -1613,7 +1621,9 @@ public final class SQLiteStore: @unchecked Sendable {
         return AdminStatsSummary.NaturalRangeTokenUsage(
             requestCount: row?.int("request_count") ?? 0,
             inputTokens: row?.int("total_input_tokens") ?? 0,
-            outputTokens: row?.int("total_output_tokens") ?? 0
+            outputTokens: row?.int("total_output_tokens") ?? 0,
+            cacheHitTokens: row?.int("total_cache_hit_tokens") ?? 0,
+            cacheMissTokens: row?.int("total_cache_miss_tokens") ?? 0
         )
     }
 

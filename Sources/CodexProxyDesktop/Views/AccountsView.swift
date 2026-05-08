@@ -693,6 +693,7 @@ private struct AccountPoolToolbar: View {
 
     private var toolbarActionButtonsRow: some View {
         HStack(spacing: 10) {
+            self.refreshAccountListButton
             self.manageOrderButton
             self.clearOutboundNodesButton
             self.clearFiltersButton
@@ -725,6 +726,18 @@ private struct AccountPoolToolbar: View {
         }
         .buttonStyle(AppActionButtonStyle(kind: .secondary))
         .disabled(self.model.accounts.count <= 1)
+    }
+
+    private var refreshAccountListButton: some View {
+        Button {
+            Task { await self.model.refreshAccountList() }
+        } label: {
+            Label(self.model.refreshAccountListButtonText, systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(self.model.isRefreshingAccountList)
+        .help(self.model.text(.helperRefreshAccountList))
+        .accessibilityIdentifier("account-pool-refresh-list-button")
     }
 
     private var clearFiltersButton: some View {

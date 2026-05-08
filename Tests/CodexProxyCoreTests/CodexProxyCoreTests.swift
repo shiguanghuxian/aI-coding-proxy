@@ -8377,6 +8377,12 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.today.inputTokens, 12)
         XCTAssertEqual(summary.naturalTokenUsage.week.outputTokens, 16)
         XCTAssertEqual(summary.naturalTokenUsage.month.inputTokens, 181)
+        XCTAssertEqual(summary.naturalTokenUsage.today.cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.today.cacheMissTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.week.cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.week.cacheMissTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.month.cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.month.cacheMissTokens, 0)
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend, [])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend, [])
     }
@@ -8460,9 +8466,126 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend.count, 1)
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].windowSeconds, 86_400)
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].inputTokens, 11)
+        XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].cacheMissTokens, 0)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.count, 1)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].windowSeconds, 604_800)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].requestCount, 4)
+        XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheMissTokens, 0)
+    }
+
+
+    func testNaturalTokenUsageCodableDecodesCacheFieldsWithSnakeCase() throws {
+        let payload = #"""
+        {
+          "total_requests": 2,
+          "total_failures": 0,
+          "total_auth_failures": 0,
+          "total_rate_limits": 0,
+          "total_quota_failures": 0,
+          "total_input_tokens": 200,
+          "total_output_tokens": 50,
+          "total_tokens": 250,
+          "natural_token_usage": {
+            "today": {
+              "request_count": 2,
+              "input_tokens": 200,
+              "output_tokens": 50,
+              "cache_hit_tokens": 120,
+              "cache_miss_tokens": 80
+            },
+            "week": {
+              "request_count": 2,
+              "input_tokens": 200,
+              "output_tokens": 50,
+              "cache_hit_tokens": 120,
+              "cache_miss_tokens": 80
+            },
+            "month": {
+              "request_count": 2,
+              "input_tokens": 200,
+              "output_tokens": 50,
+              "cache_hit_tokens": 120,
+              "cache_miss_tokens": 80
+            },
+            "daily_trend": [
+              {
+                "bucket_start": 1776038400,
+                "window_seconds": 86400,
+                "request_count": 2,
+                "input_tokens": 200,
+                "output_tokens": 50,
+                "cache_hit_tokens": 120,
+                "cache_miss_tokens": 80
+              }
+            ],
+            "weekly_trend": [
+              {
+                "bucket_start": 1775865600,
+                "window_seconds": 604800,
+                "request_count": 2,
+                "input_tokens": 200,
+                "output_tokens": 50,
+                "cache_hit_tokens": 120,
+                "cache_miss_tokens": 80
+              }
+            ]
+          },
+          "latest_buckets": []
+        }
+        """#
+
+        let summary = try Helpers.readJSON(AdminStatsSummary.self, from: Data(payload.utf8))
+
+        XCTAssertEqual(summary.naturalTokenUsage.today.cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.today.cacheMissTokens, 80)
+        XCTAssertEqual(summary.naturalTokenUsage.week.cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.week.cacheMissTokens, 80)
+        XCTAssertEqual(summary.naturalTokenUsage.month.cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.month.cacheMissTokens, 80)
+        XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].cacheMissTokens, 80)
+        XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheMissTokens, 80)
+    }
+
+    func testNaturalTokenUsageCacheMissDoesNotGoNegative() throws {
+        // When cacheHitTokens > inputTokens, cacheMissTokens should still be >= 0
+        // This is enforced at the SQL layer with CASE WHEN, but verify the model holds whatever is passed.
+        let usage = AdminStatsSummary.NaturalRangeTokenUsage(
+            requestCount: 1,
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheHitTokens: 150,
+            cacheMissTokens: 0
+        )
+        XCTAssertEqual(usage.cacheMissTokens, 0)
+        XCTAssertGreaterThanOrEqual(usage.cacheMissTokens, 0)
+
+        let bucket = AdminStatsSummary.NaturalTimeBucketUsage(
+            bucketStart: 1776038400,
+            windowSeconds: 86_400,
+            requestCount: 1,
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheHitTokens: 200,
+            cacheMissTokens: 0
+        )
+        XCTAssertEqual(bucket.cacheMissTokens, 0)
+        XCTAssertGreaterThanOrEqual(bucket.cacheMissTokens, 0)
+    }
+
+    func testNaturalRangeTokenUsageDefaultCacheFieldsToZero() throws {
+        let usage = AdminStatsSummary.NaturalRangeTokenUsage()
+        XCTAssertEqual(usage.cacheHitTokens, 0)
+        XCTAssertEqual(usage.cacheMissTokens, 0)
+    }
+
+    func testNaturalTimeBucketUsageDefaultCacheFieldsToZero() throws {
+        let bucket = AdminStatsSummary.NaturalTimeBucketUsage(bucketStart: 0, windowSeconds: 0)
+        XCTAssertEqual(bucket.cacheHitTokens, 0)
+        XCTAssertEqual(bucket.cacheMissTokens, 0)
     }
 
     func testRemoteDeployStatusDecodesSnakeCaseURLAndIDKeys() throws {

@@ -630,6 +630,7 @@ private struct OverviewTrafficTrendPanel: View {
     let points: [OverviewTrafficTrendPoint]
 
     @State private var hoveredBucketStart: Int64?
+    @State private var hiddenSeries: Set<OverviewTrafficTrendSeriesKind> = []
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
@@ -649,11 +650,14 @@ private struct OverviewTrafficTrendPanel: View {
             OverviewTrafficTrendLegend(
                 totalLabel: self.model.text(.labelTotalTokens),
                 inputLabel: self.model.text(.labelInputTokens),
-                outputLabel: self.model.text(.labelOutputTokens)
+                outputLabel: self.model.text(.labelOutputTokens),
+                cacheHitLabel: self.model.text(.labelCacheHitTokens),
+                cacheMissLabel: self.model.text(.labelCacheMissTokens),
+                hiddenSeries: self.$hiddenSeries
             )
 
             Chart {
-                ForEach(OverviewTrafficTrendSeriesKind.allCases) { series in
+                ForEach(OverviewTrafficTrendSeriesKind.allCases.filter { !self.hiddenSeries.contains($0) }) { series in
                     self.seriesMarks(for: series, palette: palette)
                 }
 
@@ -740,7 +744,8 @@ private struct OverviewTrafficTrendPanel: View {
                                     {
                                         OverviewTrafficTrendTooltip(
                                             model: self.model,
-                                            point: hoveredPoint
+                                            point: hoveredPoint,
+                                            hiddenSeries: self.hiddenSeries
                                         )
                                         .frame(width: 208, alignment: .leading)
                                         .offset(
@@ -836,7 +841,7 @@ private struct OverviewTrafficTrendPanel: View {
                 series: .value("Metric", self.seriesLabel(series))
             )
             .interpolationMethod(.catmullRom)
-            .lineStyle(StrokeStyle(lineWidth: series == .total ? 2.8 : 2.4, lineCap: .round, lineJoin: .round))
+            .lineStyle(StrokeStyle(lineWidth: series == .total ? 2.8 : (series == .cacheHit || series == .cacheMiss ? 2.2 : 2.4), lineCap: .round, lineJoin: .round))
             .foregroundStyle(color)
         }
     }
@@ -852,7 +857,7 @@ private struct OverviewTrafficTrendPanel: View {
                 x: .value("Bucket", point.date),
                 y: .value("Tokens", value)
             )
-            .symbolSize(series == .total ? 82 : 64)
+            .symbolSize(series == .total ? 82 : (series == .cacheHit || series == .cacheMiss ? 56 : 64))
             .foregroundStyle(color)
         }
     }
@@ -868,6 +873,10 @@ private struct OverviewTrafficTrendPanel: View {
             return point.inputTokens
         case .output:
             return point.outputTokens
+        case .cacheHit:
+            return point.cacheHitTokens
+        case .cacheMiss:
+            return point.cacheMissTokens
         }
     }
 
@@ -879,6 +888,10 @@ private struct OverviewTrafficTrendPanel: View {
             return self.model.text(.labelInputTokens)
         case .output:
             return self.model.text(.labelOutputTokens)
+        case .cacheHit:
+            return self.model.text(.labelCacheHitTokens)
+        case .cacheMiss:
+            return self.model.text(.labelCacheMissTokens)
         }
     }
 
@@ -893,6 +906,10 @@ private struct OverviewTrafficTrendPanel: View {
             return palette.accent
         case .output:
             return palette.success
+        case .cacheHit:
+            return palette.info
+        case .cacheMiss:
+            return palette.danger
         }
     }
 
@@ -929,6 +946,8 @@ private enum OverviewTrafficTrendSeriesKind: String, CaseIterable, Identifiable 
     case total
     case input
     case output
+    case cacheHit
+    case cacheMiss
 
     var id: String { self.rawValue }
 }
@@ -969,6 +988,7 @@ private struct OverviewTrafficTrendTooltip: View {
 
     @ObservedObject var model: DesktopAppModel
     let point: OverviewTrafficTrendPoint
+    let hiddenSeries: Set<OverviewTrafficTrendSeriesKind>
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
@@ -985,24 +1005,11 @@ private struct OverviewTrafficTrendTooltip: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                self.metricRow(
-                    color: palette.warning,
-                    label: self.model.text(.labelTotalTokens),
-                    value: self.point.totalTokens,
-                    palette: palette
-                )
-                self.metricRow(
-                    color: palette.accent,
-                    label: self.model.text(.labelInputTokens),
-                    value: self.point.inputTokens,
-                    palette: palette
-                )
-                self.metricRow(
-                    color: palette.success,
-                    label: self.model.text(.labelOutputTokens),
-                    value: self.point.outputTokens,
-                    palette: palette
-                )
+                ForEach(OverviewTrafficTrendSeriesKind.allCases) { series in
+                    if !self.hiddenSeries.contains(series) {
+                        self.tooltipMetricRow(for: series, palette: palette)
+                    }
+                }
             }
 
             if let requestCount = self.point.requestCount {
@@ -1040,12 +1047,33 @@ private struct OverviewTrafficTrendTooltip: View {
         )
     }
 
-    private func metricRow(
-        color: Color,
-        label: String,
-        value: Int64?,
+    @ViewBuilder
+    private func tooltipMetricRow(
+        for series: OverviewTrafficTrendSeriesKind,
         palette: AppearancePalette
     ) -> some View {
+        let value: Int64? = switch series {
+        case .total: self.point.totalTokens
+        case .input: self.point.inputTokens
+        case .output: self.point.outputTokens
+        case .cacheHit: self.point.cacheHitTokens
+        case .cacheMiss: self.point.cacheMissTokens
+        }
+        let label: String = switch series {
+        case .total: self.model.text(.labelTotalTokens)
+        case .input: self.model.text(.labelInputTokens)
+        case .output: self.model.text(.labelOutputTokens)
+        case .cacheHit: self.model.text(.labelCacheHitTokens)
+        case .cacheMiss: self.model.text(.labelCacheMissTokens)
+        }
+        let color: Color = switch series {
+        case .total: palette.warning
+        case .input: palette.accent
+        case .output: palette.success
+        case .cacheHit: palette.info
+        case .cacheMiss: palette.danger
+        }
+
         HStack(spacing: 8) {
             Circle()
                 .fill(color)
@@ -1071,28 +1099,60 @@ private struct OverviewTrafficTrendLegend: View {
     let totalLabel: String
     let inputLabel: String
     let outputLabel: String
+    let cacheHitLabel: String
+    let cacheMissLabel: String
+    @Binding var hiddenSeries: Set<OverviewTrafficTrendSeriesKind>
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
         HStack(spacing: 14) {
-            self.legendItem(color: palette.warning, label: self.totalLabel, palette: palette)
-            self.legendItem(color: palette.accent, label: self.inputLabel, palette: palette)
-            self.legendItem(color: palette.success, label: self.outputLabel, palette: palette)
+            self.legendItem(series: .total, color: palette.warning, label: self.totalLabel, palette: palette)
+            self.legendItem(series: .input, color: palette.accent, label: self.inputLabel, palette: palette)
+            self.legendItem(series: .output, color: palette.success, label: self.outputLabel, palette: palette)
+            self.legendItem(series: .cacheHit, color: palette.info, label: self.cacheHitLabel, palette: palette)
+            self.legendItem(series: .cacheMiss, color: palette.danger, label: self.cacheMissLabel, palette: palette)
             Spacer(minLength: 0)
         }
     }
 
-    private func legendItem(color: Color, label: String, palette: AppearancePalette) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
+    @ViewBuilder
+    private func legendItem(
+        series: OverviewTrafficTrendSeriesKind,
+        color: Color,
+        label: String,
+        palette: AppearancePalette
+    ) -> some View {
+        let isHidden = self.hiddenSeries.contains(series)
 
-            Text(label)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(palette.textSecondary)
+        Button {
+            if isHidden {
+                self.hiddenSeries.remove(series)
+            } else {
+                self.hiddenSeries.insert(series)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 8, height: 8)
+
+                    if isHidden {
+                        Image(systemName: "minus")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(palette.textPrimary)
+                    }
+                }
+
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.textSecondary)
+            }
+            .opacity(isHidden ? 0.35 : 1.0)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1157,6 +1217,30 @@ private struct OverviewNaturalTokenRangeCard: View {
                     helpText: OverviewNumberFormat.full(self.card.outputTokens),
                     tone: .neutral,
                     symbol: "arrow.up.right.circle.fill"
+                )
+
+                Rectangle()
+                    .fill(palette.border.opacity(self.colorScheme == .dark ? 0.78 : 1.0))
+                    .frame(height: 1)
+
+                OverviewNaturalTokenBreakdownRow(
+                    label: self.model.text(.labelCacheHitTokens),
+                    valueText: OverviewNumberFormat.abbreviated(self.card.cacheHitTokens),
+                    helpText: OverviewNumberFormat.full(self.card.cacheHitTokens),
+                    tone: .warning,
+                    symbol: "arrow.down.circle.fill"
+                )
+
+                Rectangle()
+                    .fill(palette.border.opacity(self.colorScheme == .dark ? 0.78 : 1.0))
+                    .frame(height: 1)
+
+                OverviewNaturalTokenBreakdownRow(
+                    label: self.model.text(.labelCacheMissTokens),
+                    valueText: OverviewNumberFormat.abbreviated(self.card.cacheMissTokens),
+                    helpText: OverviewNumberFormat.full(self.card.cacheMissTokens),
+                    tone: .neutral,
+                    symbol: "xmark.circle.fill"
                 )
             }
             .background(

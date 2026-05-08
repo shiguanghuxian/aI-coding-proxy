@@ -196,6 +196,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelNaturalTokenUsage
     case labelTotalTokens
     case labelCacheHitTokens
+    case labelCacheMissTokens
     case labelRateLimits
     case labelQuotaErrors
     case labelEndpoint
@@ -332,6 +333,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionImportJSON
     case actionExportBackup
     case actionManualAddAccount
+    case actionRefreshAccountList
+    case actionRefreshingAccountList
     case actionRefreshUsage
     case actionRefreshingUsage
     case actionAccountCardRefresh
@@ -452,6 +455,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperQuickActionManualAdd
     case helperQuickActionExportBackup
     case helperQuickActionTestProxy
+    case helperRefreshAccountList
     case helperQuickActionRefreshUsage
     case helperSelectionPolicy
     case helperManualAPIKeyAccount
@@ -658,6 +662,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAccountModelRoutingUpdated
     case successAccountCooldownStopped
     case successAccountCooldownPolicyUpdated
+    case successAccountListRefreshed
     case successUsageRefreshed
     case successAccountUsageRefreshed
     case successProxyKeyRotated
@@ -721,6 +726,7 @@ public enum OperationContext: String, Sendable {
     case updateAccountModelRouting
     case stopAccountCooldown
     case updateAccountCooldownPolicy
+    case refreshAccountList
     case refreshUsage
     case refreshAccountUsage
     case rotateProxyKey
@@ -1081,6 +1087,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAccountCooldownStopped)
         case .updateAccountCooldownPolicy:
             return self.text(.successAccountCooldownPolicyUpdated)
+        case .refreshAccountList:
+            return self.text(.successAccountListRefreshed)
         case .refreshUsage:
             return self.text(.successUsageRefreshed)
         case .refreshAccountUsage:
@@ -1173,7 +1181,7 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .saveSettings || context == .saveRemoteHost || context == .deleteRemoteHost || lower.contains("config") || lower.contains("settings") {
             return self.text(.errorConfigurationFailed)
         }
-        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .reorderAccounts {
+        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .refreshAccountList || context == .reorderAccounts {
             return self.text(.errorAccountManagementFailed)
         }
         if context == .copyEndpoint || context == .copyAPIKey || context == .copyClaudeCodeEnv || context == .copyGeminiCLIEnv || context == .copyOAuthLink || context == .copyManagedProxyTerminalCommand {
@@ -1893,6 +1901,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelNaturalTokenUsage: "Natural Range Token Usage",
             .labelTotalTokens: "Total Tokens",
             .labelCacheHitTokens: "Cache Hit",
+            .labelCacheMissTokens: "Cache Miss",
             .labelRateLimits: "Rate Limits",
             .labelQuotaErrors: "Quota Errors",
             .labelEndpoint: "Endpoint",
@@ -2029,6 +2038,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionImportJSON: "Import JSON",
             .actionExportBackup: "Export Backup",
             .actionManualAddAccount: "Manual Add",
+            .actionRefreshAccountList: "Refresh List",
+            .actionRefreshingAccountList: "Refreshing",
             .actionRefreshUsage: "Refresh Usage",
             .actionRefreshingUsage: "Refreshing",
             .actionAccountCardRefresh: "Refresh",
@@ -2149,6 +2160,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionManualAdd: "Save a compatible upstream base URL and API key as a separate account.",
             .helperQuickActionExportBackup: "Export all saved accounts into a backup file.",
             .helperQuickActionTestProxy: "Open the test console to verify the current proxy path without leaving the app.",
+            .helperRefreshAccountList: "Reload the latest account pool data without checking usage or calling upstream APIs.",
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
             .helperManualAPIKeyAccount: "Add a compatible API key account with its own upstream base URL and API key. OAuth accounts still use browser authorization.",
@@ -2355,6 +2367,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountModelRoutingUpdated: "Account model routing updated",
             .successAccountCooldownStopped: "Account cooldown stopped",
             .successAccountCooldownPolicyUpdated: "Account cooldown policy updated",
+            .successAccountListRefreshed: "Account list refreshed",
             .successUsageRefreshed: "Usage refreshed",
             .successAccountUsageRefreshed: "Account usage refreshed",
             .successProxyKeyRotated: "API key rotated",
@@ -2488,6 +2501,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelNaturalTokenUsage: "自然时间范围 Token 用量",
             .labelTotalTokens: "总 Tokens",
             .labelCacheHitTokens: "缓存命中",
+            .labelCacheMissTokens: "缓存未命中",
             .labelRateLimits: "限流次数",
             .labelQuotaErrors: "额度错误",
             .labelEndpoint: "接入地址",
@@ -2624,6 +2638,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionImportJSON: "导入 JSON",
             .actionExportBackup: "导出备份",
             .actionManualAddAccount: "手动添加",
+            .actionRefreshAccountList: "刷新列表",
+            .actionRefreshingAccountList: "刷新中",
             .actionRefreshUsage: "刷新用量",
             .actionRefreshingUsage: "刷新中",
             .actionAccountCardRefresh: "刷新",
@@ -2744,6 +2760,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionManualAdd: "手动保存兼容上游根地址和 API Key，作为独立账号接入。",
             .helperQuickActionExportBackup: "把当前保存的全部账号导出成备份文件。",
             .helperQuickActionTestProxy: "直接打开测试控制台，在应用内验证当前代理链路是否正常。",
+            .helperRefreshAccountList: "重新加载最新的账号池数据，不检查用量，也不调用上游接口。",
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
             .helperManualAPIKeyAccount: "手动添加兼容 API Key 账号，并为该账号单独保存上游根地址。OAuth 账号仍只支持浏览器授权登录。",
@@ -2950,6 +2967,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountModelRoutingUpdated: "账号模型转换已更新",
             .successAccountCooldownStopped: "账号冷却已停止",
             .successAccountCooldownPolicyUpdated: "账号冷却策略已更新",
+            .successAccountListRefreshed: "账号列表已刷新",
             .successUsageRefreshed: "用量已刷新",
             .successAccountUsageRefreshed: "账号用量已刷新",
             .successProxyKeyRotated: "API Key 已轮换",
