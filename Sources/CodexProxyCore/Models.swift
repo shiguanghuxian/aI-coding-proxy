@@ -2697,18 +2697,12 @@ public enum ManualAPIKeyUpstreamAdapter: String, Codable, Sendable, Equatable, H
     case chatCompletions = "chat_completions"
 }
 
-public enum ManualAPIKeyThinkingCompatibilityMode: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
-    case disabled
-    case enabled
-}
-
 public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
     public var label: String?
     public var providerPreset: OpenAICompatibleProviderPreset
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
-    public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -2719,7 +2713,6 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
         enabled: Bool = true,
         automaticCooldownDisabled: Bool = false
@@ -2729,7 +2722,6 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
-        self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -2746,8 +2738,6 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
-        case upstreamThinkingCompatibility
-        case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -2768,8 +2758,6 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
-            upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
-                ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decode(String.self, forKey: .apiKey),
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -2785,7 +2773,6 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
-        try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -2798,7 +2785,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
-    public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -2809,7 +2795,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
         enabled: Bool = true,
         automaticCooldownDisabled: Bool = false
@@ -2819,7 +2804,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
-        self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -2836,8 +2820,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
-        case upstreamThinkingCompatibility
-        case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -2858,8 +2840,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
-            upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
-                ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decode(String.self, forKey: .apiKey),
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -2875,7 +2855,6 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
-        try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -2888,7 +2867,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
-    public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -2899,7 +2877,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         apiKey: String,
         enabled: Bool,
         automaticCooldownDisabled: Bool = false
@@ -2909,7 +2886,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
-        self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -2926,8 +2902,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
-        case upstreamThinkingCompatibility
-        case upstreamThinkingCompatibilitySnake = "upstream_thinking_compatibility"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -2948,8 +2922,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
-            upstreamThinkingCompatibility: try container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibility)
-                ?? container.decodeIfPresent(ManualAPIKeyThinkingCompatibilityMode.self, forKey: .upstreamThinkingCompatibilitySnake),
             apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey) ?? "",
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -2965,7 +2937,6 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
-        try container.encodeIfPresent(self.upstreamThinkingCompatibility, forKey: .upstreamThinkingCompatibility)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -3421,7 +3392,6 @@ public struct ExtractedAuth: Sendable, Equatable {
     public var providerPreset: OpenAICompatibleProviderPreset
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
-    public var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
     public var principalID: String
     public var accountID: String
     public var accessToken: String
@@ -3437,7 +3407,6 @@ public struct ExtractedAuth: Sendable, Equatable {
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil,
         principalID: String,
         accountID: String,
         accessToken: String,
@@ -3452,7 +3421,6 @@ public struct ExtractedAuth: Sendable, Equatable {
         self.providerPreset = providerPreset
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
-        self.upstreamThinkingCompatibility = upstreamThinkingCompatibility
         self.principalID = principalID
         self.accountID = accountID
         self.accessToken = accessToken

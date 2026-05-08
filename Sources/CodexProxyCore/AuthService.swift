@@ -109,10 +109,6 @@ public enum AuthService {
                 from: payload,
                 providerPreset: providerPreset
             )
-            let upstreamThinkingCompatibility = self.resolvedManualAPIKeyThinkingCompatibility(
-                from: payload,
-                providerPreset: providerPreset
-            )
             let apiKey = (tokens["access_token"] as? String) ?? self.extractManualAPIKey(from: payload, providerPreset: providerPreset)
             guard let apiKey, !apiKey.isEmpty else {
                 throw ProxyError.message("auth.json 缺少 API Key")
@@ -130,7 +126,6 @@ public enum AuthService {
                 providerPreset: providerPreset,
                 baseURLMode: baseURLMode,
                 upstreamAdapter: upstreamAdapter,
-                upstreamThinkingCompatibility: upstreamThinkingCompatibility,
                 principalID: accountID,
                 accountID: accountID,
                 accessToken: apiKey,
@@ -230,8 +225,7 @@ public enum AuthService {
         providerPreset: OpenAICompatibleProviderPreset,
         upstreamBaseURL: String?,
         baseURLMode: ManualAPIKeyBaseURLMode?,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?
     ) {
         let payload = (try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) ?? [:]
         let authMode = self.authMode(from: payload)
@@ -242,30 +236,25 @@ public enum AuthService {
         let upstreamBaseURL: String?
         let baseURLMode: ManualAPIKeyBaseURLMode?
         let upstreamAdapter: ManualAPIKeyUpstreamAdapter?
-        let upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
         switch authMode {
         case .chatGPT:
             upstreamBaseURL = nil
             baseURLMode = nil
             upstreamAdapter = nil
-            upstreamThinkingCompatibility = nil
         case .openAIAPIKey, .anthropicAPIKey:
             upstreamBaseURL = self.extractManualAPIKeyBaseURL(from: payload)
             baseURLMode = self.resolvedManualAPIKeyBaseURLMode(from: payload, providerPreset: providerPreset)
             upstreamAdapter = self.resolvedManualAPIKeyUpstreamAdapter(from: payload, providerPreset: providerPreset)
-            upstreamThinkingCompatibility = self.resolvedManualAPIKeyThinkingCompatibility(from: payload, providerPreset: providerPreset)
         case .anthropicSubscriptionOAuth:
             upstreamBaseURL = self.extractAnthropicBaseURL(from: payload)
             baseURLMode = nil
             upstreamAdapter = nil
-            upstreamThinkingCompatibility = nil
         case .geminiOAuth:
             upstreamBaseURL = self.extractGeminiBaseURL(from: payload)
             baseURLMode = nil
             upstreamAdapter = nil
-            upstreamThinkingCompatibility = nil
         }
-        return (providerFamily, authMode, providerPreset, upstreamBaseURL, baseURLMode, upstreamAdapter, upstreamThinkingCompatibility)
+        return (providerFamily, authMode, providerPreset, upstreamBaseURL, baseURLMode, upstreamAdapter)
     }
 
     public static func geminiAuthBackend(from text: String) -> String? {
@@ -509,8 +498,7 @@ public enum AuthService {
         apiKey: String,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? = nil
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil
     ) throws -> String {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedKey.isEmpty == false else {
@@ -529,9 +517,6 @@ public enum AuthService {
         }
         if let upstreamAdapter, providerPreset == .genericOpenAICompatible {
             normalized["upstream_adapter"] = upstreamAdapter.rawValue
-        }
-        if let upstreamThinkingCompatibility, providerPreset == .genericOpenAICompatible {
-            normalized["upstream_thinking_compatibility"] = upstreamThinkingCompatibility.rawValue
         }
         return try self.normalizeManualAPIKeyAuthPayload(normalized, explicitProviderSelection: true)
     }
@@ -804,31 +789,6 @@ public enum AuthService {
         return self.extractManualAPIKeyUpstreamAdapter(from: payload) ?? .responses
     }
 
-    private static func extractManualAPIKeyThinkingCompatibility(
-        from payload: [String: Any]
-    ) -> ManualAPIKeyThinkingCompatibilityMode? {
-        let candidates = [
-            payload["upstream_thinking_compatibility"] as? String,
-            payload["upstreamThinkingCompatibility"] as? String,
-            (payload["tokens"] as? [String: Any])?["upstream_thinking_compatibility"] as? String,
-            (payload["tokens"] as? [String: Any])?["upstreamThinkingCompatibility"] as? String,
-        ]
-        let raw = candidates
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first(where: { !$0.isEmpty })
-        return raw.flatMap(ManualAPIKeyThinkingCompatibilityMode.init(rawValue:))
-    }
-
-    private static func resolvedManualAPIKeyThinkingCompatibility(
-        from payload: [String: Any],
-        providerPreset: OpenAICompatibleProviderPreset
-    ) -> ManualAPIKeyThinkingCompatibilityMode? {
-        guard providerPreset == .genericOpenAICompatible else {
-            return nil
-        }
-        return self.extractManualAPIKeyThinkingCompatibility(from: payload) ?? .disabled
-    }
-
     private static func extractManualProviderPreset(
         from payload: [String: Any],
         authMode: AccountAuthMode
@@ -1004,10 +964,6 @@ public enum AuthService {
             from: payload,
             providerPreset: effectiveProviderPreset
         )
-        let upstreamThinkingCompatibility = self.resolvedManualAPIKeyThinkingCompatibility(
-            from: payload,
-            providerPreset: effectiveProviderPreset
-        )
         let upstreamBaseURL = try self.normalizeManualAPIKeyBaseURL(
             rawBaseURL,
             providerPreset: effectiveProviderPreset
@@ -1031,9 +987,6 @@ public enum AuthService {
         }
         if let upstreamAdapter, effectiveProviderPreset == .genericOpenAICompatible {
             normalized["upstream_adapter"] = upstreamAdapter.rawValue
-        }
-        if let upstreamThinkingCompatibility, effectiveProviderPreset == .genericOpenAICompatible {
-            normalized["upstream_thinking_compatibility"] = upstreamThinkingCompatibility.rawValue
         }
         return try self.jsonString(normalized)
     }

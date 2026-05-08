@@ -575,7 +575,6 @@ public final class DaemonController: @unchecked Sendable {
     private let stickySessionBindings: StickySessionBindingStore
     private let managedProxyNodeCoordinator: ManagedProxyNodeCoordinator
     private let accountModelDiscoveryCache: AccountModelDiscoveryCache
-    private let chatCompletionsReasoningContentCache: ChatCompletionsReasoningContentCache
 
     public convenience init(
         dataDirectory: URL = Paths.defaultDataDirectory(),
@@ -612,7 +611,6 @@ public final class DaemonController: @unchecked Sendable {
         self.stickySessionBindings = StickySessionBindingStore()
         self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
         self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
-        self.chatCompletionsReasoningContentCache = ChatCompletionsReasoningContentCache(dataDirectory: dataDirectory)
         self.managedProxyRuntime = manageManagedProxyRuntime
             ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
             : nil
@@ -2529,7 +2527,7 @@ public final class DaemonController: @unchecked Sendable {
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
                     for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel
                 )
-                var upstreamRequestBody = adapterUsesChatCompletions
+                let upstreamRequestBody = adapterUsesChatCompletions
                     ? self.upstreamChatCompletionsRequest(
                         from: compatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
@@ -2541,14 +2539,6 @@ public final class DaemonController: @unchecked Sendable {
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
                 )
-                if adapterUsesChatCompletions {
-                    upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
-                        upstreamRequestBody,
-                        candidate: candidate,
-                        upstreamModel: resolvedUpstreamModel,
-                        context: promptCacheContext
-                    )
-                }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
                 let candidateAuth = candidate.auth
@@ -2621,12 +2611,6 @@ public final class DaemonController: @unchecked Sendable {
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
                         requestedModel: request.responseModel
-                    )
-                    await self.storeChatCompletionsReasoningContentIfNeeded(
-                        fromChatCompletion: object,
-                        candidate: candidate,
-                        upstreamModel: resolvedUpstreamModel,
-                        context: promptCacheContext
                     )
                 } else {
                     guard let resolvedCompleted = self.completedResponse(from: response.body) else {
@@ -3344,7 +3328,7 @@ public final class DaemonController: @unchecked Sendable {
         let adapters = self.openAIUpstreamAdapters(for: candidate.auth)
 
         for adapter in adapters {
-            var upstreamRequestBody = self.openAIUpstreamRequestBody(
+            let upstreamRequestBody = self.openAIUpstreamRequestBody(
                 from: compatibleRequest,
                 requestedModel: requestedModel,
                 auth: candidate.auth,
@@ -3353,15 +3337,6 @@ public final class DaemonController: @unchecked Sendable {
                 preserveCustomModel: explicitProxyTestCustomModel,
                 useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
             )
-            if adapter == .chatCompletions {
-                let upstreamModel = (upstreamRequestBody["model"] as? String) ?? requestedModel
-                upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
-                    upstreamRequestBody,
-                    candidate: candidate,
-                    upstreamModel: upstreamModel,
-                    context: promptCacheContext
-                )
-            }
             let actualModel = self.loggedActualModel(from: upstreamRequestBody)
             let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
@@ -3429,23 +3404,12 @@ public final class DaemonController: @unchecked Sendable {
                 }
 
                 await self.setActive(candidate)
-                let streamCandidate = candidate
-                let streamUpstreamModel = (upstreamRequestBody["model"] as? String) ?? requestedModel
-                let streamPromptCacheContext = promptCacheContext
+                let streamInputData = self.syntheticResponseInputData(from: compatibleRequest["input"])
                 let adaptedBody = adapter == .chatCompletions
                     ? self.openAIChatToSyntheticResponseStream(
                         upstreamBody: response.body,
                         requestedModel: requestedModel,
-                        onCompletedReasoningContent: { [weak self] assistantFingerprint, reasoningContent in
-                            guard let self else { return }
-                            await self.storeChatCompletionsReasoningContentIfNeeded(
-                                assistantFingerprint: assistantFingerprint,
-                                reasoningContent: reasoningContent,
-                                candidate: streamCandidate,
-                                upstreamModel: streamUpstreamModel,
-                                context: streamPromptCacheContext
-                            )
-                        }
+                        inputData: streamInputData
                     )
                     : response.body
                 await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
@@ -3536,13 +3500,8 @@ public final class DaemonController: @unchecked Sendable {
                 usageRecognized = ProxyTranscoder.hasRecognizableUsage(inUsageObject: object["usage"])
                 completed = ProxyTranscoder.completedResponse(
                     fromChatCompletion: object,
-                    requestedModel: requestedModel
-                )
-                await self.storeChatCompletionsReasoningContentIfNeeded(
-                    fromChatCompletion: object,
-                    candidate: candidate,
-                    upstreamModel: (upstreamRequestBody["model"] as? String) ?? requestedModel,
-                    context: promptCacheContext
+                    requestedModel: requestedModel,
+                    input: compatibleRequest["input"]
                 )
             } else {
                 let events = ProxyTranscoder.decodeSSE(response.body)
@@ -3709,7 +3668,7 @@ public final class DaemonController: @unchecked Sendable {
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
                     for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel
                 )
-                var upstreamRequestBody = adapterUsesChatCompletions
+                let upstreamRequestBody = adapterUsesChatCompletions
                     ? self.upstreamChatCompletionsRequest(
                         from: compatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
@@ -3721,14 +3680,6 @@ public final class DaemonController: @unchecked Sendable {
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
                 )
-                if adapterUsesChatCompletions {
-                    upstreamRequestBody = try await self.chatCompletionsRequestByApplyingThinkingCompatibility(
-                        upstreamRequestBody,
-                        candidate: candidate,
-                        upstreamModel: resolvedUpstreamModel,
-                        context: promptCacheContext
-                    )
-                }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
@@ -3796,23 +3747,12 @@ public final class DaemonController: @unchecked Sendable {
                     }
 
                     await self.setActive(candidate)
-                    let streamCandidate = candidate
-                    let streamResolvedUpstreamModel = resolvedUpstreamModel
-                    let streamPromptCacheContext = promptCacheContext
+                    let streamInputData = self.syntheticResponseInputData(from: compatibleRequest["input"])
                     let adaptedBody = adapterUsesChatCompletions
                         ? self.openAIChatToSyntheticResponseStream(
                             upstreamBody: response.body,
                             requestedModel: requestedModel,
-                            onCompletedReasoningContent: { [weak self] assistantFingerprint, reasoningContent in
-                                guard let self else { return }
-                                await self.storeChatCompletionsReasoningContentIfNeeded(
-                                    assistantFingerprint: assistantFingerprint,
-                                    reasoningContent: reasoningContent,
-                                    candidate: streamCandidate,
-                                    upstreamModel: streamResolvedUpstreamModel,
-                                    context: streamPromptCacheContext
-                                )
-                            }
+                            inputData: streamInputData
                         )
                         : response.body
                     await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
@@ -3901,13 +3841,8 @@ public final class DaemonController: @unchecked Sendable {
                     let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
-                        requestedModel: requestedModel
-                    )
-                    await self.storeChatCompletionsReasoningContentIfNeeded(
-                        fromChatCompletion: object,
-                        candidate: candidate,
-                        upstreamModel: resolvedUpstreamModel,
-                        context: promptCacheContext
+                        requestedModel: requestedModel,
+                        input: compatibleRequest["input"]
                     )
                 } else {
                     let events = ProxyTranscoder.decodeSSE(response.body)
@@ -4132,132 +4067,9 @@ public final class DaemonController: @unchecked Sendable {
         )
     }
 
-    private func chatCompletionsRequestByApplyingThinkingCompatibility(
-        _ request: [String: Any],
-        candidate: ProxyCandidate,
-        upstreamModel: String,
-        context: PromptCacheContext
-    ) async throws -> [String: Any] {
-        guard self.usesChatCompletionsThinkingCompatibility(candidate.auth) else {
-            return request
-        }
-
-        var updated = request
-        var messages = request["messages"] as? [[String: Any]] ?? []
-        var changed = false
-        var missingCache = false
-        let sessionKeyHashes = self.reasoningContentCacheSessionKeyHashes(context)
-
-        for index in messages.indices {
-            let role = ((messages[index]["role"] as? String) ?? "").lowercased()
-            guard role == "assistant",
-                  let fingerprint = ProxyTranscoder.chatCompletionAssistantToolCallMessageFingerprint(messages[index]),
-                  (messages[index]["reasoning_content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-            else {
-                continue
-            }
-
-            var restored = false
-            for sessionKeyHash in sessionKeyHashes {
-                guard let reasoningContent = await self.chatCompletionsReasoningContentCache.reasoningContent(
-                    sessionKeyHash: sessionKeyHash,
-                    accountKey: candidate.record.accountKey,
-                    model: upstreamModel,
-                    assistantFingerprint: fingerprint
-                ) else {
-                    continue
-                }
-                messages[index]["reasoning_content"] = reasoningContent
-                changed = true
-                restored = true
-                break
-            }
-            if restored == false {
-                missingCache = true
-            }
-        }
-
-        if missingCache {
-            throw ProxyError.message(Self.missingThinkingCompatibilityReasoningContentMessage)
-        }
-
-        if changed {
-            updated["messages"] = messages
-        }
-        updated["thinking"] = ["type": "enabled"]
-        updated.removeValue(forKey: "logprobs")
-        updated.removeValue(forKey: "top_logprobs")
-        return updated
-    }
-
-    private static let missingThinkingCompatibilityReasoningContentMessage =
-        "Thinking compatibility is enabled for this Generic OpenAI-compatible account, but the proxy has no cached reasoning_content for a previous assistant tool call in this conversation. Disable Thinking compatibility for this account, or start a fresh conversation without old tool-call history."
-
-    private func storeChatCompletionsReasoningContentIfNeeded(
-        fromChatCompletion payload: [String: Any],
-        candidate: ProxyCandidate,
-        upstreamModel: String,
-        context: PromptCacheContext
-    ) async {
-        guard let pair = ProxyTranscoder.chatCompletionAssistantReasoningCachePair(fromChatCompletion: payload) else {
-            return
-        }
-        await self.storeChatCompletionsReasoningContentIfNeeded(
-            assistantFingerprint: pair.assistantFingerprint,
-            reasoningContent: pair.reasoningContent,
-            candidate: candidate,
-            upstreamModel: upstreamModel,
-            context: context
-        )
-    }
-
-    private func storeChatCompletionsReasoningContentIfNeeded(
-        assistantFingerprint: String,
-        reasoningContent: String,
-        candidate: ProxyCandidate,
-        upstreamModel: String,
-        context: PromptCacheContext
-    ) async {
-        guard self.usesChatCompletionsThinkingCompatibility(candidate.auth),
-              !self.reasoningContentCacheSessionKeyHashes(context).isEmpty
-        else {
-            return
-        }
-
-        for sessionKeyHash in self.reasoningContentCacheSessionKeyHashes(context) {
-            await self.chatCompletionsReasoningContentCache.store(
-                reasoningContent: reasoningContent,
-                sessionKeyHash: sessionKeyHash,
-                accountKey: candidate.record.accountKey,
-                model: upstreamModel,
-                assistantFingerprint: assistantFingerprint
-            )
-        }
-    }
-
-    private func usesChatCompletionsThinkingCompatibility(_ auth: ExtractedAuth) -> Bool {
-        auth.authMode == .openAIAPIKey
-            && auth.providerPreset == .genericOpenAICompatible
-            && auth.upstreamAdapter == .chatCompletions
-            && (auth.upstreamThinkingCompatibility ?? .disabled) == .enabled
-    }
-
-    private func reasoningContentCacheSessionKeyHashes(_ context: PromptCacheContext) -> [String] {
-        var seen = Set<String>()
-        return [
-            context.stickySessionKey,
-            context.sessionIdentifier,
-            context.seedMaterial,
-        ].compactMap { raw -> String? in
-            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-                return nil
-            }
-            let hash = Helpers.sha256(trimmed)
-            guard seen.insert(hash).inserted else {
-                return nil
-            }
-            return hash
-        }
+    private func syntheticResponseInputData(from input: Any?) -> Data? {
+        guard let input else { return nil }
+        return try? JSONSerialization.data(withJSONObject: input)
     }
 
     private func preparedGeminiNativeRequestPayload(
@@ -4653,21 +4465,27 @@ public final class DaemonController: @unchecked Sendable {
     private func openAIChatToSyntheticResponseStream(
         upstreamBody: AsyncThrowingStream<Data, Error>,
         requestedModel: String,
-        onCompletedReasoningContent: (@Sendable (_ assistantFingerprint: String, _ reasoningContent: String) async -> Void)? = nil
+        inputData: Data? = nil
     ) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var decoder = SSEIncrementalDecoder()
                 var state = OpenAIChatSyntheticStreamState()
+                let input = inputData.flatMap { try? JSONSerialization.jsonObject(with: $0) }
                 do {
                     for try await chunk in upstreamBody {
                         for event in decoder.append(chunk) {
                             for syntheticChunk in try ProxyTranscoder.responseSSEChunks(
                                 fromChatCompletionEvent: event,
                                 state: &state,
-                                requestedModel: requestedModel
+                                requestedModel: requestedModel,
+                                input: input
                             ) {
                                 continuation.yield(Data(syntheticChunk.utf8))
+                            }
+                            if state.isCompleted {
+                                continuation.finish()
+                                return
                             }
                         }
                     }
@@ -4675,23 +4493,20 @@ public final class DaemonController: @unchecked Sendable {
                         for syntheticChunk in try ProxyTranscoder.responseSSEChunks(
                             fromChatCompletionEvent: event,
                             state: &state,
-                            requestedModel: requestedModel
+                            requestedModel: requestedModel,
+                            input: input
                         ) {
                             continuation.yield(Data(syntheticChunk.utf8))
                         }
-                    }
-                    let completed = ProxyTranscoder.completedResponse(
-                        fromChatCompletionState: state,
-                        requestedModel: requestedModel
-                    )
-                    if let pair = ProxyTranscoder.chatCompletionAssistantReasoningCachePair(
-                        fromCompletedResponse: completed
-                    ) {
-                        await onCompletedReasoningContent?(pair.assistantFingerprint, pair.reasoningContent)
+                        if state.isCompleted {
+                            continuation.finish()
+                            return
+                        }
                     }
                     for syntheticChunk in ProxyTranscoder.finalizeResponseSSEChunks(
                         fromChatCompletionState: state,
-                        requestedModel: requestedModel
+                        requestedModel: requestedModel,
+                        input: input
                     ) {
                         continuation.yield(Data(syntheticChunk.utf8))
                     }

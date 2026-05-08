@@ -85,31 +85,6 @@ struct ManualAPIKeyAccountForm: View {
                 }
             }
 
-            if self.draft.providerPreset == .genericOpenAICompatible,
-               self.draft.upstreamAdapter == .chatCompletions
-            {
-                FormFieldPanel(title: self.model.text(.labelThinkingCompatibility), compact: self.compact) {
-                    VStack(alignment: .leading, spacing: self.compact ? 6 : 8) {
-                        Picker(
-                            self.model.text(.labelThinkingCompatibility),
-                            selection: self.$draft.upstreamThinkingCompatibility
-                        ) {
-                            ForEach(ManualAPIKeyThinkingCompatibilityMode.allCases, id: \.self) { mode in
-                                Text(self.model.manualAPIKeyThinkingCompatibilityText(mode)).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-
-                        Text(self.model.text(.helperManualAccountThinkingCompatibility))
-                            .font(.system(size: self.compact ? 10 : 11, weight: .medium))
-                            .foregroundStyle(palette.textSecondary)
-                            .lineLimit(self.compact ? 3 : 4)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
             FormFieldPanel(title: self.model.text(.labelAPIKey), compact: self.compact) {
                 TextField(
                     self.model.text(.placeholderManualAccountAPIKey),

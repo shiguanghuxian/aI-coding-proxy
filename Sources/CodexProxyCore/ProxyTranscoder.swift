@@ -164,6 +164,7 @@ public enum ProxyTranscoder {
         stream: Bool
     ) -> [String: Any] {
         var messages: [[String: Any]] = []
+        var lastAssistantMessageIndex: Int?
         let instructions = (normalizedRequest["instructions"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !instructions.isEmpty {
@@ -180,16 +181,16 @@ public enum ProxyTranscoder {
             switch type {
             case "message":
                 let role = ((item["role"] as? String) ?? "user").lowercased()
-                var message: [String: Any] = [
-                    "role": self.chatCompletionRole(for: role),
-                    "content": self.chatCompletionMessageContent(from: item["content"]),
+                let chatRole = self.chatCompletionRole(for: role)
+                let message: [String: Any] = [
+                    "role": chatRole,
+                    "content": self.chatCompletionMessageContentValue(
+                        from: item["content"],
+                        chatRole: chatRole
+                    ),
                 ]
-                if role == "assistant",
-                   let reasoningContent = self.trimmedString(item["reasoning_content"])
-                {
-                    message["reasoning_content"] = reasoningContent
-                }
                 messages.append(message)
+                lastAssistantMessageIndex = chatRole == "assistant" ? messages.indices.last : nil
             case "function_call_output":
                 let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !callID.isEmpty else { continue }
@@ -198,26 +199,34 @@ public enum ProxyTranscoder {
                     "tool_call_id": callID,
                     "content": self.stringValue(item["output"]),
                 ])
+                lastAssistantMessageIndex = nil
             case "function_call":
                 let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let name = (item["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "tool"
                 guard !callID.isEmpty else { continue }
-                var message: [String: Any] = [
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [[
-                        "id": callID,
-                        "type": "function",
-                        "function": [
-                            "name": name,
-                            "arguments": self.stringValue(item["arguments"]),
-                        ],
-                    ]],
+                let toolCall: [String: Any] = [
+                    "id": callID,
+                    "type": "function",
+                    "function": [
+                        "name": name,
+                        "arguments": self.stringValue(item["arguments"]),
+                    ],
                 ]
-                if let reasoningContent = self.trimmedString(item["reasoning_content"]) {
-                    message["reasoning_content"] = reasoningContent
+                if let assistantIndex = lastAssistantMessageIndex,
+                   ((messages[assistantIndex]["role"] as? String) ?? "") == "assistant"
+                {
+                    var toolCalls = messages[assistantIndex]["tool_calls"] as? [[String: Any]] ?? []
+                    toolCalls.append(toolCall)
+                    messages[assistantIndex]["tool_calls"] = toolCalls
+                } else {
+                    let message: [String: Any] = [
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [toolCall],
+                    ]
+                    messages.append(message)
+                    lastAssistantMessageIndex = messages.indices.last
                 }
-                messages.append(message)
             default:
                 continue
             }
@@ -230,6 +239,8 @@ public enum ProxyTranscoder {
         ]
         if let maxTokens = normalizedRequest["max_output_tokens"] {
             request["max_tokens"] = maxTokens
+        } else if let maxTokens = normalizedRequest["max_tokens"] {
+            request["max_tokens"] = maxTokens
         }
         if let temperature = normalizedRequest["temperature"] {
             request["temperature"] = temperature
@@ -237,11 +248,8 @@ public enum ProxyTranscoder {
         if let topP = normalizedRequest["top_p"] {
             request["top_p"] = topP
         }
-        if let topK = normalizedRequest["top_k"] {
-            request["top_k"] = topK
-        }
-        if let parallelToolCalls = normalizedRequest["parallel_tool_calls"] {
-            request["parallel_tool_calls"] = parallelToolCalls
+        if let user = normalizedRequest["user"] {
+            request["user"] = user
         }
         if let tools = self.chatCompletionTools(from: normalizedRequest["tools"]), !tools.isEmpty {
             request["tools"] = tools
@@ -286,47 +294,45 @@ public enum ProxyTranscoder {
 
     public static func completedResponse(
         fromChatCompletion payload: [String: Any],
-        requestedModel: String
+        requestedModel: String,
+        input: Any? = nil
     ) -> [String: Any] {
         let choice = (payload["choices"] as? [[String: Any]])?.first ?? [:]
         let message = choice["message"] as? [String: Any] ?? [:]
         let text = self.chatCompletionMessageText(from: message["content"])
         let reasoningContent = self.trimmedString(message["reasoning_content"])
+        let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+        let visibleText = !text.isEmpty ? text : (toolCalls.isEmpty ? reasoningContent ?? "" : "")
         var output: [[String: Any]] = []
-        if !text.isEmpty || reasoningContent != nil {
-            var messageItem: [String: Any] = [
+        if !visibleText.isEmpty {
+            let messageItem: [String: Any] = [
+                "id": "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
                 "type": "message",
                 "role": "assistant",
-                "content": text.isEmpty ? [] : [[
+                "content": [[
                     "type": "output_text",
-                    "text": text,
+                    "text": visibleText,
                 ]],
             ]
-            if let reasoningContent {
-                messageItem["reasoning_content"] = reasoningContent
-            }
             output.append(messageItem)
         }
-        for (index, toolCall) in (message["tool_calls"] as? [[String: Any]] ?? []).enumerated() {
+        for toolCall in toolCalls {
             let function = toolCall["function"] as? [String: Any] ?? [:]
             let callID = (toolCall["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
-            var functionItem: [String: Any] = [
+            let functionItem: [String: Any] = [
                 "type": "function_call",
-                "id": "fc_\(callID)",
+                "id": callID,
                 "call_id": callID,
                 "name": function["name"] as? String ?? "tool",
                 "arguments": function["arguments"] as? String ?? "",
             ]
-            if text.isEmpty, index == 0, let reasoningContent {
-                functionItem["reasoning_content"] = reasoningContent
-            }
             output.append(functionItem)
         }
 
         let usage = self.extractUsage(from: payload["usage"])
-        return [
-            "id": payload["id"] as? String ?? "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
+        var response: [String: Any] = [
+            "id": "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
             "object": "response",
             "created_at": self.int64Value(payload["created"]) ?? Helpers.now(),
             "status": "completed",
@@ -334,20 +340,31 @@ public enum ProxyTranscoder {
             "output": output,
             "usage": self.completedUsageObject(usage),
         ]
+        if let input {
+            response["input"] = input
+        }
+        return response
     }
 
     public static func responseSSEChunks(
         fromChatCompletionEvent event: SSEEvent,
         state: inout OpenAIChatSyntheticStreamState,
-        requestedModel: String
+        requestedModel: String,
+        input: Any? = nil
     ) throws -> [String] {
         let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedData != "[DONE]" else { return [] }
+        guard !state.isCompleted else { return [] }
+        if trimmedData == "[DONE]" {
+            let chunks = self.finalizeResponseSSEChunks(
+                fromChatCompletionState: state,
+                requestedModel: requestedModel,
+                input: input
+            )
+            state.isCompleted = true
+            return chunks
+        }
         guard let json = self.jsonObject(from: event) else { return [] }
 
-        if let id = json["id"] as? String, !id.isEmpty {
-            state.responseID = id
-        }
         if let createdAt = self.int64Value(json["created"]) {
             state.createdAt = createdAt
         }
@@ -365,33 +382,79 @@ public enum ProxyTranscoder {
         let choice = (json["choices"] as? [[String: Any]])?.first ?? [:]
         let delta = choice["delta"] as? [String: Any] ?? [:]
         var chunks: [String] = []
-        if !state.seenCreated {
-            state.seenCreated = true
-            chunks.append(
-                self.sseData([
-                    "type": "response.created",
-                    "response": [
-                        "id": state.responseID,
-                        "created_at": state.createdAt,
-                        "model": requestedModel,
-                    ],
-                ])
-            )
-        }
+        chunks.append(contentsOf: self.initialSyntheticResponseSSEChunks(
+            state: &state,
+            requestedModel: requestedModel,
+            input: input
+        ))
 
         let textDelta = self.chatCompletionMessageText(from: delta["content"])
         if !textDelta.isEmpty {
+            if !state.textItemAdded {
+                state.textItemAdded = true
+                chunks.append(
+                    self.sseData([
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": [
+                            "id": state.textItemID,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                        ],
+                    ])
+                )
+            }
+            if !state.textContentPartAdded {
+                state.textContentPartAdded = true
+                chunks.append(
+                    self.sseData([
+                        "type": "response.content_part.added",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "item_id": state.textItemID,
+                        "part": [
+                            "type": "output_text",
+                            "text": "",
+                        ],
+                    ])
+                )
+            }
             state.textBuffer.append(textDelta)
             chunks.append(
                 self.sseData([
                     "type": "response.output_text.delta",
                     "output_index": 0,
+                    "content_index": 0,
+                    "item_id": state.textItemID,
                     "delta": textDelta,
                 ])
             )
         }
         if let reasoningDelta = delta["reasoning_content"] as? String, !reasoningDelta.isEmpty {
+            if !state.reasoningItemAdded {
+                state.reasoningItemAdded = true
+                chunks.append(
+                    self.sseData([
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": [
+                            "id": state.reasoningItemID,
+                            "type": "reasoning",
+                        ],
+                    ])
+                )
+            }
             state.reasoningContentBuffer.append(reasoningDelta)
+            chunks.append(
+                self.sseData([
+                    "type": "response.output_text.delta",
+                    "item_id": state.textItemID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": reasoningDelta,
+                ])
+            )
         }
 
         for toolCall in delta["tool_calls"] as? [[String: Any]] ?? [] {
@@ -399,40 +462,21 @@ public enum ProxyTranscoder {
             var stateTool = state.toolCalls[index] ?? .init(index: index)
             if let callID = (toolCall["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !callID.isEmpty {
                 stateTool.callID = callID
-                stateTool.itemID = "fc_\(callID)"
+                stateTool.itemID = callID
             }
             let function = toolCall["function"] as? [String: Any] ?? [:]
             if let name = (function["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
                 stateTool.name = name
-            }
-            if !stateTool.added {
-                stateTool.added = true
-                chunks.append(
-                    self.sseData([
-                        "type": "response.output_item.added",
-                        "output_index": index,
-                        "item": [
-                            "id": stateTool.itemID,
-                            "type": "function_call",
-                            "call_id": stateTool.callID,
-                            "name": stateTool.name,
-                            "arguments": "",
-                        ],
-                    ])
-                )
+                stateTool.hasName = true
             }
             let argumentsDelta = function["arguments"] as? String ?? ""
             if !argumentsDelta.isEmpty {
                 stateTool.argumentsBuffer.append(argumentsDelta)
-                chunks.append(
-                    self.sseData([
-                        "type": "response.function_call_arguments.delta",
-                        "output_index": index,
-                        "item_id": stateTool.itemID,
-                        "delta": argumentsDelta,
-                    ])
-                )
             }
+            chunks.append(contentsOf: self.syntheticToolCallChunks(
+                state: &stateTool,
+                latestArgumentsDelta: argumentsDelta
+            ))
             state.toolCalls[index] = stateTool
         }
         return chunks
@@ -440,30 +484,76 @@ public enum ProxyTranscoder {
 
     public static func finalizeResponseSSEChunks(
         fromChatCompletionState state: OpenAIChatSyntheticStreamState,
-        requestedModel: String
+        requestedModel: String,
+        input: Any? = nil
     ) -> [String] {
+        guard !state.isCompleted else { return [] }
         var chunks: [String] = []
         var mutableState = state
-        if !mutableState.seenCreated {
-            mutableState.seenCreated = true
+        chunks.append(contentsOf: self.initialSyntheticResponseSSEChunks(
+            state: &mutableState,
+            requestedModel: requestedModel,
+            input: input
+        ))
+
+        if mutableState.textContentPartAdded {
+            if !mutableState.textBuffer.isEmpty {
+                chunks.append(
+                    self.sseData([
+                        "type": "response.output_text.done",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "item_id": mutableState.textItemID,
+                        "text": mutableState.textBuffer,
+                    ])
+                )
+            }
             chunks.append(
                 self.sseData([
-                    "type": "response.created",
-                    "response": [
-                        "id": mutableState.responseID,
-                        "created_at": mutableState.createdAt,
-                        "model": requestedModel,
+                    "type": "response.content_part.done",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "item_id": mutableState.textItemID,
+                    "part": [
+                        "type": "output_text",
+                        "text": mutableState.textBuffer,
+                    ],
+                ])
+            )
+        }
+        if mutableState.textItemAdded {
+            chunks.append(
+                self.sseData([
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": [
+                        "id": mutableState.textItemID,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": mutableState.textBuffer.isEmpty ? [] : [[
+                            "type": "output_text",
+                            "text": mutableState.textBuffer,
+                        ]],
                     ],
                 ])
             )
         }
 
         for index in mutableState.toolCalls.keys.sorted() {
-            guard let tool = mutableState.toolCalls[index], tool.added else { continue }
+            guard var tool = mutableState.toolCalls[index] else { continue }
+            if !tool.added {
+                chunks.append(contentsOf: self.syntheticToolCallChunks(
+                    state: &tool,
+                    latestArgumentsDelta: nil,
+                    forceAdded: true
+                ))
+            }
+            guard tool.added else { continue }
+            mutableState.toolCalls[index] = tool
             chunks.append(
                 self.sseData([
                     "type": "response.function_call_arguments.done",
-                    "output_index": index,
+                    "output_index": tool.outputIndex,
                     "item_id": tool.itemID,
                     "arguments": tool.argumentsBuffer,
                 ])
@@ -471,7 +561,7 @@ public enum ProxyTranscoder {
             chunks.append(
                 self.sseData([
                     "type": "response.output_item.done",
-                    "output_index": index,
+                    "output_index": tool.outputIndex,
                     "item": [
                         "id": tool.itemID,
                         "type": "function_call",
@@ -488,10 +578,12 @@ public enum ProxyTranscoder {
                 "type": "response.completed",
                 "response": self.completedResponse(
                     fromChatCompletionState: mutableState,
-                    requestedModel: requestedModel
+                    requestedModel: requestedModel,
+                    input: input
                 ),
             ])
         )
+        chunks.append("data: [DONE]\n\n")
         return chunks
     }
 
@@ -520,14 +612,11 @@ public enum ProxyTranscoder {
         let messageContent: Any = assistantText.isEmpty && !toolCalls.isEmpty ? NSNull() : assistantText
         let messageToolCalls: Any = toolCalls.isEmpty ? NSNull() : toolCalls
         let finishReason = toolCalls.isEmpty ? "stop" : "tool_calls"
-        var message: [String: Any] = [
+        let message: [String: Any] = [
             "role": "assistant",
             "content": messageContent,
             "tool_calls": messageToolCalls,
         ]
-        if let reasoningContent = self.reasoningContent(fromCompletedResponse: completedResponse) {
-            message["reasoning_content"] = reasoningContent
-        }
         var response: [String: Any] = [
             "id": responseID,
             "object": "chat.completion",
@@ -541,69 +630,6 @@ public enum ProxyTranscoder {
         ]
         response["usage"] = self.chatCompletionUsageObject(usage)
         return response
-    }
-
-    public static func chatCompletionAssistantMessageFingerprint(_ message: [String: Any]) -> String? {
-        guard ((message["role"] as? String) ?? "assistant").lowercased() == "assistant" else {
-            return nil
-        }
-
-        let toolCalls = self.canonicalJSONString(message["tool_calls"]) ?? ""
-        let content = self.chatCompletionAssistantToolCallMessageFingerprintContent(
-            from: message["content"],
-            hasToolCalls: toolCalls.isEmpty == false
-        )
-        let seed = [
-            "role=assistant",
-            "content=\(content)",
-            "tool_calls=\(toolCalls)",
-        ].joined(separator: "\n")
-        return Helpers.sha256(seed)
-    }
-
-    private static func chatCompletionAssistantToolCallMessageFingerprintContent(
-        from content: Any?,
-        hasToolCalls: Bool
-    ) -> String {
-        guard hasToolCalls else {
-            return self.chatCompletionMessageContent(from: content)
-        }
-        if content == nil || content is NSNull {
-            return ""
-        }
-        return self.chatCompletionMessageContent(from: content)
-    }
-
-    static func chatCompletionAssistantToolCallMessageFingerprint(_ message: [String: Any]) -> String? {
-        guard let toolCalls = message["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty else {
-            return nil
-        }
-        return self.chatCompletionAssistantMessageFingerprint(message)
-    }
-
-    public static func chatCompletionAssistantReasoningCachePair(
-        fromCompletedResponse completedResponse: [String: Any]
-    ) -> (assistantFingerprint: String, reasoningContent: String)? {
-        guard let reasoningContent = self.reasoningContent(fromCompletedResponse: completedResponse),
-              let message = self.chatCompletionAssistantMessage(fromCompletedResponse: completedResponse),
-              let fingerprint = self.chatCompletionAssistantToolCallMessageFingerprint(message)
-        else {
-            return nil
-        }
-        return (fingerprint, reasoningContent)
-    }
-
-    public static func chatCompletionAssistantReasoningCachePair(
-        fromChatCompletion payload: [String: Any]
-    ) -> (assistantFingerprint: String, reasoningContent: String)? {
-        let choice = (payload["choices"] as? [[String: Any]])?.first ?? [:]
-        guard let message = choice["message"] as? [String: Any],
-              let reasoningContent = self.trimmedString(message["reasoning_content"]),
-              let fingerprint = self.chatCompletionAssistantToolCallMessageFingerprint(message)
-        else {
-            return nil
-        }
-        return (fingerprint, reasoningContent)
     }
 
     public static func usageFromCompletedResponse(_ completedResponse: [String: Any]) -> UpstreamUsage {
@@ -910,6 +936,10 @@ public enum ProxyTranscoder {
                     return item
                 }
 
+                if let type = item["type"] as? String, type == "input_image" || type == "input_file" {
+                    return item
+                }
+
                 return nil
             }
         }
@@ -1005,6 +1035,81 @@ public enum ProxyTranscoder {
         return text
     }
 
+    private static func chatCompletionMessageContentValue(from content: Any?, chatRole: String) -> Any {
+        guard chatRole == "user",
+              let multimodalContent = self.chatCompletionMultimodalMessageContent(from: content)
+        else {
+            return self.chatCompletionMessageContent(from: content)
+        }
+        return multimodalContent
+    }
+
+    private static func chatCompletionMultimodalMessageContent(from content: Any?) -> [[String: Any]]? {
+        let blocks = content as? [[String: Any]] ?? self.normalizeMessageContent(content, role: "user")
+        var parts: [[String: Any]] = []
+        var hasImage = false
+
+        for block in blocks {
+            let type = (block["type"] as? String)?.lowercased() ?? ""
+            switch type {
+            case "input_text", "output_text", "text":
+                let text = block["text"] as? String ?? ""
+                guard !text.isEmpty else { continue }
+                parts.append([
+                    "type": "text",
+                    "text": text,
+                ])
+            case "refusal":
+                let text = (block["refusal"] as? String) ?? (block["text"] as? String) ?? ""
+                guard !text.isEmpty else { continue }
+                parts.append([
+                    "type": "text",
+                    "text": text,
+                ])
+            case "input_image", "image_url":
+                guard let imageURL = self.chatCompletionImageURLObject(from: block) else {
+                    continue
+                }
+                hasImage = true
+                parts.append([
+                    "type": "image_url",
+                    "image_url": imageURL,
+                ])
+            default:
+                continue
+            }
+        }
+
+        return hasImage ? parts : nil
+    }
+
+    private static func chatCompletionImageURLObject(from block: [String: Any]) -> [String: Any]? {
+        var imageURL: [String: Any] = [:]
+        if let object = block["image_url"] as? [String: Any] {
+            imageURL = object
+        } else if let object = block["image_url"] as? [String: String] {
+            imageURL = object.reduce(into: [String: Any]()) { partial, item in
+                partial[item.key] = item.value
+            }
+        } else if let url = block["image_url"] as? String {
+            imageURL["url"] = url
+        }
+
+        if imageURL["url"] == nil, let url = block["url"] as? String {
+            imageURL["url"] = url
+        }
+
+        guard let url = self.trimmedString(imageURL["url"]) else {
+            return nil
+        }
+        imageURL["url"] = url
+
+        if imageURL["detail"] == nil, let detail = block["detail"] {
+            imageURL["detail"] = detail
+        }
+        return imageURL
+    }
+
     private static func chatCompletionMessageText(from content: Any?) -> String {
         if let text = content as? String {
             return text
@@ -1031,25 +1136,53 @@ public enum ProxyTranscoder {
         let normalized = tools.compactMap { tool -> [String: Any]? in
             let type = (tool["type"] as? String)?.lowercased() ?? ""
             if type == "function", let function = tool["function"] as? [String: Any] {
+                var normalizedFunction = function
+                if normalizedFunction["description"] == nil {
+                    normalizedFunction["description"] = ""
+                }
+                if normalizedFunction["parameters"] == nil {
+                    normalizedFunction["parameters"] = [
+                        "type": "object",
+                        "properties": [:],
+                    ]
+                }
+                return [
+                    "type": "function",
+                    "function": normalizedFunction,
+                ]
+            }
+            if ["web_search", "code_interpreter", "file_search"].contains(type) {
+                let name = ((tool["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+                    $0.isEmpty ? nil : $0
+                } ?? type
+                let function: [String: Any] = [
+                    "name": name,
+                    "description": tool["description"] as? String ?? "\(type) tool",
+                    "parameters": tool["parameters"] ?? [
+                        "type": "object",
+                        "properties": [
+                            "query": [
+                                "type": "string",
+                                "description": "The search query",
+                            ],
+                        ],
+                        "required": ["query"],
+                    ],
+                ]
                 return [
                     "type": "function",
                     "function": function,
                 ]
             }
-            let name = (tool["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard type == "function", !name.isEmpty else { return nil }
-            var function: [String: Any] = [
-                "name": name,
+            let name = (tool["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown_tool"
+            let function: [String: Any] = [
+                "name": name.isEmpty ? "unknown_tool" : name,
+                "description": tool["description"] as? String ?? "",
+                "parameters": tool["parameters"] ?? [
+                    "type": "object",
+                    "properties": [:],
+                ],
             ]
-            if let description = tool["description"] {
-                function["description"] = description
-            }
-            if let parameters = tool["parameters"] ?? tool["input_schema"] {
-                function["parameters"] = parameters
-            }
-            if let strict = tool["strict"] {
-                function["strict"] = strict
-            }
             return [
                 "type": "function",
                 "function": function,
@@ -1081,35 +1214,41 @@ public enum ProxyTranscoder {
 
     public static func completedResponse(
         fromChatCompletionState state: OpenAIChatSyntheticStreamState,
-        requestedModel: String
+        requestedModel: String,
+        input: Any? = nil
     ) -> [String: Any] {
         var output: [[String: Any]] = []
-        if !state.textBuffer.isEmpty || !state.reasoningContentBuffer.isEmpty {
-            var messageItem: [String: Any] = [
+        if state.reasoningItemAdded {
+            output.append([
+                "id": "reason_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
+                "type": "reasoning",
+                "content": [[
+                    "type": "output_text",
+                    "text": state.reasoningContentBuffer,
+                ]],
+            ])
+        }
+        if !state.textBuffer.isEmpty || !state.reasoningItemAdded {
+            let messageItem: [String: Any] = [
+                "id": state.textItemID,
                 "type": "message",
                 "role": "assistant",
-                "content": state.textBuffer.isEmpty ? [] : [[
+                "content": [[
                     "type": "output_text",
                     "text": state.textBuffer,
                 ]],
             ]
-            if !state.reasoningContentBuffer.isEmpty {
-                messageItem["reasoning_content"] = state.reasoningContentBuffer
-            }
             output.append(messageItem)
         }
-        for (position, index) in state.toolCalls.keys.sorted().enumerated() {
+        for index in state.toolCalls.keys.sorted() {
             guard let tool = state.toolCalls[index], tool.added else { continue }
-            var functionItem: [String: Any] = [
+            let functionItem: [String: Any] = [
                 "type": "function_call",
                 "id": tool.itemID,
                 "call_id": tool.callID,
                 "name": tool.name,
                 "arguments": tool.argumentsBuffer,
             ]
-            if state.textBuffer.isEmpty, position == 0, !state.reasoningContentBuffer.isEmpty {
-                functionItem["reasoning_content"] = state.reasoningContentBuffer
-            }
             output.append(functionItem)
         }
         let usage = UpstreamUsage(
@@ -1118,7 +1257,7 @@ public enum ProxyTranscoder {
             totalTokens: state.inputTokens + state.outputTokens,
             cacheHitTokens: state.cacheHitTokens
         )
-        return [
+        var response: [String: Any] = [
             "id": state.responseID,
             "object": "response",
             "created_at": state.createdAt,
@@ -1127,6 +1266,10 @@ public enum ProxyTranscoder {
             "output": output,
             "usage": self.completedUsageObject(usage),
         ]
+        if let input {
+            response["input"] = input
+        }
+        return response
     }
 
     private static func stringValue(_ value: Any?) -> String {
@@ -1145,80 +1288,10 @@ public enum ProxyTranscoder {
         return ""
     }
 
-    private static func chatCompletionAssistantMessage(
-        fromCompletedResponse completedResponse: [String: Any]
-    ) -> [String: Any]? {
-        let output = completedResponse["output"] as? [[String: Any]] ?? []
-        let assistantText = self.extractAssistantText(from: completedResponse)
-        let toolCalls = output.compactMap { item -> [String: Any]? in
-            guard (item["type"] as? String) == "function_call" else { return nil }
-            let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
-            return [
-                "id": callID,
-                "type": "function",
-                "function": [
-                    "name": item["name"] as? String ?? "tool",
-                    "arguments": item["arguments"] as? String ?? "",
-                ],
-            ]
-        }
-
-        guard !assistantText.isEmpty || !toolCalls.isEmpty || self.reasoningContent(fromCompletedResponse: completedResponse) != nil else {
-            return nil
-        }
-
-        var message: [String: Any] = [
-            "role": "assistant",
-            "content": assistantText.isEmpty && !toolCalls.isEmpty ? NSNull() : assistantText,
-        ]
-        if !toolCalls.isEmpty {
-            message["tool_calls"] = toolCalls
-        }
-        if let reasoningContent = self.reasoningContent(fromCompletedResponse: completedResponse) {
-            message["reasoning_content"] = reasoningContent
-        }
-        return message
-    }
-
-    private static func reasoningContent(fromCompletedResponse completedResponse: [String: Any]) -> String? {
-        let output = completedResponse["output"] as? [[String: Any]] ?? []
-        for item in output {
-            if let reasoningContent = self.trimmedString(item["reasoning_content"]) {
-                return reasoningContent
-            }
-        }
-        return nil
-    }
-
     private static func trimmedString(_ value: Any?) -> String? {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func canonicalJSONString(_ value: Any?) -> String? {
-        guard let value else { return nil }
-        if value is NSNull {
-            return "null"
-        }
-        if let string = value as? String {
-            return "\"\(string)\""
-        }
-        if let number = value as? NSNumber {
-            return number.stringValue
-        }
-        if let array = value as? [Any] {
-            return "[\(array.compactMap(self.canonicalJSONString).joined(separator: ","))]"
-        }
-        if let object = value as? [String: Any] {
-            let pairs = object.keys.sorted().compactMap { key -> String? in
-                guard let encodedValue = self.canonicalJSONString(object[key]) else { return nil }
-                return "\"\(key)\":\(encodedValue)"
-            }
-            return "{\(pairs.joined(separator: ","))}"
-        }
-        return nil
     }
 
     public static func mapClientModel(
@@ -1362,6 +1435,113 @@ public enum ProxyTranscoder {
         }
     }
 
+    private static func syntheticToolCallChunks(
+        state: inout OpenAIChatSyntheticToolCallState,
+        latestArgumentsDelta: String?,
+        forceAdded: Bool = false
+    ) -> [String] {
+        var chunks: [String] = []
+        if !state.added {
+            guard state.hasName || forceAdded else {
+                return chunks
+            }
+            state.added = true
+            chunks.append(
+                self.sseData([
+                    "type": "response.output_item.added",
+                    "output_index": state.outputIndex,
+                    "item": [
+                        "id": state.itemID,
+                        "type": "function_call",
+                        "call_id": state.callID,
+                        "name": state.name,
+                        "arguments": "",
+                    ],
+                ])
+            )
+            let pendingArguments = String(state.argumentsBuffer.dropFirst(state.emittedArgumentsLength))
+            if !pendingArguments.isEmpty {
+                chunks.append(
+                    self.sseData([
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": state.outputIndex,
+                        "item_id": state.itemID,
+                        "delta": pendingArguments,
+                    ])
+                )
+                state.emittedArgumentsLength = state.argumentsBuffer.count
+            }
+            return chunks
+        }
+
+        if let latestArgumentsDelta, !latestArgumentsDelta.isEmpty {
+            chunks.append(
+                self.sseData([
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": state.outputIndex,
+                    "item_id": state.itemID,
+                    "delta": latestArgumentsDelta,
+                ])
+            )
+            state.emittedArgumentsLength = state.argumentsBuffer.count
+        }
+        return chunks
+    }
+
+    private static func initialSyntheticResponseSSEChunks(
+        state: inout OpenAIChatSyntheticStreamState,
+        requestedModel: String,
+        input: Any? = nil
+    ) -> [String] {
+        var chunks: [String] = []
+        if !state.seenCreated {
+            state.seenCreated = true
+            chunks.append(
+                self.sseData([
+                    "type": "response.created",
+                    "response": self.syntheticInProgressResponse(
+                        state: state,
+                        requestedModel: requestedModel,
+                        input: input
+                    ),
+                ])
+            )
+        }
+        if !state.seenInProgress {
+            state.seenInProgress = true
+            chunks.append(
+                self.sseData([
+                    "type": "response.in_progress",
+                    "response": self.syntheticInProgressResponse(
+                        state: state,
+                        requestedModel: requestedModel,
+                        input: input
+                    ),
+                ])
+            )
+        }
+        return chunks
+    }
+
+    private static func syntheticInProgressResponse(
+        state: OpenAIChatSyntheticStreamState,
+        requestedModel: String,
+        input: Any? = nil
+    ) -> [String: Any] {
+        var response: [String: Any] = [
+            "id": state.responseID,
+            "object": "response",
+            "created_at": state.createdAt,
+            "status": "in_progress",
+            "model": requestedModel,
+            "output": [],
+        ]
+        if let input {
+            response["input"] = input
+        }
+        return response
+    }
+
     private static func sseData(_ object: [String: Any]) -> String {
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [])) ?? Data("{}".utf8)
         return "data: \(String(decoding: data, as: UTF8.self))\n\n"
@@ -1485,27 +1665,36 @@ public struct ChatCompletionToolCallState: Sendable, Equatable {
 
 public struct OpenAIChatSyntheticToolCallState: Sendable, Equatable {
     public var index: Int
+    public var outputIndex: Int
     public var itemID: String
     public var callID: String
     public var name: String
     public var argumentsBuffer: String
+    public var emittedArgumentsLength: Int
     public var added: Bool
+    public var hasName: Bool
 
     public init(
         index: Int,
+        outputIndex: Int? = nil,
         itemID: String? = nil,
         callID: String? = nil,
         name: String = "tool",
         argumentsBuffer: String = "",
-        added: Bool = false
+        emittedArgumentsLength: Int = 0,
+        added: Bool = false,
+        hasName: Bool? = nil
     ) {
         self.index = index
+        self.outputIndex = outputIndex ?? (index + 1)
         let resolvedCallID = callID ?? "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         self.callID = resolvedCallID
-        self.itemID = itemID ?? "fc_\(resolvedCallID)"
+        self.itemID = itemID ?? resolvedCallID
         self.name = name
         self.argumentsBuffer = argumentsBuffer
+        self.emittedArgumentsLength = emittedArgumentsLength
         self.added = added
+        self.hasName = hasName ?? (name != "tool")
     }
 }
 
@@ -1518,7 +1707,14 @@ public struct OpenAIChatSyntheticStreamState: Sendable, Equatable {
     public var textBuffer: String
     public var reasoningContentBuffer: String
     public var toolCalls: [Int: OpenAIChatSyntheticToolCallState]
+    public var textItemID: String
+    public var reasoningItemID: String
     public var seenCreated: Bool
+    public var seenInProgress: Bool
+    public var textItemAdded: Bool
+    public var textContentPartAdded: Bool
+    public var reasoningItemAdded: Bool
+    public var isCompleted: Bool
 
     public init(
         responseID: String = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
@@ -1529,7 +1725,14 @@ public struct OpenAIChatSyntheticStreamState: Sendable, Equatable {
         textBuffer: String = "",
         reasoningContentBuffer: String = "",
         toolCalls: [Int: OpenAIChatSyntheticToolCallState] = [:],
-        seenCreated: Bool = false
+        textItemID: String = "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
+        reasoningItemID: String = "reason_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
+        seenCreated: Bool = false,
+        seenInProgress: Bool = false,
+        textItemAdded: Bool = false,
+        textContentPartAdded: Bool = false,
+        reasoningItemAdded: Bool = false,
+        isCompleted: Bool = false
     ) {
         self.responseID = responseID
         self.createdAt = createdAt
@@ -1539,7 +1742,14 @@ public struct OpenAIChatSyntheticStreamState: Sendable, Equatable {
         self.textBuffer = textBuffer
         self.reasoningContentBuffer = reasoningContentBuffer
         self.toolCalls = toolCalls
+        self.textItemID = textItemID
+        self.reasoningItemID = reasoningItemID
         self.seenCreated = seenCreated
+        self.seenInProgress = seenInProgress
+        self.textItemAdded = textItemAdded
+        self.textContentPartAdded = textContentPartAdded
+        self.reasoningItemAdded = reasoningItemAdded
+        self.isCompleted = isCompleted
     }
 }
 

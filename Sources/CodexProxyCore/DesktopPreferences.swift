@@ -201,7 +201,6 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelEndpoint
     case labelUpstreamURL
     case labelUpstreamAdapter
-    case labelThinkingCompatibility
     case labelOpenAIBaseURL
     case labelAPIKey
     case labelAllowedAccounts
@@ -459,7 +458,6 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperAutomaticCooldownPolicy
     case helperManualAccountGenericOpenAICompatible
     case helperManualAccountUpstreamAdapter
-    case helperManualAccountThinkingCompatibility
     case helperManualAccountAliyunCodingPlan
     case helperManualAccountAnthropicAPICompatible
     case helperManualAccountGoogleGeminiCompatible
@@ -576,8 +574,6 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case optionResponses
     case optionUpstreamAdapterChatCompletions
     case optionUpstreamAdapterResponses
-    case optionThinkingCompatibilityDisabled
-    case optionThinkingCompatibilityEnabled
     case optionAnthropicMessages
     case optionGeminiGenerateContent
     case optionAutoSelectByOrder
@@ -1922,7 +1918,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelInterface: "Interface",
             .labelUpstreamURL: "Upstream URL",
             .labelUpstreamAdapter: "Upstream Interface",
-            .labelThinkingCompatibility: "Thinking Compatibility",
             .labelStream: "Stream",
             .labelToolsJSON: "Tools JSON",
             .labelSystemPrompt: "System Prompt",
@@ -2160,7 +2155,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "When disabled, this API key account keeps participating in routing even if its upstream returns intermittent errors.",
             .helperManualAccountGenericOpenAICompatible: "Use the standard OpenAI-compatible flow. Enter the final upstream API prefix exactly as your provider expects, including `/v1` when needed, and Codex Proxy will use it as-is. Choose Responses for providers that support the OpenAI Responses API, or Chat Completions for providers that only expose `/chat/completions`. If you're using Google's official Gemini compatibility root, switch Provider to `Google Gemini Compatible` instead.",
             .helperManualAccountUpstreamAdapter: "Responses is the default. Choose Chat Completions when the upstream provider does not support `/responses`.",
-            .helperManualAccountThinkingCompatibility: "Default off. Enable only for providers that require `thinking` and `reasoning_content` to be preserved across tool-call turns; providers that do not support this field should keep it disabled.",
             .helperManualAccountAliyunCodingPlan: "Use Aliyun Bailian / Qwen Coding Plan compatibility mode. Validation and runtime requests switch to an agent-style `chat/completions` path so existing local proxy clients can keep working without changing their own request format.",
             .helperManualAccountAnthropicAPICompatible: "Use Anthropic's native API key flow. Validation first checks `/v1/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `/v1/messages`. Runtime requests use the official `/v1/messages` and `/v1/messages/count_tokens` paths with `x-api-key` authentication.",
             .helperManualAccountGoogleGeminiCompatible: "Use Google's official Gemini OpenAI compatibility root with a Gemini API key from Google AI Studio. This preset is for API-key compatibility traffic, not for the official Gemini CLI route. Validation first checks `/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `chat/completions`. Runtime requests use `chat/completions` compatibility mode.",
@@ -2277,8 +2271,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionResponses: "Responses",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
-            .optionThinkingCompatibilityDisabled: "Disabled",
-            .optionThinkingCompatibilityEnabled: "Enabled",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",
             .optionAutoSelectByOrder: "Auto Select (By Order)",
@@ -2521,7 +2513,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelInterface: "接口",
             .labelUpstreamURL: "上游地址",
             .labelUpstreamAdapter: "上游接入方式",
-            .labelThinkingCompatibility: "Thinking 兼容",
             .labelStream: "流式",
             .labelToolsJSON: "Tools JSON",
             .labelSystemPrompt: "System Prompt",
@@ -2759,7 +2750,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "禁用后，即使上游偶发报错，这个 API Key 账号也会继续参与路由，不会被自动冷却跳过。",
             .helperManualAccountGenericOpenAICompatible: "使用标准 OpenAI 兼容模式。请直接填写上游要求的最终 API 前缀；如果对方要求带 `/v1`，这里就保留 `/v1`，后续会按你填写的前缀原样请求。支持 Responses API 的厂商选 Responses；只提供 `/chat/completions` 的厂商选 Chat Completions。如果你填的是 Google 官方 Gemini OpenAI 兼容根地址，请改选 `Google Gemini Compatible`。",
             .helperManualAccountUpstreamAdapter: "默认使用 Responses。如果上游厂商不支持 `/responses`，请选择 Chat Completions。",
-            .helperManualAccountThinkingCompatibility: "默认关闭。仅当上游要求发送 `thinking`，并要求在工具调用多轮里回传 `reasoning_content` 时开启；不支持该字段的兼容厂商请保持关闭。",
             .helperManualAccountAliyunCodingPlan: "使用阿里百炼 / Qwen Coding Plan 兼容模式。校验和运行时都会改走更接近 Coding Agent 的 `chat/completions` 链路，让现有本地代理客户端在不改请求格式的前提下尽量保持可用。",
             .helperManualAccountAnthropicAPICompatible: "使用 Anthropic 原生 API Key 模式。连通性校验会先尝试 `/v1/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `/v1/messages` 探针。运行时使用官方 `/v1/messages` 和 `/v1/messages/count_tokens` 链路，并通过 `x-api-key` 鉴权。",
             .helperManualAccountGoogleGeminiCompatible: "使用 Google 官方 Gemini OpenAI 兼容根地址，并填写 Google AI Studio 生成的 Gemini API key。这个 preset 只用于 API key 兼容流量，不再作为官方 Gemini CLI 的后端路径。连通性校验会先尝试 `/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `chat/completions` 探针。运行时改走 `chat/completions` 兼容链路。",
@@ -2876,8 +2866,6 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionResponses: "Responses",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
-            .optionThinkingCompatibilityDisabled: "关闭",
-            .optionThinkingCompatibilityEnabled: "开启",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",
             .optionAutoSelectByOrder: "自动选择（按排序）",

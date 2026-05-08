@@ -85,8 +85,7 @@ public final class AccountService: @unchecked Sendable {
                 apiKey: input.apiKey,
                 providerPreset: input.providerPreset,
                 baseURLMode: input.baseURLMode,
-                upstreamAdapter: input.upstreamAdapter,
-                upstreamThinkingCompatibility: input.upstreamThinkingCompatibility
+                upstreamAdapter: input.upstreamAdapter
             )
         } catch {
             throw ProxyError.message("手动添加 API Key 账号失败：规范化根地址或密钥时出错，\(error.localizedDescription)")
@@ -147,7 +146,6 @@ public final class AccountService: @unchecked Sendable {
             ),
             baseURLMode: extracted.baseURLMode,
             upstreamAdapter: extracted.upstreamAdapter,
-            upstreamThinkingCompatibility: extracted.upstreamThinkingCompatibility,
             apiKey: extracted.accessToken,
             enabled: record.enabled,
             automaticCooldownDisabled: record.automaticCooldownDisabled
@@ -177,8 +175,7 @@ public final class AccountService: @unchecked Sendable {
                 apiKey: input.apiKey,
                 providerPreset: input.providerPreset,
                 baseURLMode: input.baseURLMode,
-                upstreamAdapter: input.upstreamAdapter,
-                upstreamThinkingCompatibility: input.upstreamThinkingCompatibility
+                upstreamAdapter: input.upstreamAdapter
             )
         } catch {
             throw ProxyError.message("编辑 API Key 账号失败：规范化根地址或密钥时出错，\(error.localizedDescription)")
@@ -394,8 +391,7 @@ public final class AccountService: @unchecked Sendable {
         apiKey: String,
         providerPreset: OpenAICompatibleProviderPreset,
         baseURLMode: ManualAPIKeyBaseURLMode?,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
-        upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?
     ) throws -> String {
         let effectiveBaseURLMode: ManualAPIKeyBaseURLMode? = providerPreset == .genericOpenAICompatible
             ? (baseURLMode ?? .exactAPIPrefix)
@@ -406,17 +402,12 @@ public final class AccountService: @unchecked Sendable {
         } else {
             effectiveUpstreamAdapter = nil
         }
-        let effectiveThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? =
-            providerPreset == .genericOpenAICompatible && effectiveUpstreamAdapter == .chatCompletions
-                ? (upstreamThinkingCompatibility ?? .disabled)
-                : nil
         let authJSON = try AuthService.normalizeManualAPIKeyInput(
             baseURL: baseURL,
             apiKey: apiKey,
             providerPreset: providerPreset,
             baseURLMode: effectiveBaseURLMode,
-            upstreamAdapter: effectiveUpstreamAdapter,
-            upstreamThinkingCompatibility: effectiveThinkingCompatibility
+            upstreamAdapter: effectiveUpstreamAdapter
         )
         let extracted = try AuthService.extractAuth(from: authJSON, secretStore: self.secretStore)
         if let error = OpenAICompatibleUpstream.configurationError(

@@ -121,10 +121,6 @@ public enum Paths {
         dataDirectory.appendingPathComponent("client-config-backups", isDirectory: true)
     }
 
-    public static func chatCompletionsReasoningContentCacheURL(in dataDirectory: URL) -> URL {
-        dataDirectory.appendingPathComponent("chat-completions-reasoning-content-cache.json")
-    }
-
 }
 
 public enum RuntimeInfo {

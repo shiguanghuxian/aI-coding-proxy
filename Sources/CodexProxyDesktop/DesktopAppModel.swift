@@ -125,7 +125,6 @@ final class DesktopAppModel: ObservableObject {
         var providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible
         var baseURL = OpenAICompatibleProviderPreset.genericOpenAICompatible.defaultBaseURL
         var upstreamAdapter: ManualAPIKeyUpstreamAdapter = .responses
-        var upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode = .disabled
         var apiKey = ""
         var enabled = true
         var automaticCooldownDisabled = false
@@ -1522,7 +1521,6 @@ final class DesktopAppModel: ObservableObject {
                 providerPreset: details.providerPreset,
                 baseURL: details.baseURL,
                 upstreamAdapter: details.upstreamAdapter ?? .responses,
-                upstreamThinkingCompatibility: details.upstreamThinkingCompatibility ?? .disabled,
                 apiKey: details.apiKey,
                 enabled: details.enabled,
                 automaticCooldownDisabled: details.automaticCooldownDisabled,
@@ -1891,15 +1889,6 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
-    func manualAPIKeyThinkingCompatibilityText(_ mode: ManualAPIKeyThinkingCompatibilityMode) -> String {
-        switch mode {
-        case .disabled:
-            return self.text(.optionThinkingCompatibilityDisabled)
-        case .enabled:
-            return self.text(.optionThinkingCompatibilityEnabled)
-        }
-    }
-
     func manualAPIKeyBaseURLPlaceholder(for preset: OpenAICompatibleProviderPreset) -> String {
         switch preset {
         case .genericOpenAICompatible:
@@ -1925,9 +1914,6 @@ final class DesktopAppModel: ObservableObject {
         updated.providerPreset = providerPreset
         if providerPreset != .genericOpenAICompatible {
             updated.upstreamAdapter = .responses
-            updated.upstreamThinkingCompatibility = .disabled
-        } else if updated.upstreamAdapter != .chatCompletions {
-            updated.upstreamThinkingCompatibility = .disabled
         }
 
         let currentBaseURL = updated.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1949,14 +1935,10 @@ final class DesktopAppModel: ObservableObject {
         var updated = draft
         guard updated.providerPreset == .genericOpenAICompatible else {
             updated.upstreamAdapter = .responses
-            updated.upstreamThinkingCompatibility = .disabled
             return updated
         }
 
         updated.upstreamAdapter = upstreamAdapter
-        if upstreamAdapter != .chatCompletions {
-            updated.upstreamThinkingCompatibility = .disabled
-        }
         return updated
     }
 
@@ -3184,7 +3166,7 @@ final class DesktopAppModel: ObservableObject {
 
     private func preparedManualAPIKeySavePayload(
         from draft: ManualAPIKeyDraft
-    ) -> (label: String?, baseURL: String, baseURLMode: ManualAPIKeyBaseURLMode?, upstreamAdapter: ManualAPIKeyUpstreamAdapter?, upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode?, apiKey: String)? {
+    ) -> (label: String?, baseURL: String, baseURLMode: ManualAPIKeyBaseURLMode?, upstreamAdapter: ManualAPIKeyUpstreamAdapter?, apiKey: String)? {
         let trimmedAPIKey = draft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedAPIKey.isEmpty == false else {
             self.publishBanner(.warning, title: self.text(.errorAccountManagementFailed), detail: self.text(.helperManualAccountAPIKeyRequired))
@@ -3233,16 +3215,11 @@ final class DesktopAppModel: ObservableObject {
         } else {
             upstreamAdapter = nil
         }
-        let upstreamThinkingCompatibility: ManualAPIKeyThinkingCompatibilityMode? =
-            draft.providerPreset == .genericOpenAICompatible && draft.upstreamAdapter == .chatCompletions
-                ? draft.upstreamThinkingCompatibility
-                : nil
         return (
             trimmedLabel.isEmpty ? nil : trimmedLabel,
             normalizedBaseURL,
             baseURLMode,
             upstreamAdapter,
-            upstreamThinkingCompatibility,
             trimmedAPIKey
         )
     }
@@ -3263,7 +3240,6 @@ final class DesktopAppModel: ObservableObject {
                     baseURL: payload.baseURL,
                     baseURLMode: payload.baseURLMode,
                     upstreamAdapter: payload.upstreamAdapter,
-                    upstreamThinkingCompatibility: payload.upstreamThinkingCompatibility,
                     apiKey: payload.apiKey,
                     enabled: draft.enabled,
                     automaticCooldownDisabled: draft.automaticCooldownDisabled
@@ -3279,7 +3255,6 @@ final class DesktopAppModel: ObservableObject {
                 baseURL: payload.baseURL,
                 baseURLMode: payload.baseURLMode,
                 upstreamAdapter: payload.upstreamAdapter,
-                upstreamThinkingCompatibility: payload.upstreamThinkingCompatibility,
                 apiKey: payload.apiKey,
                 enabled: draft.enabled,
                 automaticCooldownDisabled: draft.automaticCooldownDisabled

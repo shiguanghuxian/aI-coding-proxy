@@ -7713,13 +7713,12 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
-    func testManualAPIKeyDraftUpstreamAdapterSwitchesBackToResponsesAndClearsThinkingCompatibility() {
+    func testManualAPIKeyDraftUpstreamAdapterSwitchesBackToResponses() {
         let model = DesktopAppModel()
         let chatDraft = DesktopAppModel.ManualAPIKeyDraft(
             providerPreset: .genericOpenAICompatible,
             baseURL: "https://api.example.com",
             upstreamAdapter: .chatCompletions,
-            upstreamThinkingCompatibility: .enabled,
             apiKey: "sk-test"
         )
 
@@ -7729,7 +7728,6 @@ final class CodexProxyDesktopTests: XCTestCase {
         )
 
         XCTAssertEqual(responsesDraft.upstreamAdapter, .responses)
-        XCTAssertEqual(responsesDraft.upstreamThinkingCompatibility, .disabled)
 
         let chatAgainDraft = model.manualAPIKeyDraft(
             responsesDraft,
@@ -7738,7 +7736,6 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         XCTAssertEqual(chatAgainDraft.providerPreset, .genericOpenAICompatible)
         XCTAssertEqual(chatAgainDraft.upstreamAdapter, .chatCompletions)
-        XCTAssertEqual(chatAgainDraft.upstreamThinkingCompatibility, .disabled)
     }
 
     @MainActor
@@ -8199,7 +8196,6 @@ final class CodexProxyDesktopTests: XCTestCase {
                 baseURL: "https://example.com/updated",
                 baseURLMode: .exactAPIPrefix,
                 upstreamAdapter: .chatCompletions,
-                upstreamThinkingCompatibility: .disabled,
                 apiKey: "sk-original",
                 enabled: false,
                 automaticCooldownDisabled: true
@@ -8217,44 +8213,7 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
-    func testSubmitManualAPIKeyAccountSendsThinkingCompatibilityWhenEnabled() async {
-        let updatedAccount = Self.makeAccount(
-            id: "api-thinking-account",
-            label: "Thinking API",
-            accountID: "acct-thinking",
-            authMode: .openAIAPIKey,
-            upstreamBaseURL: "https://api.deepseek.com"
-        )
-        let probe = ManualAPIKeyUpdateProbe()
-        let admin = AdminAPIClient(
-            accountsHandler: { [updatedAccount] in [updatedAccount] },
-            updateManualAPIKeyAccountHandler: { id, input in
-                await probe.record(id: id, input: input)
-                return updatedAccount
-            }
-        )
-        let model = DesktopAppModel(admin: admin)
-        model.manualAPIKeyDraft = DesktopAppModel.ManualAPIKeyDraft(
-            label: "Thinking API",
-            baseURL: "https://api.deepseek.com",
-            upstreamAdapter: .chatCompletions,
-            upstreamThinkingCompatibility: .enabled,
-            apiKey: "sk-thinking",
-            enabled: true,
-            editingAccountID: updatedAccount.id,
-            originalAccountKey: "key-thinking"
-        )
-
-        await model.submitManualAPIKeyAccount()
-
-        let snapshot = await probe.snapshot()
-        XCTAssertEqual(snapshot.id, updatedAccount.id)
-        XCTAssertEqual(snapshot.input?.upstreamAdapter, .chatCompletions)
-        XCTAssertEqual(snapshot.input?.upstreamThinkingCompatibility, .enabled)
-    }
-
-    @MainActor
-    func testSubmitManualAPIKeyAccountDropsThinkingCompatibilityForResponsesAdapter() async {
+    func testSubmitManualAPIKeyAccountSendsOnlyUpstreamAdapter() async {
         let updatedAccount = Self.makeAccount(
             id: "api-responses-account",
             label: "Responses API",
@@ -8275,7 +8234,6 @@ final class CodexProxyDesktopTests: XCTestCase {
             label: "Responses API",
             baseURL: "https://api.example.com",
             upstreamAdapter: .responses,
-            upstreamThinkingCompatibility: .enabled,
             apiKey: "sk-responses",
             enabled: true,
             editingAccountID: updatedAccount.id,
@@ -8287,7 +8245,6 @@ final class CodexProxyDesktopTests: XCTestCase {
         let snapshot = await probe.snapshot()
         XCTAssertEqual(snapshot.id, updatedAccount.id)
         XCTAssertEqual(snapshot.input?.upstreamAdapter, .responses)
-        XCTAssertNil(snapshot.input?.upstreamThinkingCompatibility)
     }
 
     @MainActor
@@ -9629,7 +9586,6 @@ final class CodexProxyDesktopTests: XCTestCase {
                     baseURL: "https://api.deepseek.com",
                     baseURLMode: .exactAPIPrefix,
                     upstreamAdapter: .chatCompletions,
-                    upstreamThinkingCompatibility: .enabled,
                     apiKey: "sk-chat-adapter",
                     enabled: true
                 )
@@ -9642,7 +9598,6 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.manualAPIKeyDraft?.editingAccountID, manualAccount.id)
         XCTAssertEqual(model.manualAPIKeyDraft?.providerPreset, .genericOpenAICompatible)
         XCTAssertEqual(model.manualAPIKeyDraft?.upstreamAdapter, .chatCompletions)
-        XCTAssertEqual(model.manualAPIKeyDraft?.upstreamThinkingCompatibility, .enabled)
         XCTAssertEqual(model.manualAPIKeyDraft?.apiKey, "sk-chat-adapter")
     }
 
