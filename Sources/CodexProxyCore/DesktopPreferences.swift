@@ -28,6 +28,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
     public var interfaceMode: DesktopInterfaceMode
     public var accountPoolDisplayMode: DesktopAccountPoolDisplayMode
     public var showsMenuBarTokenUsage: Bool
+    public var automaticUpdateChecksEnabled: Bool
+    public var lastUpdateCheckAt: Date?
     public var hasSeenHelpWindow: Bool
     public var hasAutoPresentedOnboardingAfterHelp: Bool
 
@@ -37,6 +39,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
         interfaceMode: DesktopInterfaceMode = .minimal,
         accountPoolDisplayMode: DesktopAccountPoolDisplayMode = .cards,
         showsMenuBarTokenUsage: Bool = true,
+        automaticUpdateChecksEnabled: Bool = true,
+        lastUpdateCheckAt: Date? = nil,
         hasSeenHelpWindow: Bool = false,
         hasAutoPresentedOnboardingAfterHelp: Bool = false
     ) {
@@ -45,6 +49,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
         self.interfaceMode = interfaceMode
         self.accountPoolDisplayMode = accountPoolDisplayMode
         self.showsMenuBarTokenUsage = showsMenuBarTokenUsage
+        self.automaticUpdateChecksEnabled = automaticUpdateChecksEnabled
+        self.lastUpdateCheckAt = lastUpdateCheckAt
         self.hasSeenHelpWindow = hasSeenHelpWindow
         self.hasAutoPresentedOnboardingAfterHelp = hasAutoPresentedOnboardingAfterHelp
     }
@@ -55,6 +61,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
         case interfaceMode
         case accountPoolDisplayMode
         case showsMenuBarTokenUsage
+        case automaticUpdateChecksEnabled
+        case lastUpdateCheckAt
         case hasSeenHelpWindow
         case hasAutoPresentedOnboardingAfterHelp
     }
@@ -67,6 +75,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
             interfaceMode: try container.decodeIfPresent(DesktopInterfaceMode.self, forKey: .interfaceMode) ?? .full,
             accountPoolDisplayMode: try container.decodeIfPresent(DesktopAccountPoolDisplayMode.self, forKey: .accountPoolDisplayMode) ?? .cards,
             showsMenuBarTokenUsage: try container.decodeIfPresent(Bool.self, forKey: .showsMenuBarTokenUsage) ?? true,
+            automaticUpdateChecksEnabled: try container.decodeIfPresent(Bool.self, forKey: .automaticUpdateChecksEnabled) ?? true,
+            lastUpdateCheckAt: try container.decodeIfPresent(Date.self, forKey: .lastUpdateCheckAt),
             hasSeenHelpWindow: try container.decodeIfPresent(Bool.self, forKey: .hasSeenHelpWindow) ?? false,
             hasAutoPresentedOnboardingAfterHelp: try container.decodeIfPresent(Bool.self, forKey: .hasAutoPresentedOnboardingAfterHelp) ?? false
         )
@@ -79,6 +89,8 @@ public struct DesktopPreferences: Codable, Sendable, Equatable {
         try container.encode(self.interfaceMode, forKey: .interfaceMode)
         try container.encode(self.accountPoolDisplayMode, forKey: .accountPoolDisplayMode)
         try container.encode(self.showsMenuBarTokenUsage, forKey: .showsMenuBarTokenUsage)
+        try container.encode(self.automaticUpdateChecksEnabled, forKey: .automaticUpdateChecksEnabled)
+        try container.encodeIfPresent(self.lastUpdateCheckAt, forKey: .lastUpdateCheckAt)
         try container.encode(self.hasSeenHelpWindow, forKey: .hasSeenHelpWindow)
         try container.encode(self.hasAutoPresentedOnboardingAfterHelp, forKey: .hasAutoPresentedOnboardingAfterHelp)
     }

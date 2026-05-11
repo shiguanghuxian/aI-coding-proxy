@@ -32,6 +32,7 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmStopAccountCooldownHandler = (AccountCooldownStopConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
+    typealias ConfirmInstallUpdateHandler = (AppUpdatePackage) -> AppUpdatePromptDecision
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
     typealias RemoteAdminWindowFactory = (
         RemoteHostConfig,
@@ -443,6 +444,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var proxyAPIKeyUsageReport = ProxyAPIKeyUsageReport(from: 0, to: 0)
     @Published var proxyAPIKeyUsageIsRefreshing = false
     @Published var isProxyUsageRangePickerPresented = false
+    @Published var appUpdateStatus: AppUpdateStatus = .idle
 
     let admin: AdminAPIClient
     let daemon: LocalDaemonController
@@ -457,6 +459,11 @@ final class DesktopAppModel: ObservableObject {
     private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
+    let confirmInstallUpdateHandler: ConfirmInstallUpdateHandler?
+    let appUpdateService: any AppUpdateServicing
+    let appUpdateInstaller: any AppUpdateInstalling
+    var appUpdateCurrentAppURLProvider: () -> URL?
+    let appUpdateTerminateHandler: () -> Void
     let clientConfigManagerWindowFactory: ClientConfigManagerWindowFactory
     private let remoteAdminWindowFactory: RemoteAdminWindowFactory
     let aboutWindowFactory: (DesktopAppModel) -> AboutWindowControlling
@@ -494,6 +501,9 @@ final class DesktopAppModel: ObservableObject {
     private let remoteManagementRevealResetInterval: TimeInterval = 1.5
     private var suppressSelectedRemoteHostChangeSideEffects = false
     private var remoteWorkflowAutomationTask: Task<Void, Never>?
+    var appUpdateTask: Task<Void, Never>?
+    var appUpdateNowProvider: () -> Date = { Date() }
+    var appUpdateAutoCheckInterval: TimeInterval = 24 * 60 * 60
 
     init(
         admin: AdminAPIClient = AdminAPIClient(),
@@ -504,6 +514,10 @@ final class DesktopAppModel: ObservableObject {
         clientConfigFileService: ClientConfigFileService = ClientConfigFileService(),
         preferencesStore: DesktopPreferencesStore = DesktopPreferencesStore(),
         keepAwakeController: any DesktopKeepAwakeControlling = DesktopKeepAwakeController(),
+        appUpdateService: any AppUpdateServicing = AppUpdateService(),
+        appUpdateInstaller: any AppUpdateInstalling = AppUpdateInstaller(),
+        appUpdateCurrentAppURLProvider: @escaping () -> URL? = { Bundle.main.bundleURL },
+        appUpdateTerminateHandler: @escaping () -> Void = { NSApp.terminate(nil) },
         clientConfigManagerWindowFactory: @escaping ClientConfigManagerWindowFactory = { ClientConfigManagerWindowController(model: $0) },
         remoteAdminWindowFactory: @escaping RemoteAdminWindowFactory = {
             RemoteAdminWindowController(
@@ -521,7 +535,8 @@ final class DesktopAppModel: ObservableObject {
         confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler? = nil,
         confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
-        confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil
+        confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil,
+        confirmInstallUpdateHandler: ConfirmInstallUpdateHandler? = nil
     ) {
         self.admin = admin
         self.daemon = daemon
@@ -531,6 +546,10 @@ final class DesktopAppModel: ObservableObject {
         self.clientConfigFileService = clientConfigFileService
         self.preferencesStore = preferencesStore
         self.keepAwakeController = keepAwakeController
+        self.appUpdateService = appUpdateService
+        self.appUpdateInstaller = appUpdateInstaller
+        self.appUpdateCurrentAppURLProvider = appUpdateCurrentAppURLProvider
+        self.appUpdateTerminateHandler = appUpdateTerminateHandler
         self.clientConfigManagerWindowFactory = clientConfigManagerWindowFactory
         self.remoteAdminWindowFactory = remoteAdminWindowFactory
         self.aboutWindowFactory = aboutWindowFactory
@@ -541,6 +560,7 @@ final class DesktopAppModel: ObservableObject {
         self.confirmStopAccountCooldownHandler = confirmStopAccountCooldownHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
+        self.confirmInstallUpdateHandler = confirmInstallUpdateHandler
         self.preferences = preferencesStore.load()
         self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
         self.isKeepAwakeEnabled = keepAwakeController.isEnabled

@@ -14,6 +14,7 @@ struct AboutView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     AboutHeroCard(model: self.model)
+                    AboutUpdateCard(model: self.model)
 
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .top, spacing: 16) {
@@ -191,6 +192,106 @@ private struct AboutOverviewCard: View {
 
     private var palette: AppearancePalette {
         AppearanceStore.palette(for: self.colorScheme)
+    }
+}
+
+private struct AboutUpdateCard: View {
+    @ObservedObject var model: DesktopAppModel
+
+    private let columns = [GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 10)]
+
+    var body: some View {
+        SectionCard(
+            title: self.model.appUpdateTitle,
+            subtitle: self.model.appUpdateSummaryText,
+            accessory: StatusPill(
+                text: self.model.appUpdateStatusPillText,
+                tone: self.model.appUpdateStatusPillTone
+            ),
+            compact: false
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                LazyVGrid(columns: self.columns, spacing: 10) {
+                    MetricTile(
+                        label: self.model.localized(zh: "当前版本", en: "Current Version"),
+                        value: self.model.appUpdateCurrentVersionText,
+                        tone: .neutral,
+                        symbol: "shippingbox.fill",
+                        compact: true
+                    )
+                    MetricTile(
+                        label: self.model.localized(zh: "最新版本", en: "Latest Version"),
+                        value: self.model.appUpdateLatestVersionText,
+                        tone: .accent,
+                        symbol: "arrow.down.circle.fill",
+                        compact: true
+                    )
+                    MetricTile(
+                        label: self.model.localized(zh: "自动检查", en: "Auto Check"),
+                        value: self.model.preferences.automaticUpdateChecksEnabled ? self.model.text(.statusEnabled) : self.model.text(.statusDisabled),
+                        tone: self.model.preferences.automaticUpdateChecksEnabled ? .success : .neutral,
+                        symbol: "calendar.badge.clock",
+                        compact: true
+                    )
+                }
+
+                if let notes = self.model.appUpdateReleaseNotesPreview {
+                    Text(notes)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(6)
+                        .textSelection(.enabled)
+                }
+
+                HStack(spacing: 10) {
+                    Button(action: self.model.runAppUpdatePrimaryAction) {
+                        HStack(spacing: 7) {
+                            if self.showsProgress {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: self.primarySymbolName)
+                            }
+                            Text(self.model.appUpdatePrimaryActionTitle)
+                        }
+                    }
+                    .buttonStyle(AppActionButtonStyle(kind: .primary))
+                    .disabled(self.model.appUpdateCanRunPrimaryAction == false)
+
+                    if let secondaryTitle = self.model.appUpdateSecondaryActionTitle {
+                        Button(action: self.model.openAppUpdateReleasePage) {
+                            HStack(spacing: 7) {
+                                Image(systemName: "safari")
+                                Text(secondaryTitle)
+                            }
+                        }
+                        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+                    }
+
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private var showsProgress: Bool {
+        switch self.model.appUpdateStatus {
+        case .checking, .downloading, .installing:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var primarySymbolName: String {
+        switch self.model.appUpdateStatus {
+        case .updateAvailable:
+            return "arrow.down.circle.fill"
+        case .readyToInstall:
+            return "arrow.triangle.2.circlepath"
+        default:
+            return "arrow.clockwise"
+        }
     }
 }
 

@@ -486,6 +486,23 @@ private struct SettingsGeneralPanel: View {
                 )
                 .toggleStyle(.switch)
             }
+
+            FormFieldPanel(
+                title: self.model.localized(zh: "自动检查更新", en: "Automatic Update Checks"),
+                footer: self.model.localized(
+                    zh: "启动时每天最多检查一次 GitHub Releases，有新版本才会提示。",
+                    en: "Checks GitHub Releases at launch at most once per day and only prompts when a new version is available."
+                )
+            ) {
+                Toggle(
+                    self.model.localized(zh: "启动时自动检查更新", en: "Check for updates at launch"),
+                    isOn: Binding(
+                        get: { self.model.preferences.automaticUpdateChecksEnabled },
+                        set: { self.model.updateAutomaticUpdateChecksEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+            }
         }
     }
 

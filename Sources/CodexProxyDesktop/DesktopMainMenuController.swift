@@ -11,6 +11,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
     let appMenuTitle: String
     let aboutApp: String
     let settings: String
+    let checkForUpdates: String
     let hideApp: String
     let hideOthers: String
     let showAll: String
@@ -37,6 +38,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
         self.appMenuTitle = model.text(.brandName)
         self.aboutApp = model.text(.menuAboutApp)
         self.settings = model.text(.menuSettings)
+        self.checkForUpdates = model.localized(zh: "检查更新…", en: "Check for Updates…")
         self.hideApp = model.text(.menuHideApp)
         self.hideOthers = model.text(.menuHideOthers)
         self.showAll = model.text(.menuShowAll)
@@ -69,6 +71,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
         self.appMenuTitle == other.appMenuTitle
             && self.aboutApp == other.aboutApp
             && self.settings == other.settings
+            && self.checkForUpdates == other.checkForUpdates
             && self.hideApp == other.hideApp
             && self.hideOthers == other.hideOthers
             && self.showAll == other.showAll
@@ -265,6 +268,7 @@ final class DesktopMainMenuController: NSObject, NSMenuDelegate, NSMenuItemValid
         menu.autoenablesItems = false
         menu.delegate = self
         menu.addItem(self.item(snapshot.aboutApp, action: #selector(openAboutWindow(_:))))
+        menu.addItem(self.item(snapshot.checkForUpdates, action: #selector(checkForUpdates(_:))))
         menu.addItem(.separator())
         menu.addItem(self.item(snapshot.settings, action: #selector(openSettings(_:)), key: ","))
         menu.addItem(.separator())
@@ -375,6 +379,12 @@ final class DesktopMainMenuController: NSObject, NSMenuDelegate, NSMenuItemValid
 
     @objc func openAboutWindow(_ sender: NSMenuItem) {
         self.model?.openAboutWindow()
+    }
+
+    @objc func checkForUpdates(_ sender: NSMenuItem) {
+        guard let model else { return }
+        model.openAboutWindow()
+        model.checkForAppUpdates(isAutomatic: false)
     }
 
     @objc func openSettings(_ sender: NSMenuItem) {

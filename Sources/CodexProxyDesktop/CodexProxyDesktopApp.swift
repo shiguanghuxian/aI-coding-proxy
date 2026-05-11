@@ -150,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             guard let self else { return }
             await self.model.loadAll()
             self.didLoadInitialData = true
+            self.model.checkForAppUpdatesIfNeededOnLaunch()
             if NSApp.isActive {
                 self.model.startStatsAutoRefreshIfNeeded(immediately: false)
                 self.presentHelpWindowIfNeeded()
