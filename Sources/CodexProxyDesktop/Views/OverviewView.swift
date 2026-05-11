@@ -42,17 +42,9 @@ private struct OverviewTopUtilityControls: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            self.clientConfigButton
             self.statusPill
             OverviewServiceControls(model: self.model)
         }
-    }
-
-    private var clientConfigButton: some View {
-        Button(self.model.actionOpenClientConfigManager) {
-            self.model.openClientConfigManagerWindow()
-        }
-        .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
     }
 
     private var statusPill: some View {

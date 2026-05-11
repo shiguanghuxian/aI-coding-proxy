@@ -150,42 +150,10 @@ struct RootShellView: View {
         ZStack(alignment: .topTrailing) {
             ShellBackground()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    DashboardHeader(
-                        title: self.model.currentPageTitle,
-                        subtitle: self.model.currentPageSubtitle,
-                        statusText: self.model.shellServiceStatusText,
-                        statusTone: self.model.shellServiceStatusTone,
-                        isBusy: self.model.isBusy,
-                        showsControls: false,
-                        reloadTitle: self.model.text(.commonReload)
-                    ) {
-                        Task { await self.model.loadAll() }
-                    }
-
-                    Group {
-                        switch self.model.displayedSelectedPage {
-                        case .overview:
-                            OverviewView(model: self.model)
-                        case .accounts:
-                            AccountsView(model: self.model)
-                        case .proxy:
-                            ProxyView(model: self.model)
-                        case .remote:
-                            RemoteView(model: self.model)
-                        case .settings:
-                            SettingsView(model: self.model)
-                        }
-                    }
-                    .transaction { transaction in
-                        transaction.animation = nil
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(MainWorkspaceDetailFrameProbe())
-                .padding(.horizontal, 24)
-                .padding(.vertical, 22)
+            if self.model.displayedSelectedPage == .clientConfig {
+                self.clientConfigDetailShell
+            } else {
+                self.standardDetailScrollShell
             }
 
             if let account = self.accountPoolDetailDrawerAccount {
@@ -212,6 +180,71 @@ struct RootShellView: View {
         .animation(.spring(response: 0.26, dampingFraction: 0.88), value: self.isAccountPoolDetailDrawerVisible)
     }
 
+    private var standardDetailScrollShell: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                self.dashboardHeader
+
+                self.standardDetailPageContent
+                    .transaction { transaction in
+                        transaction.animation = nil
+                    }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(MainWorkspaceDetailFrameProbe())
+            .padding(.horizontal, 24)
+            .padding(.vertical, 22)
+        }
+    }
+
+    private var clientConfigDetailShell: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            self.dashboardHeader
+
+            ClientConfigManagerView(model: self.model)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(MainWorkspaceDetailFrameProbe())
+        .padding(.horizontal, 24)
+        .padding(.vertical, 22)
+    }
+
+    private var dashboardHeader: some View {
+        DashboardHeader(
+            title: self.model.currentPageTitle,
+            subtitle: self.model.currentPageSubtitle,
+            statusText: self.model.shellServiceStatusText,
+            statusTone: self.model.shellServiceStatusTone,
+            isBusy: self.model.isBusy,
+            showsControls: false,
+            reloadTitle: self.model.text(.commonReload)
+        ) {
+            Task { await self.model.loadAll() }
+        }
+    }
+
+    @ViewBuilder
+    private var standardDetailPageContent: some View {
+        switch self.model.displayedSelectedPage {
+        case .overview:
+            OverviewView(model: self.model)
+        case .accounts:
+            AccountsView(model: self.model)
+        case .proxy:
+            ProxyView(model: self.model)
+        case .remote:
+            RemoteView(model: self.model)
+        case .settings:
+            SettingsView(model: self.model)
+        case .clientConfig:
+            EmptyView()
+        }
+    }
+
     private var collapseSidebarTitle: String {
         self.model.localized(zh: "收起主菜单", en: "Collapse Sidebar")
     }
@@ -235,6 +268,14 @@ struct RootShellView: View {
     private func selectPage(_ page: DesktopAppModel.Page) {
         guard self.model.canOpenPage(page) else { return }
         guard self.model.selectedPage != page else { return }
+        if page == .clientConfig {
+            var transaction = Transaction()
+            transaction.animation = nil
+            withTransaction(transaction) {
+                self.model.selectedPage = page
+            }
+            return
+        }
         withAnimation(.easeOut(duration: 0.16)) {
             self.model.selectedPage = page
         }

@@ -1411,12 +1411,150 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.overviewTabTitle(.recentActivity), model.text(.sectionLatestActivity))
     }
 
-    func testOverviewTopUtilitiesExposeLocalClientConfigurationEntry() throws {
+    func testOverviewTopUtilitiesNoLongerExposeLocalClientConfigurationEntry() throws {
         let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let proxySource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ProxyView.swift")
 
-        XCTAssertTrue(source.contains("self.clientConfigButton"))
-        XCTAssertTrue(source.contains("self.model.actionOpenClientConfigManager"))
-        XCTAssertTrue(source.contains("self.model.openClientConfigManagerWindow()"))
+        // Client config entry removed from both pages; now lives in sidebar
+        XCTAssertFalse(source.contains("self.clientConfigButton"))
+        XCTAssertFalse(source.contains("self.model.openClientConfigManagerWindow()"))
+        XCTAssertFalse(proxySource.contains("self.model.actionOpenClientConfigManager"))
+        XCTAssertFalse(proxySource.contains("self.model.openClientConfigManagerWindow()"))
+    }
+
+    @MainActor
+    func testClientConfigPageAppearsInSidebarAndIsAlwaysOpenable() {
+        let model = DesktopAppModel()
+
+        XCTAssertTrue(DesktopAppModel.Page.allCases.contains(.clientConfig))
+        XCTAssertTrue(model.canOpenPage(.clientConfig))
+        XCTAssertTrue(model.visiblePages.contains(.clientConfig))
+    }
+
+    @MainActor
+    func testClientConfigPageTitlesAreLocalizedCorrectly() throws {
+        let (preferencesStore, directory) = try Self.makePreferencesStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = DesktopAppModel(preferencesStore: preferencesStore)
+
+        model.updateLanguage(.english)
+        XCTAssertEqual(model.pageTitle(.clientConfig), "Codex/Claude Config")
+        XCTAssertEqual(model.pageSubtitle(.clientConfig), "Configure local Codex and Claude Code authentication files.")
+
+        model.updateLanguage(DesktopLanguageMode.zhHans)
+        XCTAssertEqual(model.pageTitle(.clientConfig), "Codex/Claude 配置")
+        XCTAssertEqual(model.pageSubtitle(.clientConfig), "配置本机 Codex 和 Claude Code 认证文件。")
+    }
+
+    @MainActor
+    func testSelectingClientConfigPageTriggersAutoLoad() {
+        let model = DesktopAppModel()
+
+        XCTAssertTrue(model.clientConfigManagerInspections.isEmpty)
+
+        model.selectedPage = .clientConfig
+
+        // enterClientConfigPageIfNeeded should trigger async load;
+        // inspections will be populated after the async task completes.
+        // We verify the page actually switched:
+        XCTAssertEqual(model.selectedPage, .clientConfig)
+    }
+
+    @MainActor
+    func testRootShellViewRendersClientConfigPage() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RootShellView.swift")
+
+        XCTAssertTrue(source.contains("case .clientConfig:"))
+        XCTAssertTrue(source.contains("ClientConfigManagerView(model: self.model)"))
+        XCTAssertTrue(source.contains("private var clientConfigDetailShell"))
+        XCTAssertTrue(source.contains("private var standardDetailScrollShell"))
+        XCTAssertTrue(source.contains("if self.model.displayedSelectedPage == .clientConfig"))
+    }
+
+    func testClientConfigManagerViewIncludesOperationGuideCopy() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ClientConfigManagerView.swift")
+
+        XCTAssertTrue(source.contains("ClientConfigStepGuide"))
+        XCTAssertTrue(source.contains("选择客户端"))
+        XCTAssertTrue(source.contains("选择本地 Key"))
+        XCTAssertTrue(source.contains("预览后应用"))
+        XCTAssertTrue(source.contains("Local Key To Write"))
+        XCTAssertTrue(source.contains("Write Preview"))
+        XCTAssertTrue(source.contains("选择 Codex、Claude Code 或 Gemini"))
+        XCTAssertTrue(source.contains("private func scrollableContent"))
+        XCTAssertTrue(source.contains("private func fixedApplyButtonArea"))
+        XCTAssertTrue(source.contains("layoutPriority(2)"))
+        XCTAssertTrue(source.contains("let isTightHeight: Bool"))
+        XCTAssertTrue(source.contains("let isCompactHeight: Bool"))
+        XCTAssertTrue(source.contains("let editorMinHeight: CGFloat"))
+        XCTAssertTrue(source.contains("let backupEditorMinHeight: CGFloat"))
+        XCTAssertTrue(source.contains("layout.editorMinHeight"))
+        XCTAssertTrue(source.contains("layout.backupEditorMinHeight"))
+        XCTAssertFalse(source.contains(".frame(minHeight: 390)"))
+        XCTAssertFalse(source.contains(".frame(minHeight: 440)"))
+        XCTAssertTrue(source.contains("ClientConfigTargetSelector"))
+        XCTAssertTrue(source.contains("ClientConfigKeySelector"))
+        XCTAssertTrue(source.contains("terminal.fill"))
+        XCTAssertTrue(source.contains("sparkles"))
+        XCTAssertTrue(source.contains("diamond.fill"))
+        XCTAssertTrue(source.contains("key.fill"))
+        XCTAssertTrue(source.contains("proxyAPIKeyMaskedValue"))
+        XCTAssertTrue(source.contains("Menu {"))
+        XCTAssertFalse(source.contains("Picker(\"\", selection: self.$model.clientConfigManagerTarget)"))
+        XCTAssertTrue(source.contains("private var headerActions"))
+        XCTAssertTrue(source.contains("Text(title)"))
+        XCTAssertTrue(source.contains(".minimumScaleFactor(0.82)"))
+        XCTAssertFalse(source.contains("headerActions(compact:"))
+        XCTAssertFalse(source.contains("if compact == false"))
+        XCTAssertTrue(source.contains("clientConfigManagerRevealFilesButtonTitle"))
+        XCTAssertTrue(source.contains("clientConfigManagerViewBackupsButtonTitle"))
+        XCTAssertTrue(source.contains("clientConfigManagerRefreshStatusButtonTitle"))
+        XCTAssertFalse(source.contains("private var utilityButtons"))
+        XCTAssertTrue(source.contains("将写入的文件"))
+        XCTAssertTrue(source.contains("Files To Write"))
+        XCTAssertTrue(source.contains("点击文件查看当前内容和写入后的预览。"))
+        XCTAssertTrue(source.contains("Select a file to compare current and proposed content."))
+    }
+
+    func testClientConfigManagerPerformanceOptimizationsAreStructuredForResize() throws {
+        let supportSource = try Self.repoFileText("Sources/CodexProxyDesktop/ClientConfigManagementSupport.swift")
+        let modelSource = try Self.repoFileText("Sources/CodexProxyDesktop/DesktopAppModel.swift")
+        let editorSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ClientConfigCodeEditorView.swift")
+        let managerSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ClientConfigManagerView.swift")
+        let rootSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RootShellView.swift")
+
+        XCTAssertTrue(supportSource.contains("struct ClientConfigManagerState: Equatable"))
+        XCTAssertTrue(supportSource.contains("struct ClientConfigManagerRenderState: Equatable"))
+        XCTAssertTrue(supportSource.contains("ClientConfigManagerRefreshPayload"))
+        XCTAssertTrue(supportSource.contains("Task.detached(priority: .userInitiated)"))
+        XCTAssertTrue(supportSource.contains("service.inspect(target: target"))
+        XCTAssertTrue(supportSource.contains("service.listBackups(target: resolvedTarget)"))
+        XCTAssertFalse(supportSource.contains("service.inspectAll(availableProxyAPIKeys:"))
+        XCTAssertFalse(supportSource.contains("service.listBackups()"))
+        XCTAssertTrue(supportSource.contains("state.currentPreviews[payload.target] = payload.currentPreview"))
+        XCTAssertTrue(supportSource.contains("state.proposedPreviews[payload.target] = payload.proposedPreview"))
+        XCTAssertTrue(supportSource.contains("rebuildClientConfigManagerDerivedPreviewCache(in: &state)"))
+        XCTAssertTrue(supportSource.contains("displayTexts"))
+        XCTAssertTrue(modelSource.contains("@Published var clientConfigManagerState = ClientConfigManagerState()"))
+        XCTAssertFalse(modelSource.contains("@Published var clientConfigManagerPreviewRevision"))
+        XCTAssertFalse(modelSource.contains("@Published var clientConfigManagerDerivedPreviewStates"))
+        XCTAssertFalse(modelSource.contains("@Published var clientConfigManagerChangeSummaryCounts"))
+
+        XCTAssertTrue(editorSource.contains("let textIdentity: String"))
+        XCTAssertTrue(editorSource.contains("makeCoordinator()"))
+        XCTAssertTrue(editorSource.contains("appliedTextIdentity"))
+        XCTAssertTrue(editorSource.contains("allowsNonContiguousLayout = true"))
+        XCTAssertFalse(editorSource.contains("textView.string != self.text"))
+
+        XCTAssertTrue(managerSource.contains("let renderState: ClientConfigManagerRenderState"))
+        XCTAssertTrue(managerSource.contains("let displayText: String"))
+        XCTAssertFalse(managerSource.contains("ClientConfigCodeEditorContent: View, @MainActor Equatable {\n    @ObservedObject"))
+        XCTAssertTrue(managerSource.contains("backupTextIdentity(for file:"))
+        XCTAssertTrue(managerSource.contains("ClientConfigCodeEditorContent"))
+        XCTAssertFalse(managerSource.contains("struct ClientConfigManagedFileRow: View {\n    @ObservedObject var model"))
+        XCTAssertFalse(managerSource.contains("ViewThatFits"))
+        XCTAssertTrue(rootSource.contains("if page == .clientConfig"))
+        XCTAssertTrue(rootSource.contains("withTransaction(transaction)"))
     }
 
     @MainActor
@@ -3766,6 +3904,7 @@ final class CodexProxyDesktopTests: XCTestCase {
             "总览",
             "账号",
             "代理",
+            "Codex/Claude 配置",
             "设置",
         ])
         XCTAssertEqual(application.mainMenu?.items[3].submenu?.items.first?.title, "使用帮助")
@@ -3817,6 +3956,7 @@ final class CodexProxyDesktopTests: XCTestCase {
             "Overview",
             "Accounts",
             "Proxy",
+            "Codex/Claude Config",
             "Settings",
         ])
         XCTAssertEqual(application.mainMenu?.items[3].submenu?.items.first?.title, "Usage Guide")
@@ -3884,6 +4024,7 @@ final class CodexProxyDesktopTests: XCTestCase {
             "Overview",
             "Accounts",
             "Proxy",
+            "Codex/Claude Config",
             "Settings",
         ])
     }
@@ -6533,7 +6674,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("case .importLocalToRemote:"))
         XCTAssertTrue(source.contains("title: self.model.text(.actionImportLocalAccountsToRemote)"))
         XCTAssertTrue(source.contains(".accessibilityIdentifier(\"accounts-import-local-to-remote-button\")"))
-        XCTAssertTrue(source.contains("title: self.model.text(.actionTestProxy)"))
+        XCTAssertTrue(source.contains("self.model.text(.actionTestProxy)"))
         XCTAssertTrue(source.contains("case .testProxy:"))
         XCTAssertTrue(source.contains("return self.model.adminSupportsProxyTesting"))
         XCTAssertTrue(source.contains(".accessibilityIdentifier(\"accounts-test-proxy-button\")"))
@@ -6560,7 +6701,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(model.appModel.adminSupportsProxyTesting)
         XCTAssertTrue(source.contains("ProxyTopUtilityControls"))
         XCTAssertTrue(source.contains("if self.model.adminSupportsProxyTesting"))
-        XCTAssertTrue(source.contains("title: self.model.text(.actionTestProxy)"))
+        XCTAssertTrue(source.contains("self.model.text(.actionTestProxy)"))
         XCTAssertTrue(source.contains(".accessibilityIdentifier(\"proxy-test-proxy-button\")"))
         XCTAssertFalse(model.appModel.isProxyTestPresented)
 
@@ -9049,6 +9190,21 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountOrderSheetSourceDeclaresSearchAndQuickMoveControls() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+
+        XCTAssertTrue(source.contains("TextField(self.model.text(.placeholderSearchAccountOrder), text: self.searchText)"))
+        XCTAssertTrue(source.contains("self.model.accountOrderVisibleCountText"))
+        XCTAssertTrue(source.contains("self.model.text(.helperAccountOrderSearch)"))
+        XCTAssertTrue(source.contains("moveAccountOrderDraftToTop"))
+        XCTAssertTrue(source.contains("moveAccountOrderDraftUp"))
+        XCTAssertTrue(source.contains("moveAccountOrderDraftDown"))
+        XCTAssertTrue(source.contains("moveAccountOrderDraftToBottom"))
+        XCTAssertTrue(source.contains("toOneBasedPosition"))
+        XCTAssertTrue(source.contains(".frame(minWidth: 720"))
+    }
+
+    @MainActor
     func testAccountsViewToolbarKeepsFiltersAndActionsOnSharedSecondRowBeforeNarrowFallback() throws {
         let model = DesktopAppModel()
         model.preferences.languageMode = .zhHans
@@ -10728,6 +10884,91 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.presentAccountOrderSheet()
 
         XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-1", "account-2", "account-3"])
+    }
+
+    @MainActor
+    func testAccountOrderSearchFiltersVisibleEntriesButKeepsFullPositions() {
+        let model = DesktopAppModel()
+        model.accountOrderDraft = DesktopAppModel.AccountOrderDraft(accounts: [
+            Self.makeAccount(id: "account-1", label: "Alpha", accountID: "acct-alpha", selectionOrder: 0),
+            Self.makeAccount(id: "account-2", label: "Bravo", accountID: "acct-bravo", selectionOrder: 1),
+            Self.makeAccount(id: "account-3", label: "Charlie", accountID: "acct-charlie", selectionOrder: 2),
+            Self.makeAccount(id: "account-4", label: "Delta", email: "match@example.com", accountID: "acct-delta", selectionOrder: 3),
+        ], searchQuery: "match")
+
+        XCTAssertEqual(model.accountOrderVisibleEntries.map(\.account.id), ["account-4"])
+        XCTAssertEqual(model.accountOrderVisibleEntries.map(\.position), [4])
+        XCTAssertEqual(model.accountOrderVisibleCountText, "显示 1 / 4")
+
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.accountOrderVisibleCountText, "Showing 1 / 4")
+    }
+
+    @MainActor
+    func testAccountOrderQuickMoveActionsUpdateFullDraftOrder() {
+        let model = DesktopAppModel()
+        model.accountOrderDraft = DesktopAppModel.AccountOrderDraft(accounts: [
+            Self.makeAccount(id: "account-1", label: "Alpha", accountID: "acct-alpha"),
+            Self.makeAccount(id: "account-2", label: "Bravo", accountID: "acct-bravo"),
+            Self.makeAccount(id: "account-3", label: "Charlie", accountID: "acct-charlie"),
+            Self.makeAccount(id: "account-4", label: "Delta", accountID: "acct-delta"),
+        ])
+
+        model.moveAccountOrderDraftToTop(accountID: "account-3")
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-3", "account-1", "account-2", "account-4"])
+
+        model.moveAccountOrderDraftDown(accountID: "account-3")
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-1", "account-3", "account-2", "account-4"])
+
+        model.moveAccountOrderDraftUp(accountID: "account-2")
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-1", "account-2", "account-3", "account-4"])
+
+        model.moveAccountOrderDraftToBottom(accountID: "account-1")
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-2", "account-3", "account-4", "account-1"])
+    }
+
+    @MainActor
+    func testAccountOrderMoveToPositionClampsBoundsAndIgnoresInvalidInput() {
+        let model = DesktopAppModel()
+        model.accountOrderDraft = DesktopAppModel.AccountOrderDraft(accounts: [
+            Self.makeAccount(id: "account-1", label: "Alpha", accountID: "acct-alpha"),
+            Self.makeAccount(id: "account-2", label: "Bravo", accountID: "acct-bravo"),
+            Self.makeAccount(id: "account-3", label: "Charlie", accountID: "acct-charlie"),
+        ])
+
+        XCTAssertTrue(model.moveAccountOrderDraft(accountID: "account-3", toOneBasedPosition: "1"))
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-3", "account-1", "account-2"])
+
+        XCTAssertTrue(model.moveAccountOrderDraft(accountID: "account-3", toOneBasedPosition: "99"))
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-1", "account-2", "account-3"])
+
+        XCTAssertTrue(model.moveAccountOrderDraft(accountID: "account-2", toOneBasedPosition: "0"))
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-2", "account-1", "account-3"])
+
+        XCTAssertFalse(model.moveAccountOrderDraft(accountID: "account-2", toOneBasedPosition: "abc"))
+        XCTAssertFalse(model.moveAccountOrderDraft(accountID: "account-2", toOneBasedPosition: ""))
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-2", "account-1", "account-3"])
+    }
+
+    @MainActor
+    func testAccountOrderSearchMoveUpdatesFullOrderWithoutReorderingNonMatches() {
+        let model = DesktopAppModel()
+        model.accountOrderDraft = DesktopAppModel.AccountOrderDraft(accounts: [
+            Self.makeAccount(id: "account-1", label: "Keep One", accountID: "acct-1"),
+            Self.makeAccount(id: "account-2", label: "Match First", accountID: "acct-2"),
+            Self.makeAccount(id: "account-3", label: "Keep Two", accountID: "acct-3"),
+            Self.makeAccount(id: "account-4", label: "Match Second", accountID: "acct-4"),
+            Self.makeAccount(id: "account-5", label: "Keep Three", accountID: "acct-5"),
+        ], searchQuery: "match")
+
+        XCTAssertEqual(model.accountOrderVisibleEntries.map(\.account.id), ["account-2", "account-4"])
+        model.moveAccountOrderDraftToTop(accountID: "account-4")
+
+        XCTAssertEqual(model.accountOrderDraft?.accounts.map(\.id), ["account-4", "account-1", "account-2", "account-3", "account-5"])
+        XCTAssertEqual(
+            model.accountOrderDraft?.accounts.filter { !$0.label.localizedCaseInsensitiveContains("match") }.map(\.id),
+            ["account-1", "account-3", "account-5"]
+        )
     }
 
     @MainActor

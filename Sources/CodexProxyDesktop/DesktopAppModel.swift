@@ -46,6 +46,7 @@ final class DesktopAppModel: ObservableObject {
         case accounts
         case proxy
         case remote
+        case clientConfig
         case settings
 
         var id: String { self.rawValue }
@@ -62,6 +63,8 @@ final class DesktopAppModel: ObservableObject {
                 return "server.rack"
             case .settings:
                 return "slider.horizontal.3"
+            case .clientConfig:
+                return "gearshape.2.fill"
             }
         }
     }
@@ -146,6 +149,14 @@ final class DesktopAppModel: ObservableObject {
     struct AccountOrderDraft: Identifiable, Equatable {
         let id = UUID()
         var accounts: [AccountSummary]
+        var searchQuery = ""
+    }
+
+    struct AccountOrderVisibleEntry: Identifiable, Equatable {
+        var position: Int
+        var account: AccountSummary
+
+        var id: String { self.account.id }
     }
 
     struct AccountManagedProxyNodeDraft: Identifiable, Equatable {
@@ -308,6 +319,9 @@ final class DesktopAppModel: ObservableObject {
     @Published var selectedPage: Page = .overview {
         didSet {
             self.syncAccountPoolDetailDrawerContext()
+            if self.selectedPage == .clientConfig {
+                self.enterClientConfigPageIfNeeded()
+            }
         }
     }
     @Published private(set) var isRemoteManagementUnlocked = false
@@ -415,21 +429,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var selectedSettingsTab: SettingsTab = .appearance
     @Published var isManagedProxyManagerPresented = false
     @Published var isClientConfigManagerPresented = false
-    @Published var clientConfigManagerTarget: ClientConfigTarget = .codex
-    @Published var clientConfigManagerInspections: [ClientConfigTarget: ClientConfigInspection] = [:]
-    @Published var clientConfigManagerBackups: [ClientConfigBackupRecord] = []
-    @Published var clientConfigManagerSelectedProxyAPIKeyIDs: [ClientConfigTarget: String] = [:]
-    @Published var clientConfigManagerOperation: ClientConfigManagerOperation = .idle
-    @Published var clientConfigManagerPreviewMode: ClientConfigPreviewMode = .proposed
-    @Published var clientConfigManagerCurrentPreviews: [ClientConfigTarget: ClientConfigPreview] = [:]
-    @Published var clientConfigManagerProposedPreviews: [ClientConfigTarget: ClientConfigPreview] = [:]
-    @Published var clientConfigManagerSelectedPreviewFilePaths: [String: String] = [:]
-    @Published var clientConfigManagerPreviewRevealsSecrets = false
-    @Published var clientConfigManagerPendingRestoreBackup: ClientConfigBackupRecord?
-    @Published var isClientConfigManagerRestoreConfirmationPresented = false
-    @Published var isClientConfigBackupDrawerPresented = false
-    @Published var clientConfigBackupDrawerMode: ClientConfigBackupDrawerMode = .list
-    @Published var clientConfigManagerBackupDetail: ClientConfigBackupDetail?
+    @Published var clientConfigManagerState = ClientConfigManagerState()
     @Published var isRequestLogsPresented = false
     @Published var requestLogsDraftFilterState = RequestLogFilterState()
     @Published var requestLogsAppliedFilterState = RequestLogFilterState()
@@ -472,6 +472,8 @@ final class DesktopAppModel: ObservableObject {
     var proxyTestWindowController: ProxyTestWindowController?
     var managedProxyWindowController: ManagedProxyWindowController?
     var clientConfigManagerWindowController: ClientConfigManagerWindowControlling?
+    var clientConfigManagerRefreshGeneration = 0
+    var clientConfigManagerBackupLoadGeneration = 0
     var requestLogsWindowController: RequestLogsWindowController?
     var remoteAdminWindowControllers: [String: RemoteAdminWindowControlling] = [:]
     var requestLogsRefreshTask: Task<Void, Never>?
@@ -599,7 +601,7 @@ final class DesktopAppModel: ObservableObject {
         switch page {
         case .remote:
             return self.isRemoteManagementUnlocked
-        case .overview, .accounts, .proxy, .settings:
+        case .overview, .accounts, .proxy, .settings, .clientConfig:
             return true
         }
     }
@@ -1575,10 +1577,98 @@ final class DesktopAppModel: ObservableObject {
         )
     }
 
+    var accountOrderVisibleEntries: [AccountOrderVisibleEntry] {
+        guard let draft = self.accountOrderDraft else { return [] }
+        return draft.accounts.enumerated().compactMap { offset, account in
+            guard AccountPoolListHelper.matchesSearch(account, query: draft.searchQuery) else {
+                return nil
+            }
+            return AccountOrderVisibleEntry(position: offset + 1, account: account)
+        }
+    }
+
+    var accountOrderIsSearching: Bool {
+        let query = self.accountOrderDraft?.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return query.isEmpty == false
+    }
+
+    var accountOrderVisibleCountText: String {
+        let visibleCount = self.accountOrderVisibleEntries.count
+        let totalCount = self.accountOrderDraft?.accounts.count ?? 0
+        return self.localized(zh: "显示 \(visibleCount) / \(totalCount)", en: "Showing \(visibleCount) / \(totalCount)")
+    }
+
     func moveAccountOrderDraft(fromOffsets: IndexSet, toOffset: Int) {
         guard var draft = self.accountOrderDraft else { return }
         draft.accounts.move(fromOffsets: fromOffsets, toOffset: toOffset)
         self.accountOrderDraft = draft
+    }
+
+    func moveAccountOrderDraftToTop(accountID: String) {
+        self.moveAccountOrderDraft(accountID: accountID, toZeroBasedIndex: 0)
+    }
+
+    func moveAccountOrderDraftUp(accountID: String) {
+        guard let index = self.accountOrderDraftIndex(for: accountID), index > 0 else { return }
+        self.moveAccountOrderDraft(accountID: accountID, toZeroBasedIndex: index - 1)
+    }
+
+    func moveAccountOrderDraftDown(accountID: String) {
+        guard let draft = self.accountOrderDraft,
+              let index = self.accountOrderDraftIndex(for: accountID),
+              index < draft.accounts.count - 1
+        else { return }
+        self.moveAccountOrderDraft(accountID: accountID, toZeroBasedIndex: index + 1)
+    }
+
+    func moveAccountOrderDraftToBottom(accountID: String) {
+        guard let count = self.accountOrderDraft?.accounts.count, count > 0 else { return }
+        self.moveAccountOrderDraft(accountID: accountID, toZeroBasedIndex: count - 1)
+    }
+
+    @discardableResult
+    func moveAccountOrderDraft(accountID: String, toOneBasedPosition rawPosition: String) -> Bool {
+        let trimmed = rawPosition.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let position = Int(trimmed) else { return false }
+        return self.moveAccountOrderDraft(accountID: accountID, toOneBasedPosition: position)
+    }
+
+    @discardableResult
+    func moveAccountOrderDraft(accountID: String, toOneBasedPosition position: Int) -> Bool {
+        guard let count = self.accountOrderDraft?.accounts.count, count > 0 else { return false }
+        let clampedPosition = min(max(position, 1), count)
+        return self.moveAccountOrderDraft(accountID: accountID, toZeroBasedIndex: clampedPosition - 1)
+    }
+
+    func canMoveAccountOrderDraftUp(accountID: String) -> Bool {
+        guard let index = self.accountOrderDraftIndex(for: accountID) else { return false }
+        return index > 0
+    }
+
+    func canMoveAccountOrderDraftDown(accountID: String) -> Bool {
+        guard let draft = self.accountOrderDraft,
+              let index = self.accountOrderDraftIndex(for: accountID)
+        else { return false }
+        return index < draft.accounts.count - 1
+    }
+
+    private func accountOrderDraftIndex(for accountID: String) -> Int? {
+        self.accountOrderDraft?.accounts.firstIndex { $0.id == accountID }
+    }
+
+    @discardableResult
+    private func moveAccountOrderDraft(accountID: String, toZeroBasedIndex targetIndex: Int) -> Bool {
+        guard var draft = self.accountOrderDraft,
+              let currentIndex = draft.accounts.firstIndex(where: { $0.id == accountID })
+        else { return false }
+        let clampedTarget = min(max(targetIndex, 0), draft.accounts.count - 1)
+        guard currentIndex != clampedTarget else { return true }
+
+        let account = draft.accounts.remove(at: currentIndex)
+        let insertionIndex = min(clampedTarget, draft.accounts.count)
+        draft.accounts.insert(account, at: insertionIndex)
+        self.accountOrderDraft = draft
+        return true
     }
 
     func dismissManualAPIKeySheet() {

@@ -134,7 +134,7 @@ enum AccountPoolListHelper {
             && self.matchesIssue(account, filter: filters.issue)
     }
 
-    private static func matchesSearch(_ account: AccountSummary, query: String) -> Bool {
+    static func matchesSearch(_ account: AccountSummary, query: String) -> Bool {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
             return true

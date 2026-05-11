@@ -393,7 +393,7 @@ public final class ClientConfigFileService: @unchecked Sendable {
         }
     }
 
-    private func inspect(
+    public func inspect(
         target: ClientConfigTarget,
         availableProxyAPIKeys: [ProxyAPIKeyRecord]
     ) -> ClientConfigInspection {

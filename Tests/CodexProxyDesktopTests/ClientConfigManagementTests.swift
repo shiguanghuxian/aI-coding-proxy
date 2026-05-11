@@ -1,4 +1,5 @@
 #if os(macOS)
+import Combine
 import CodexProxyCore
 import XCTest
 @testable import CodexProxyDesktop
@@ -75,6 +76,9 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertFalse(model.clientConfigManagerCanApplyCurrentSelection)
         XCTAssertNotNil(model.clientConfigManagerApplyUnavailableReason)
         XCTAssertTrue(model.clientConfigManagerCurrentSelectionStatusText.contains("API Key"))
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertTrue(model.clientConfigManagerApplyUnavailableReason?.contains("代理页") == true)
     }
 
     func testClientConfigManagerApplyButtonTitleIncludesTarget() throws {
@@ -85,7 +89,10 @@ final class ClientConfigManagementTests: XCTestCase {
         model.preferences.languageMode = .english
         model.clientConfigManagerTarget = .claudeCode
 
-        XCTAssertEqual(model.clientConfigManagerApplyButtonTitle(), "Apply To Claude Code")
+        XCTAssertEqual(model.clientConfigManagerApplyButtonTitle(), "Write To Claude Code")
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.clientConfigManagerApplyButtonTitle(), "写入到 Claude Code")
     }
 
     func testClientConfigManagerUtilityButtonTitlesDescribeActions() throws {
@@ -112,10 +119,10 @@ final class ClientConfigManagementTests: XCTestCase {
         let model = DesktopAppModel(clientConfigFileService: context.service)
 
         model.preferences.languageMode = .english
-        XCTAssertEqual(model.actionOpenClientConfigManager, "Configure Local Clients")
+        XCTAssertEqual(model.actionOpenClientConfigManager, "Codex/Claude Config Manager")
 
         model.preferences.languageMode = .zhHans
-        XCTAssertEqual(model.actionOpenClientConfigManager, "本机配置管理")
+        XCTAssertEqual(model.actionOpenClientConfigManager, "Codex/Claude 配置管理")
     }
 
     func testClientConfigBackupDrawerPresentationState() throws {
@@ -146,6 +153,7 @@ final class ClientConfigManagementTests: XCTestCase {
 
         await model.applyClientConfigManagerSelection()
 
+        XCTAssertGreaterThan(model.clientConfigManagerPreviewRevision, 0)
         XCTAssertEqual(model.banners.first?.tone, .success)
         XCTAssertEqual(model.banners.first?.title, model.clientConfigManagerApplySuccessTitle(for: .codex))
         XCTAssertEqual(model.banners.first?.detail, model.clientConfigManagerApplySuccessDetail(for: .codex, proxyAPIKey: key))
@@ -214,6 +222,83 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertTrue(model.clientConfigManagerProposedPreviews[.codex]?.files.first?.content.contains("sk-local-primary") == true)
     }
 
+    func testRefreshClientConfigManagerStatePublishesLoadingAndLoadedOnly() async throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+        model.settings.proxyAPIKeys = [Self.proxyKey(id: "primary", label: "Primary", key: "sk-local-primary")]
+        var publishCount = 0
+        let cancellable = model.objectWillChange.sink {
+            publishCount += 1
+        }
+
+        await model.refreshClientConfigManagerState(showLoading: true, target: .codex)
+
+        XCTAssertLessThanOrEqual(publishCount, 2)
+        XCTAssertNotNil(model.clientConfigManagerInspections[.codex])
+        XCTAssertNotNil(model.clientConfigManagerCurrentPreviews[.codex])
+        XCTAssertNotNil(model.clientConfigManagerProposedPreviews[.codex])
+        XCTAssertTrue(model.clientConfigManagerState.loadedTargets.contains(.codex))
+        withExtendedLifetime(cancellable) {}
+    }
+
+    func testClientConfigPageLazilyLoadsOnlyCurrentTargetThenSelectedTarget() async throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+        model.settings.proxyAPIKeys = [Self.proxyKey(id: "primary", label: "Primary", key: "sk-local-primary")]
+
+        model.selectedPage = .clientConfig
+        await Self.waitForCondition {
+            model.clientConfigManagerState.loadedTargets.contains(.codex)
+        }
+
+        XCTAssertEqual(model.clientConfigManagerState.loadedTargets, [.codex])
+        XCTAssertNil(model.clientConfigManagerCurrentPreviews[.claudeCode])
+        XCTAssertNil(model.clientConfigManagerCurrentPreviews[.gemini])
+
+        model.clientConfigManagerSelectTarget(.gemini)
+        await Self.waitForCondition {
+            model.clientConfigManagerState.loadedTargets.contains(.gemini)
+        }
+
+        XCTAssertEqual(model.clientConfigManagerState.loadedTargets, [.codex, .gemini])
+        XCTAssertNotNil(model.clientConfigManagerCurrentPreviews[.gemini])
+        XCTAssertNil(model.clientConfigManagerCurrentPreviews[.claudeCode])
+    }
+
+    func testClientConfigBackupsLoadOnlyWhenDrawerIsOpened() async throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let proxyKey = Self.proxyKey(id: "primary", label: "Primary", key: "sk-local-primary")
+        _ = try context.service.applyConfiguration(
+            target: .codex,
+            proxyAPIKey: proxyKey,
+            endpoints: ClientConfigEndpointBundle(
+                openAIBaseURL: "http://127.0.0.1:8080/v1",
+                anthropicBaseURL: "http://127.0.0.1:8080/anthropic",
+                geminiBaseURL: "http://127.0.0.1:8080/gemini"
+            )
+        )
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+        model.settings.proxyAPIKeys = [proxyKey]
+        await model.refreshClientConfigManagerState(showLoading: true, target: .codex)
+
+        XCTAssertTrue(model.clientConfigManagerBackups.isEmpty)
+        XCTAssertTrue(model.clientConfigManagerState.loadedBackupTargets.isEmpty)
+
+        model.presentClientConfigBackupDrawer()
+        await Self.waitForCondition {
+            model.clientConfigManagerState.loadedBackupTargets.contains(.codex)
+        }
+
+        XCTAssertEqual(model.clientConfigManagerBackups.filter { $0.target == .codex }.count, 1)
+    }
+
     func testSelectingProxyAPIKeyRefreshesProposedPreview() async throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
@@ -227,8 +312,56 @@ final class ClientConfigManagementTests: XCTestCase {
 
         await model.refreshClientConfigManagerState(showLoading: true)
         model.clientConfigManagerSelectProxyAPIKey("second")
+        await Self.waitForCondition {
+            model.clientConfigManagerProposedPreviews[.codex]?.files.first?.content.contains("sk-local-second") == true
+        }
 
         XCTAssertTrue(model.clientConfigManagerProposedPreviews[.codex]?.files.first?.content.contains("sk-local-second") == true)
+    }
+
+    func testRefreshBuildsDerivedPreviewCacheAndAdvancesRevision() async throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+        model.settings.proxyAPIKeys = [Self.proxyKey(id: "primary", label: "Primary", key: "sk-local-primary")]
+        model.clientConfigManagerTarget = .codex
+
+        XCTAssertEqual(model.clientConfigManagerPreviewRevision, 0)
+        XCTAssertTrue(model.clientConfigManagerDerivedPreviewStates.isEmpty)
+        XCTAssertTrue(model.clientConfigManagerChangeSummaryCounts.isEmpty)
+
+        await model.refreshClientConfigManagerState(showLoading: true)
+
+        XCTAssertGreaterThan(model.clientConfigManagerPreviewRevision, 0)
+        XCTAssertFalse(model.clientConfigManagerDerivedPreviewStates.isEmpty)
+        XCTAssertEqual(model.clientConfigManagerVisibleFilePresentations.count, 2)
+        XCTAssertEqual(model.clientConfigManagerChangedFileCount, 2)
+        XCTAssertEqual(model.clientConfigManagerChangeSummaryCounts[.codex]?.changedFileCount, model.clientConfigManagerChangedFileCount)
+    }
+
+    func testSelectingProxyAPIKeyAdvancesPreviewRevision() async throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let model = DesktopAppModel(clientConfigFileService: context.service)
+        model.settings.proxyAPIKeys = [
+            Self.proxyKey(id: "first", label: "First", key: "sk-local-first"),
+            Self.proxyKey(id: "second", label: "Second", key: "sk-local-second"),
+        ]
+        model.clientConfigManagerTarget = .codex
+
+        await model.refreshClientConfigManagerState(showLoading: true)
+        let revisionAfterRefresh = model.clientConfigManagerPreviewRevision
+
+        model.clientConfigManagerSelectProxyAPIKey("second")
+        await Self.waitForCondition {
+            model.clientConfigManagerProposedPreviews[.codex]?.files.first?.content.contains("sk-local-second") == true
+        }
+
+        XCTAssertGreaterThan(model.clientConfigManagerPreviewRevision, revisionAfterRefresh)
+        XCTAssertTrue(model.clientConfigManagerProposedPreviews[.codex]?.files.first?.content.contains("sk-local-second") == true)
+        XCTAssertFalse(model.clientConfigManagerDerivedPreviewStates.isEmpty)
     }
 
     func testClientConfigManagerFileChangeKinds() async throws {
@@ -252,6 +385,9 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertEqual(model.clientConfigManagerFileChangeKind(target: .codex, path: authPath), .unchanged)
 
         model.clientConfigManagerSelectProxyAPIKey("second")
+        await Self.waitForCondition {
+            model.clientConfigManagerFileChangeKind(target: .codex, path: authPath) == .willUpdate
+        }
 
         XCTAssertEqual(model.clientConfigManagerFileChangeKind(target: .codex, path: authPath), .willUpdate)
     }
@@ -284,6 +420,9 @@ final class ClientConfigManagementTests: XCTestCase {
         let backup = try XCTUnwrap(context.service.listBackups(target: .codex).first)
 
         model.openClientConfigBackupViewer(backup)
+        await Self.waitForCondition {
+            model.clientConfigManagerBackupDetail?.record.id == backup.id
+        }
 
         XCTAssertTrue(model.isClientConfigBackupDrawerPresented)
         XCTAssertEqual(model.clientConfigBackupDrawerMode, .detail)
@@ -338,8 +477,10 @@ final class ClientConfigManagementTests: XCTestCase {
 
         await model.applyClientConfigManagerSelection()
         let backup = try XCTUnwrap(context.service.listBackups(target: .codex).first)
+        let revisionAfterApply = model.clientConfigManagerPreviewRevision
         await model.restoreClientConfigBackup(backup)
 
+        XCTAssertGreaterThan(model.clientConfigManagerPreviewRevision, revisionAfterApply)
         XCTAssertEqual(model.clientConfigManagerCurrentPreviews[.codex]?.files.map(\.exists), [false, false])
         XCTAssertEqual(model.clientConfigManagerBackups.filter { $0.target == .codex }.count, 2)
     }

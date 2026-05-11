@@ -121,6 +121,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case remoteSubtitle
     case settingsTitle
     case settingsSubtitle
+    case clientConfigTitle
+    case clientConfigSubtitle
     case menuDaemonRunning
     case menuDaemonStopped
     case menuNoEndpoint
@@ -394,6 +396,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionRemoveAuthorization
     case actionManageAccountOrder
     case actionSaveAccountOrder
+    case actionAccountOrderMoveToTop
+    case actionAccountOrderMoveUp
+    case actionAccountOrderMoveDown
+    case actionAccountOrderMoveToBottom
+    case actionAccountOrderMoveToPosition
     case actionClearAccountManagedProxyNodes
     case actionClearFilters
     case actionTestProxy
@@ -417,7 +424,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case placeholderNoEndpoint
     case placeholderNoAccounts
     case placeholderSearchAccounts
+    case placeholderSearchAccountOrder
     case placeholderNoMatchingAccounts
+    case placeholderNoMatchingAccountOrder
+    case placeholderAccountOrderPosition
     case placeholderManualAccountLabel
     case placeholderManualAccountBaseURL
     case placeholderAliyunCodingPlanBaseURL
@@ -458,6 +468,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperRefreshAccountList
     case helperQuickActionRefreshUsage
     case helperSelectionPolicy
+    case helperAccountOrderSearch
     case helperManualAPIKeyAccount
     case helperAutomaticCooldownPolicy
     case helperManualAccountGenericOpenAICompatible
@@ -822,6 +833,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.remoteTitle)
         case "settings":
             return self.text(.settingsTitle)
+        case "clientConfig":
+            return self.text(.clientConfigTitle)
         default:
             return rawValue
         }
@@ -839,6 +852,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.remoteSubtitle)
         case "settings":
             return self.text(.settingsSubtitle)
+        case "clientConfig":
+            return self.text(.clientConfigSubtitle)
         default:
             return self.text(.brandSubtitle)
         }
@@ -1826,6 +1841,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .remoteSubtitle: "Deploy and operate the remote proxy service on Linux hosts.",
             .settingsTitle: "Settings",
             .settingsSubtitle: "Desktop preferences and proxy behavior controls.",
+            .clientConfigTitle: "Codex/Claude Config",
+            .clientConfigSubtitle: "Configure local Codex and Claude Code authentication files.",
             .menuDaemonRunning: "Daemon Running",
             .menuDaemonStopped: "Daemon Stopped",
             .menuNoEndpoint: "No endpoint available",
@@ -2099,6 +2116,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRemoveAuthorization: "Remove Authorization",
             .actionManageAccountOrder: "Adjust Usage Order",
             .actionSaveAccountOrder: "Save Order",
+            .actionAccountOrderMoveToTop: "Move to Top",
+            .actionAccountOrderMoveUp: "Move Up",
+            .actionAccountOrderMoveDown: "Move Down",
+            .actionAccountOrderMoveToBottom: "Move to Bottom",
+            .actionAccountOrderMoveToPosition: "Move to Position",
             .actionClearAccountManagedProxyNodes: "Clear Outbound Nodes",
             .actionClearFilters: "Clear Filters",
             .actionTestProxy: "Test Proxy",
@@ -2122,7 +2144,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoEndpoint: "No public endpoint yet",
             .placeholderNoAccounts: "No accounts imported yet.",
             .placeholderSearchAccounts: "Search label, email, or account ID",
+            .placeholderSearchAccountOrder: "Search accounts to locate them in the full order",
             .placeholderNoMatchingAccounts: "No accounts match the current filters.",
+            .placeholderNoMatchingAccountOrder: "No matching accounts in this order list.",
+            .placeholderAccountOrderPosition: "Position",
             .placeholderManualAccountLabel: "Optional label",
             .placeholderManualAccountBaseURL: "https://api.openai.com/v1 or https://host/custom-prefix",
             .placeholderAliyunCodingPlanBaseURL: "https://coding.dashscope.aliyuncs.com or https://host/v1",
@@ -2163,6 +2188,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperRefreshAccountList: "Reload the latest account pool data without checking usage or calling upstream APIs.",
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
+            .helperAccountOrderSearch: "Search only narrows what you see here. Move actions update the full account pool order.",
             .helperManualAPIKeyAccount: "Add a compatible API key account with its own upstream base URL and API key. OAuth accounts still use browser authorization.",
             .helperAutomaticCooldownPolicy: "When disabled, this API key account keeps participating in routing even if its upstream returns intermittent errors.",
             .helperManualAccountGenericOpenAICompatible: "Use the standard OpenAI-compatible flow. Enter the final upstream API prefix exactly as your provider expects, including `/v1` when needed, and Codex Proxy will use it as-is. Choose Responses for providers that support the OpenAI Responses API, or Chat Completions for providers that only expose `/chat/completions`. If you're using Google's official Gemini compatibility root, switch Provider to `Google Gemini Compatible` instead.",
@@ -2426,6 +2452,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .remoteSubtitle: "将远程代理服务部署到 Linux 主机并运维。",
             .settingsTitle: "设置",
             .settingsSubtitle: "调整桌面偏好与代理行为。",
+            .clientConfigTitle: "Codex/Claude 配置",
+            .clientConfigSubtitle: "配置本机 Codex 和 Claude Code 认证文件。",
             .menuDaemonRunning: "服务运行中",
             .menuDaemonStopped: "服务未运行",
             .menuNoEndpoint: "暂无可用地址",
@@ -2699,6 +2727,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRemoveAuthorization: "移除授权",
             .actionManageAccountOrder: "调整使用顺序",
             .actionSaveAccountOrder: "保存顺序",
+            .actionAccountOrderMoveToTop: "置顶",
+            .actionAccountOrderMoveUp: "上移",
+            .actionAccountOrderMoveDown: "下移",
+            .actionAccountOrderMoveToBottom: "置底",
+            .actionAccountOrderMoveToPosition: "移动到序号",
             .actionClearAccountManagedProxyNodes: "清空出站节点",
             .actionClearFilters: "清空筛选",
             .actionTestProxy: "测试代理",
@@ -2722,7 +2755,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoEndpoint: "暂未生成公开接入地址",
             .placeholderNoAccounts: "还没有导入任何账号。",
             .placeholderSearchAccounts: "搜索名称、邮箱或账号 ID",
+            .placeholderSearchAccountOrder: "搜索账号，在完整顺序中快速定位",
             .placeholderNoMatchingAccounts: "当前筛选条件下没有匹配的账号。",
+            .placeholderNoMatchingAccountOrder: "当前顺序列表中没有匹配账号。",
+            .placeholderAccountOrderPosition: "序号",
             .placeholderManualAccountLabel: "可选标签",
             .placeholderManualAccountBaseURL: "https://api.openai.com/v1 或 https://host/custom-prefix",
             .placeholderAliyunCodingPlanBaseURL: "https://coding.dashscope.aliyuncs.com 或 https://host/v1",
@@ -2763,6 +2799,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperRefreshAccountList: "重新加载最新的账号池数据，不检查用量，也不调用上游接口。",
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
+            .helperAccountOrderSearch: "搜索只缩小这里显示的账号范围。移动操作会更新完整账号池顺序。",
             .helperManualAPIKeyAccount: "手动添加兼容 API Key 账号，并为该账号单独保存上游根地址。OAuth 账号仍只支持浏览器授权登录。",
             .helperAutomaticCooldownPolicy: "禁用后，即使上游偶发报错，这个 API Key 账号也会继续参与路由，不会被自动冷却跳过。",
             .helperManualAccountGenericOpenAICompatible: "使用标准 OpenAI 兼容模式。请直接填写上游要求的最终 API 前缀；如果对方要求带 `/v1`，这里就保留 `/v1`，后续会按你填写的前缀原样请求。支持 Responses API 的厂商选 Responses；只提供 `/chat/completions` 的厂商选 Chat Completions。如果你填的是 Google 官方 Gemini OpenAI 兼容根地址，请改选 `Google Gemini Compatible`。",

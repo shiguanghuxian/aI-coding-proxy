@@ -10,7 +10,7 @@ enum ClientConfigManagerOperation: Equatable {
     case restoring(String)
 }
 
-enum ClientConfigPreviewMode: String, CaseIterable, Identifiable {
+enum ClientConfigPreviewMode: String, CaseIterable, Identifiable, Sendable {
     case current
     case proposed
 
@@ -22,28 +22,273 @@ enum ClientConfigBackupDrawerMode: String, Equatable {
     case detail
 }
 
-enum ClientConfigPreviewFileChangeKind: Equatable {
+enum ClientConfigPreviewFileChangeKind: Equatable, Sendable {
     case readFailed
     case willCreate
     case willUpdate
     case unchanged
 }
 
-struct ClientConfigPreviewFilePresentation: Identifiable, Equatable {
+struct ClientConfigPreviewFilePresentation: Identifiable, Equatable, Sendable {
     var file: ClientConfigFileTextSnapshot
     var changeKind: ClientConfigPreviewFileChangeKind
 
     var id: String { self.file.path }
 }
 
+struct ClientConfigPreviewChangeSummaryCounts: Equatable, Sendable {
+    var createCount: Int = 0
+    var updateCount: Int = 0
+    var unchangedCount: Int = 0
+    var failedCount: Int = 0
+
+    var changedFileCount: Int {
+        self.createCount + self.updateCount
+    }
+}
+
+struct ClientConfigPreviewDerivedState: Equatable, Sendable {
+    var filePresentations: [ClientConfigPreviewFilePresentation]
+}
+
+struct ClientConfigManagerState: Equatable {
+    var target: ClientConfigTarget = .codex
+    var inspections: [ClientConfigTarget: ClientConfigInspection] = [:]
+    var backups: [ClientConfigBackupRecord] = []
+    var loadedBackupTargets: Set<ClientConfigTarget> = []
+    var selectedProxyAPIKeyIDs: [ClientConfigTarget: String] = [:]
+    var operation: ClientConfigManagerOperation = .idle
+    var previewMode: ClientConfigPreviewMode = .proposed
+    var currentPreviews: [ClientConfigTarget: ClientConfigPreview] = [:]
+    var proposedPreviews: [ClientConfigTarget: ClientConfigPreview] = [:]
+    var previewRevision = 0
+    var derivedPreviewStates: [String: ClientConfigPreviewDerivedState] = [:]
+    var changeSummaryCounts: [ClientConfigTarget: ClientConfigPreviewChangeSummaryCounts] = [:]
+    var displayTexts: [String: String] = [:]
+    var selectedPreviewFilePaths: [String: String] = [:]
+    var previewRevealsSecrets = false
+    var pendingRestoreBackup: ClientConfigBackupRecord?
+    var isRestoreConfirmationPresented = false
+    var isBackupDrawerPresented = false
+    var backupDrawerMode: ClientConfigBackupDrawerMode = .list
+    var backupDetail: ClientConfigBackupDetail?
+    var backupDisplayTexts: [String: String] = [:]
+    var loadedTargets: Set<ClientConfigTarget> = []
+}
+
+struct ClientConfigManagerRenderState: Equatable {
+    var target: ClientConfigTarget
+    var operation: ClientConfigManagerOperation
+    var previewMode: ClientConfigPreviewMode
+    var previewRevision: Int
+    var previewRevealsSecrets: Bool
+    var inspection: ClientConfigInspection
+    var filePresentations: [ClientConfigPreviewFilePresentation]
+    var selectedPreviewFilePresentation: ClientConfigPreviewFilePresentation?
+    var selectedDisplayText: String?
+    var selectedTextIdentity: String?
+    var changeSummaryText: String
+    var changedFileCount: Int
+    var isBackupDrawerPresented: Bool
+    var backupDrawerMode: ClientConfigBackupDrawerMode
+    var backupDetail: ClientConfigBackupDetail?
+    var visibleBackups: [ClientConfigBackupRecord]
+}
+
+private struct ClientConfigManagerRefreshPayload: Sendable {
+    var target: ClientConfigTarget
+    var inspection: ClientConfigInspection
+    var currentPreview: ClientConfigPreview
+    var proposedPreview: ClientConfigPreview
+}
+
 @MainActor
 extension DesktopAppModel {
+    private func updateClientConfigManagerState(_ update: (inout ClientConfigManagerState) -> Void) {
+        var state = self.clientConfigManagerState
+        update(&state)
+        if state != self.clientConfigManagerState {
+            self.clientConfigManagerState = state
+        }
+    }
+
+    var clientConfigManagerTarget: ClientConfigTarget {
+        get { self.clientConfigManagerState.target }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.target = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerInspections: [ClientConfigTarget: ClientConfigInspection] {
+        get { self.clientConfigManagerState.inspections }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.inspections = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerBackups: [ClientConfigBackupRecord] {
+        get { self.clientConfigManagerState.backups }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.backups = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerSelectedProxyAPIKeyIDs: [ClientConfigTarget: String] {
+        get { self.clientConfigManagerState.selectedProxyAPIKeyIDs }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.selectedProxyAPIKeyIDs = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerOperation: ClientConfigManagerOperation {
+        get { self.clientConfigManagerState.operation }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.operation = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerPreviewMode: ClientConfigPreviewMode {
+        get { self.clientConfigManagerState.previewMode }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.previewMode = newValue
+                state.previewRevision &+= 1
+                self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+            }
+        }
+    }
+
+    var clientConfigManagerCurrentPreviews: [ClientConfigTarget: ClientConfigPreview] {
+        get { self.clientConfigManagerState.currentPreviews }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.currentPreviews = newValue
+                self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+            }
+        }
+    }
+
+    var clientConfigManagerProposedPreviews: [ClientConfigTarget: ClientConfigPreview] {
+        get { self.clientConfigManagerState.proposedPreviews }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.proposedPreviews = newValue
+                self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+            }
+        }
+    }
+
+    var clientConfigManagerPreviewRevision: Int {
+        get { self.clientConfigManagerState.previewRevision }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.previewRevision = newValue
+                self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+            }
+        }
+    }
+
+    var clientConfigManagerDerivedPreviewStates: [String: ClientConfigPreviewDerivedState] {
+        get { self.clientConfigManagerState.derivedPreviewStates }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.derivedPreviewStates = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerChangeSummaryCounts: [ClientConfigTarget: ClientConfigPreviewChangeSummaryCounts] {
+        get { self.clientConfigManagerState.changeSummaryCounts }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.changeSummaryCounts = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerSelectedPreviewFilePaths: [String: String] {
+        get { self.clientConfigManagerState.selectedPreviewFilePaths }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.selectedPreviewFilePaths = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerPreviewRevealsSecrets: Bool {
+        get { self.clientConfigManagerState.previewRevealsSecrets }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.previewRevealsSecrets = newValue
+                state.previewRevision &+= 1
+                self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+                self.rebuildClientConfigManagerBackupDisplayCache(in: &state)
+            }
+        }
+    }
+
+    var clientConfigManagerPendingRestoreBackup: ClientConfigBackupRecord? {
+        get { self.clientConfigManagerState.pendingRestoreBackup }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.pendingRestoreBackup = newValue
+            }
+        }
+    }
+
+    var isClientConfigManagerRestoreConfirmationPresented: Bool {
+        get { self.clientConfigManagerState.isRestoreConfirmationPresented }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.isRestoreConfirmationPresented = newValue
+            }
+        }
+    }
+
+    var isClientConfigBackupDrawerPresented: Bool {
+        get { self.clientConfigManagerState.isBackupDrawerPresented }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.isBackupDrawerPresented = newValue
+            }
+        }
+    }
+
+    var clientConfigBackupDrawerMode: ClientConfigBackupDrawerMode {
+        get { self.clientConfigManagerState.backupDrawerMode }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.backupDrawerMode = newValue
+            }
+        }
+    }
+
+    var clientConfigManagerBackupDetail: ClientConfigBackupDetail? {
+        get { self.clientConfigManagerState.backupDetail }
+        set {
+            self.updateClientConfigManagerState { state in
+                state.backupDetail = newValue
+                self.rebuildClientConfigManagerBackupDisplayCache(in: &state)
+            }
+        }
+    }
+
     var clientConfigManagerWindowTitle: String {
-        self.localized(zh: "客户端配置管理", en: "Client Config Manager")
+        self.localized(zh: "Codex/Claude 配置管理", en: "Codex/Claude Config Manager")
     }
 
     var actionOpenClientConfigManager: String {
-        self.localized(zh: "本机配置管理", en: "Configure Local Clients")
+        self.localized(zh: "Codex/Claude 配置管理", en: "Codex/Claude Config Manager")
     }
 
     var clientConfigManagerAvailableProxyAPIKeys: [ProxyAPIKeyRecord] {
@@ -62,6 +307,69 @@ extension DesktopAppModel {
         self.clientConfigManagerOperation != .idle
     }
 
+    var clientConfigManagerRenderState: ClientConfigManagerRenderState {
+        let state = self.clientConfigManagerState
+        let target = state.target
+        let mode = state.previewMode
+        let inspection = self.clientConfigManagerInspection(for: target)
+        let preview = self.clientConfigManagerPreview(for: target, mode: mode, in: state)
+        let selectionKey = Self.clientConfigManagerPreviewSelectionKey(target: target, mode: mode)
+        let selectedPath = state.selectedPreviewFilePaths[selectionKey]
+        let selectedFile = selectedPath.flatMap { path in
+            preview.files.first(where: { $0.path == path })
+        } ?? preview.files.first
+        let selectedPresentation = selectedFile.map { file in
+            ClientConfigPreviewFilePresentation(
+                file: file,
+                changeKind: Self.clientConfigManagerFileChangeKind(
+                    target: target,
+                    path: file.path,
+                    currentPreviews: state.currentPreviews,
+                    proposedPreviews: state.proposedPreviews
+                )
+            )
+        }
+        let selectedDisplayText = selectedFile.map { file in
+            let key = Self.clientConfigManagerPreviewTextKey(
+                target: target,
+                mode: mode,
+                path: file.path,
+                revealsSecrets: state.previewRevealsSecrets
+            )
+            return state.displayTexts[key]
+                ?? Self.clientConfigManagerDisplayContent(for: file, revealsSecrets: state.previewRevealsSecrets)
+        }
+        let selectedTextIdentity = selectedFile.map { file in
+            Self.clientConfigManagerPreviewTextIdentity(
+                previewRevision: state.previewRevision,
+                target: target,
+                mode: mode,
+                path: file.path,
+                revealsSecrets: state.previewRevealsSecrets
+            )
+        }
+        let visibleBackups = state.backups.filter { $0.target == target }
+
+        return ClientConfigManagerRenderState(
+            target: target,
+            operation: state.operation,
+            previewMode: mode,
+            previewRevision: state.previewRevision,
+            previewRevealsSecrets: state.previewRevealsSecrets,
+            inspection: inspection,
+            filePresentations: self.clientConfigManagerVisibleFilePresentations,
+            selectedPreviewFilePresentation: selectedPresentation,
+            selectedDisplayText: selectedDisplayText,
+            selectedTextIdentity: selectedTextIdentity,
+            changeSummaryText: self.clientConfigManagerChangeSummaryText,
+            changedFileCount: self.clientConfigManagerChangedFileCount,
+            isBackupDrawerPresented: state.isBackupDrawerPresented,
+            backupDrawerMode: state.backupDrawerMode,
+            backupDetail: state.backupDetail,
+            visibleBackups: visibleBackups
+        )
+    }
+
     var clientConfigManagerVisibleBackups: [ClientConfigBackupRecord] {
         self.clientConfigManagerBackups.filter { $0.target == self.clientConfigManagerTarget }
     }
@@ -71,20 +379,24 @@ extension DesktopAppModel {
     }
 
     var clientConfigManagerVisibleFilePresentations: [ClientConfigPreviewFilePresentation] {
-        self.clientConfigManagerVisiblePreview.files.map { file in
-            ClientConfigPreviewFilePresentation(
-                file: file,
-                changeKind: self.clientConfigManagerFileChangeKind(
-                    target: self.clientConfigManagerTarget,
-                    path: file.path
-                )
-            )
+        let key = Self.clientConfigManagerPreviewSelectionKey(
+            target: self.clientConfigManagerTarget,
+            mode: self.clientConfigManagerPreviewMode
+        )
+        if let cached = self.clientConfigManagerDerivedPreviewStates[key] {
+            return cached.filePresentations
         }
+        return Self.clientConfigManagerFilePresentations(
+            target: self.clientConfigManagerTarget,
+            preview: self.clientConfigManagerVisiblePreview,
+            currentPreviews: self.clientConfigManagerCurrentPreviews,
+            proposedPreviews: self.clientConfigManagerProposedPreviews
+        )
     }
 
     var clientConfigManagerSelectedPreviewFile: ClientConfigFileTextSnapshot? {
         let preview = self.clientConfigManagerVisiblePreview
-        let selectionKey = self.clientConfigManagerPreviewSelectionKey(
+        let selectionKey = Self.clientConfigManagerPreviewSelectionKey(
             target: preview.target,
             mode: self.clientConfigManagerPreviewMode
         )
@@ -98,51 +410,45 @@ extension DesktopAppModel {
 
     var clientConfigManagerSelectedPreviewFilePresentation: ClientConfigPreviewFilePresentation? {
         guard let file = self.clientConfigManagerSelectedPreviewFile else { return nil }
+        if let cached = self.clientConfigManagerVisibleFilePresentations.first(where: { $0.file.path == file.path }) {
+            return cached
+        }
         return ClientConfigPreviewFilePresentation(
             file: file,
-            changeKind: self.clientConfigManagerFileChangeKind(
-                target: self.clientConfigManagerTarget,
-                path: file.path
-            )
+            changeKind: self.clientConfigManagerFileChangeKind(target: self.clientConfigManagerTarget, path: file.path)
         )
     }
 
     var clientConfigManagerChangedFileCount: Int {
-        self.clientConfigManagerProposedPreviews[self.clientConfigManagerTarget]?.files.reduce(0) { partial, file in
-            let changeKind = self.clientConfigManagerFileChangeKind(
-                target: self.clientConfigManagerTarget,
-                path: file.path
-            )
-            switch changeKind {
-            case .willCreate, .willUpdate:
-                return partial + 1
-            case .readFailed, .unchanged:
-                return partial
-            }
-        } ?? 0
+        if let counts = self.clientConfigManagerChangeSummaryCounts[self.clientConfigManagerTarget] {
+            return counts.changedFileCount
+        }
+        return Self.clientConfigManagerChangeSummaryCounts(
+            target: self.clientConfigManagerTarget,
+            currentPreviews: self.clientConfigManagerCurrentPreviews,
+            proposedPreviews: self.clientConfigManagerProposedPreviews
+        ).changedFileCount
     }
 
     var clientConfigManagerChangeSummaryText: String {
-        let target = self.clientConfigManagerTarget
-        let files = self.clientConfigManagerProposedPreviews[target]?.files ?? []
-        let kinds = files.map { self.clientConfigManagerFileChangeKind(target: target, path: $0.path) }
-        let createCount = kinds.filter { $0 == .willCreate }.count
-        let updateCount = kinds.filter { $0 == .willUpdate }.count
-        let unchangedCount = kinds.filter { $0 == .unchanged }.count
-        let failedCount = kinds.filter { $0 == .readFailed }.count
-
+        let counts = self.clientConfigManagerChangeSummaryCounts[self.clientConfigManagerTarget]
+            ?? Self.clientConfigManagerChangeSummaryCounts(
+                target: self.clientConfigManagerTarget,
+                currentPreviews: self.clientConfigManagerCurrentPreviews,
+                proposedPreviews: self.clientConfigManagerProposedPreviews
+            )
         var parts: [String] = []
-        if createCount > 0 {
-            parts.append(self.localized(zh: "\(createCount) 个将创建", en: "\(createCount) to create"))
+        if counts.createCount > 0 {
+            parts.append(self.localized(zh: "\(counts.createCount) 个将创建", en: "\(counts.createCount) to create"))
         }
-        if updateCount > 0 {
-            parts.append(self.localized(zh: "\(updateCount) 个将更新", en: "\(updateCount) to update"))
+        if counts.updateCount > 0 {
+            parts.append(self.localized(zh: "\(counts.updateCount) 个将更新", en: "\(counts.updateCount) to update"))
         }
-        if unchangedCount > 0 {
-            parts.append(self.localized(zh: "\(unchangedCount) 个无变化", en: "\(unchangedCount) unchanged"))
+        if counts.unchangedCount > 0 {
+            parts.append(self.localized(zh: "\(counts.unchangedCount) 个无变化", en: "\(counts.unchangedCount) unchanged"))
         }
-        if failedCount > 0 {
-            parts.append(self.localized(zh: "\(failedCount) 个读取失败", en: "\(failedCount) read failed"))
+        if counts.failedCount > 0 {
+            parts.append(self.localized(zh: "\(counts.failedCount) 个读取失败", en: "\(counts.failedCount) read failed"))
         }
         return parts.isEmpty ? self.localized(zh: "暂无可比较文件", en: "No comparable files") : parts.joined(separator: " · ")
     }
@@ -163,7 +469,7 @@ extension DesktopAppModel {
             ?? ClientConfigInspection(
                 target: target,
                 files: self.clientConfigFileService.managedFileURLs(for: target).map {
-                    ClientConfigManagedFileState(path: $0.path, exists: FileManager.default.fileExists(atPath: $0.path))
+                    ClientConfigManagedFileState(path: $0.path, exists: false)
                 }
             )
     }
@@ -187,7 +493,7 @@ extension DesktopAppModel {
     var clientConfigManagerApplyUnavailableReason: String? {
         if self.clientConfigManagerAvailableProxyAPIKeys.isEmpty {
             return self.localized(
-                zh: "当前没有启用中的本地 API Key。请先到 Proxy 页启用至少一把 Key。",
+                zh: "当前没有启用中的本地 API Key。请先到代理页启用至少一把 Key。",
                 en: "There are no enabled local API keys. Enable at least one key on the Proxy page first."
             )
         }
@@ -229,8 +535,8 @@ extension DesktopAppModel {
     func clientConfigManagerApplyButtonTitle(for target: ClientConfigTarget? = nil) -> String {
         let resolvedTarget = target ?? self.clientConfigManagerTarget
         return self.localized(
-            zh: "应用到 \(self.clientConfigManagerTitle(for: resolvedTarget))",
-            en: "Apply To \(self.clientConfigManagerTitle(for: resolvedTarget))"
+            zh: "写入到 \(self.clientConfigManagerTitle(for: resolvedTarget))",
+            en: "Write To \(self.clientConfigManagerTitle(for: resolvedTarget))"
         )
     }
 
@@ -260,16 +566,29 @@ extension DesktopAppModel {
 
     func clientConfigManagerSelectProxyAPIKey(_ id: String?, for target: ClientConfigTarget? = nil) {
         let resolvedTarget = target ?? self.clientConfigManagerTarget
-        self.clientConfigManagerSelectedProxyAPIKeyIDs[resolvedTarget] = id
-        self.refreshClientConfigManagerPreview(target: resolvedTarget)
+        self.updateClientConfigManagerState { state in
+            state.selectedProxyAPIKeyIDs[resolvedTarget] = id
+            state.previewRevision &+= 1
+        }
+        Task { await self.refreshClientConfigManagerState(showLoading: false, target: resolvedTarget, force: true) }
+    }
+
+    func clientConfigManagerSelectTarget(_ target: ClientConfigTarget) {
+        self.updateClientConfigManagerState { state in
+            state.target = target
+            self.ensureClientConfigManagerSelection(for: target, in: &state)
+        }
+        Task { await self.refreshClientConfigManagerState(showLoading: false, target: target, force: false) }
     }
 
     func clientConfigManagerSelectPreviewFile(_ path: String?) {
-        let key = self.clientConfigManagerPreviewSelectionKey(
+        let key = Self.clientConfigManagerPreviewSelectionKey(
             target: self.clientConfigManagerTarget,
             mode: self.clientConfigManagerPreviewMode
         )
-        self.clientConfigManagerSelectedPreviewFilePaths[key] = path
+        self.updateClientConfigManagerState { state in
+            state.selectedPreviewFilePaths[key] = path
+        }
     }
 
     func clientConfigManagerCurrentKeyStatusText(for inspection: ClientConfigInspection) -> String {
@@ -385,13 +704,29 @@ extension DesktopAppModel {
     }
 
     func clientConfigManagerDisplayContent(for file: ClientConfigFileTextSnapshot) -> String {
-        if let errorMessage = file.errorMessage, !errorMessage.isEmpty, file.content.isEmpty {
-            return errorMessage
+        let previewKey = Self.clientConfigManagerPreviewTextKey(
+            target: self.clientConfigManagerTarget,
+            mode: self.clientConfigManagerPreviewMode,
+            path: file.path,
+            revealsSecrets: self.clientConfigManagerPreviewRevealsSecrets
+        )
+        if let cached = self.clientConfigManagerState.displayTexts[previewKey] {
+            return cached
         }
-        guard self.clientConfigManagerPreviewRevealsSecrets == false else {
-            return file.content
+        if let detail = self.clientConfigManagerBackupDetail {
+            let backupKey = Self.clientConfigManagerBackupTextKey(
+                backupID: detail.id,
+                path: file.path,
+                revealsSecrets: self.clientConfigManagerPreviewRevealsSecrets
+            )
+            if let cached = self.clientConfigManagerState.backupDisplayTexts[backupKey] {
+                return cached
+            }
         }
-        return Self.maskedClientConfigContent(file.content)
+        return Self.clientConfigManagerDisplayContent(
+            for: file,
+            revealsSecrets: self.clientConfigManagerPreviewRevealsSecrets
+        )
     }
 
     func clientConfigManagerApplySuccessTitle(for target: ClientConfigTarget) -> String {
@@ -427,14 +762,26 @@ extension DesktopAppModel {
         )
     }
 
+    func enterClientConfigPageIfNeeded() {
+        let target = self.clientConfigManagerTarget
+        self.updateClientConfigManagerState { state in
+            self.ensureClientConfigManagerSelection(for: target, in: &state)
+        }
+        if self.clientConfigManagerState.loadedTargets.contains(target) == false {
+            Task { await self.refreshClientConfigManagerState(showLoading: true, target: target, force: false) }
+        }
+    }
+
     func openClientConfigManagerWindow() {
         if self.clientConfigManagerWindowController == nil {
             self.clientConfigManagerWindowController = self.clientConfigManagerWindowFactory(self)
         }
-        self.ensureClientConfigManagerSelection(for: self.clientConfigManagerTarget)
+        self.updateClientConfigManagerState { state in
+            self.ensureClientConfigManagerSelection(for: state.target, in: &state)
+        }
         self.isClientConfigManagerPresented = true
         self.clientConfigManagerWindowController?.showWindow()
-        Task { await self.refreshClientConfigManagerState(showLoading: true) }
+        Task { await self.refreshClientConfigManagerState(showLoading: true, target: self.clientConfigManagerTarget, force: false) }
     }
 
     func dismissClientConfigManagerWindow() {
@@ -447,38 +794,118 @@ extension DesktopAppModel {
     }
 
     func presentClientConfigBackupDrawer() {
-        self.clientConfigBackupDrawerMode = .list
-        self.isClientConfigBackupDrawerPresented = true
+        let target = self.clientConfigManagerTarget
+        self.updateClientConfigManagerState { state in
+            state.backupDrawerMode = .list
+            state.isBackupDrawerPresented = true
+        }
+        Task { await self.loadClientConfigManagerBackupsIfNeeded(target: target, force: false) }
+    }
+
+    func loadClientConfigManagerBackupsIfNeeded(
+        target: ClientConfigTarget? = nil,
+        force: Bool = false
+    ) async {
+        let resolvedTarget = target ?? self.clientConfigManagerTarget
+        if force == false, self.clientConfigManagerState.loadedBackupTargets.contains(resolvedTarget) {
+            return
+        }
+
+        self.clientConfigManagerBackupLoadGeneration &+= 1
+        let generation = self.clientConfigManagerBackupLoadGeneration
+        let service = self.clientConfigFileService
+        let records = await Task.detached(priority: .utility) {
+            service.listBackups(target: resolvedTarget)
+        }.value
+
+        guard generation == self.clientConfigManagerBackupLoadGeneration else {
+            return
+        }
+
+        self.updateClientConfigManagerState { state in
+            var merged = state.backups.filter { $0.target != resolvedTarget }
+            merged.append(contentsOf: records)
+            state.backups = merged.sorted {
+                if $0.createdAt != $1.createdAt {
+                    return $0.createdAt > $1.createdAt
+                }
+                return $0.id > $1.id
+            }
+            state.loadedBackupTargets.insert(resolvedTarget)
+        }
     }
 
     func dismissClientConfigBackupDrawer() {
-        self.isClientConfigBackupDrawerPresented = false
-        self.clientConfigBackupDrawerMode = .list
-        self.clientConfigManagerBackupDetail = nil
+        self.updateClientConfigManagerState { state in
+            state.isBackupDrawerPresented = false
+            state.backupDrawerMode = .list
+            state.backupDetail = nil
+            state.backupDisplayTexts = [:]
+        }
     }
 
     func returnToClientConfigBackupList() {
-        self.clientConfigBackupDrawerMode = .list
-        self.clientConfigManagerBackupDetail = nil
-        self.isClientConfigBackupDrawerPresented = true
+        self.updateClientConfigManagerState { state in
+            state.backupDrawerMode = .list
+            state.backupDetail = nil
+            state.backupDisplayTexts = [:]
+            state.isBackupDrawerPresented = true
+        }
     }
 
-    func refreshClientConfigManagerState(showLoading: Bool = false) async {
+    func refreshClientConfigManagerState(
+        showLoading: Bool = false,
+        target: ClientConfigTarget? = nil,
+        force: Bool = true
+    ) async {
+        let resolvedTarget = target ?? self.clientConfigManagerTarget
+        if force == false, self.clientConfigManagerState.loadedTargets.contains(resolvedTarget) {
+            return
+        }
+        self.clientConfigManagerRefreshGeneration &+= 1
+        let generation = self.clientConfigManagerRefreshGeneration
         if showLoading {
-            self.clientConfigManagerOperation = .loading
+            self.updateClientConfigManagerState { state in
+                state.operation = .loading
+            }
         }
 
-        let inspections = self.clientConfigFileService.inspectAll(
-            availableProxyAPIKeys: self.clientConfigManagerAvailableProxyAPIKeys
+        let service = self.clientConfigFileService
+        let availableProxyAPIKeys = self.clientConfigManagerAvailableProxyAPIKeys
+        let selectedProxyAPIKeyIDs = self.clientConfigManagerSelectedProxyAPIKeyIDs
+        let endpoints = self.clientConfigManagerEndpointBundle
+        let missingKeyErrorMessage = self.localized(
+            zh: "当前没有可用的本地 API Key。",
+            en: "There is no enabled local API key."
         )
-        let backups = self.clientConfigFileService.listBackups()
-        self.clientConfigManagerInspections = inspections
-        self.clientConfigManagerBackups = backups
-        self.ensureClientConfigManagerSelection(for: self.clientConfigManagerTarget)
-        self.refreshClientConfigManagerPreviews()
+        let payload = await Task.detached(priority: .userInitiated) {
+            Self.buildClientConfigManagerRefreshPayload(
+                service: service,
+                target: resolvedTarget,
+                availableProxyAPIKeys: availableProxyAPIKeys,
+                selectedProxyAPIKeyIDs: selectedProxyAPIKeyIDs,
+                endpoints: endpoints,
+                missingKeyErrorMessage: missingKeyErrorMessage
+            )
+        }.value
 
-        if showLoading, self.clientConfigManagerOperation == .loading {
-            self.clientConfigManagerOperation = .idle
+        guard generation == self.clientConfigManagerRefreshGeneration else {
+            return
+        }
+
+        self.updateClientConfigManagerState { state in
+            state.inspections[payload.target] = payload.inspection
+            state.currentPreviews[payload.target] = payload.currentPreview
+            state.proposedPreviews[payload.target] = payload.proposedPreview
+            state.loadedTargets.insert(payload.target)
+            self.ensureClientConfigManagerSelection(for: payload.target, in: &state)
+            self.ensureClientConfigManagerPreviewSelection(target: payload.target, mode: .current, in: &state)
+            self.ensureClientConfigManagerPreviewSelection(target: payload.target, mode: .proposed, in: &state)
+            self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+            state.previewRevision &+= 1
+            if showLoading, state.operation == .loading {
+                state.operation = .idle
+            }
         }
     }
 
@@ -502,7 +929,8 @@ extension DesktopAppModel {
                 proxyAPIKey: selectedProxyAPIKey,
                 endpoints: self.clientConfigManagerEndpointBundle
             )
-            await self.refreshClientConfigManagerState()
+            await self.refreshClientConfigManagerState(target: target, force: true)
+            await self.loadClientConfigManagerBackupsIfNeeded(target: target, force: true)
             self.publishBanner(
                 .success,
                 title: self.clientConfigManagerApplySuccessTitle(for: target),
@@ -519,7 +947,8 @@ extension DesktopAppModel {
 
         do {
             _ = try self.clientConfigFileService.restoreBackup(id: backup.id)
-            await self.refreshClientConfigManagerState()
+            await self.refreshClientConfigManagerState(target: backup.target, force: true)
+            await self.loadClientConfigManagerBackupsIfNeeded(target: backup.target, force: true)
             self.publishBanner(
                 .success,
                 title: self.clientConfigManagerRestoreSuccessTitle(for: backup.target),
@@ -561,31 +990,65 @@ extension DesktopAppModel {
     }
 
     func openClientConfigBackupViewer(_ backup: ClientConfigBackupRecord) {
-        do {
-            let detail = try self.clientConfigFileService.loadBackupDetail(id: backup.id)
-            self.clientConfigManagerBackupDetail = detail
-            self.clientConfigBackupDrawerMode = .detail
-            self.isClientConfigBackupDrawerPresented = true
-        } catch {
-            self.present(error: error, context: .saveSettings)
+        self.clientConfigManagerBackupLoadGeneration &+= 1
+        let generation = self.clientConfigManagerBackupLoadGeneration
+        let service = self.clientConfigFileService
+
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try service.loadBackupDetail(id: backup.id) }
+            }.value
+
+            guard generation == self.clientConfigManagerBackupLoadGeneration else {
+                return
+            }
+
+            switch result {
+            case .success(let detail):
+                self.updateClientConfigManagerState { state in
+                    state.backupDetail = detail
+                    state.backupDrawerMode = .detail
+                    state.isBackupDrawerPresented = true
+                    self.rebuildClientConfigManagerBackupDisplayCache(in: &state)
+                }
+            case .failure(let error):
+                self.present(error: error, context: .saveSettings)
+            }
         }
     }
 
     private func ensureClientConfigManagerSelection(for target: ClientConfigTarget) {
-        if let selectedID = self.clientConfigManagerSelectedProxyAPIKeyIDs[target],
+        self.updateClientConfigManagerState { state in
+            self.ensureClientConfigManagerSelection(for: target, in: &state)
+        }
+    }
+
+    private func ensureClientConfigManagerSelection(
+        for target: ClientConfigTarget,
+        in state: inout ClientConfigManagerState
+    ) {
+        if let selectedID = state.selectedProxyAPIKeyIDs[target],
            self.clientConfigManagerAvailableProxyAPIKeys.contains(where: { $0.id == selectedID })
         {
             return
         }
-        self.clientConfigManagerSelectedProxyAPIKeyIDs[target] = self.clientConfigManagerAvailableProxyAPIKeys.first?.id
+        state.selectedProxyAPIKeyIDs[target] = self.clientConfigManagerAvailableProxyAPIKeys.first?.id
     }
 
     private func clientConfigManagerPreview(for target: ClientConfigTarget, mode: ClientConfigPreviewMode) -> ClientConfigPreview {
+        self.clientConfigManagerPreview(for: target, mode: mode, in: self.clientConfigManagerState)
+    }
+
+    private func clientConfigManagerPreview(
+        for target: ClientConfigTarget,
+        mode: ClientConfigPreviewMode,
+        in state: ClientConfigManagerState
+    ) -> ClientConfigPreview {
         switch mode {
         case .current:
-            return self.clientConfigManagerCurrentPreviews[target] ?? self.emptyClientConfigManagerPreview(for: target)
+            return state.currentPreviews[target] ?? self.emptyClientConfigManagerPreview(for: target)
         case .proposed:
-            return self.clientConfigManagerProposedPreviews[target] ?? self.emptyClientConfigManagerPreview(for: target)
+            return state.proposedPreviews[target] ?? self.emptyClientConfigManagerPreview(for: target)
         }
     }
 
@@ -594,8 +1057,205 @@ extension DesktopAppModel {
         path: String
     ) -> ClientConfigPreviewFileChangeKind {
         let resolvedTarget = target ?? self.clientConfigManagerTarget
-        let current = self.clientConfigManagerCurrentPreviews[resolvedTarget]?.files.first { $0.path == path }
-        let proposed = self.clientConfigManagerProposedPreviews[resolvedTarget]?.files.first { $0.path == path }
+        return Self.clientConfigManagerFileChangeKind(
+            target: resolvedTarget,
+            path: path,
+            currentPreviews: self.clientConfigManagerCurrentPreviews,
+            proposedPreviews: self.clientConfigManagerProposedPreviews
+        )
+    }
+
+    private func ensureClientConfigManagerPreviewSelections() {
+        for target in ClientConfigTarget.allCases {
+            self.ensureClientConfigManagerPreviewSelection(target: target, mode: .current)
+            self.ensureClientConfigManagerPreviewSelection(target: target, mode: .proposed)
+        }
+    }
+
+    private func rebuildClientConfigManagerDerivedPreviewCache() {
+        self.updateClientConfigManagerState { state in
+            self.rebuildClientConfigManagerDerivedPreviewCache(in: &state)
+        }
+    }
+
+    private func rebuildClientConfigManagerDerivedPreviewCache(in state: inout ClientConfigManagerState) {
+        var states: [String: ClientConfigPreviewDerivedState] = [:]
+        var summaryCounts: [ClientConfigTarget: ClientConfigPreviewChangeSummaryCounts] = [:]
+        var displayTexts: [String: String] = [:]
+        let targets = Set(state.currentPreviews.keys)
+            .union(state.proposedPreviews.keys)
+            .union(state.loadedTargets)
+            .union([state.target])
+
+        for target in targets {
+            summaryCounts[target] = Self.clientConfigManagerChangeSummaryCounts(
+                target: target,
+                currentPreviews: state.currentPreviews,
+                proposedPreviews: state.proposedPreviews
+            )
+            for mode in ClientConfigPreviewMode.allCases {
+                let preview = self.clientConfigManagerPreview(for: target, mode: mode, in: state)
+                let key = Self.clientConfigManagerPreviewSelectionKey(target: target, mode: mode)
+                states[key] = ClientConfigPreviewDerivedState(
+                    filePresentations: Self.clientConfigManagerFilePresentations(
+                        target: target,
+                        preview: preview,
+                        currentPreviews: state.currentPreviews,
+                        proposedPreviews: state.proposedPreviews
+                    )
+                )
+                for file in preview.files {
+                    displayTexts[
+                        Self.clientConfigManagerPreviewTextKey(
+                            target: target,
+                            mode: mode,
+                            path: file.path,
+                            revealsSecrets: state.previewRevealsSecrets
+                        )
+                    ] = Self.clientConfigManagerDisplayContent(
+                        for: file,
+                        revealsSecrets: state.previewRevealsSecrets
+                    )
+                }
+            }
+        }
+
+        state.derivedPreviewStates = states
+        state.changeSummaryCounts = summaryCounts
+        state.displayTexts = displayTexts
+    }
+
+    private func rebuildClientConfigManagerBackupDisplayCache(in state: inout ClientConfigManagerState) {
+        guard let detail = state.backupDetail else {
+            state.backupDisplayTexts = [:]
+            return
+        }
+        var displayTexts: [String: String] = [:]
+        for file in detail.files {
+            displayTexts[
+                Self.clientConfigManagerBackupTextKey(
+                    backupID: detail.id,
+                    path: file.path,
+                    revealsSecrets: state.previewRevealsSecrets
+                )
+            ] = Self.clientConfigManagerDisplayContent(
+                for: file,
+                revealsSecrets: state.previewRevealsSecrets
+            )
+        }
+        state.backupDisplayTexts = displayTexts
+    }
+
+    nonisolated private static func buildClientConfigManagerRefreshPayload(
+        service: ClientConfigFileService,
+        target: ClientConfigTarget,
+        availableProxyAPIKeys: [ProxyAPIKeyRecord],
+        selectedProxyAPIKeyIDs: [ClientConfigTarget: String],
+        endpoints: ClientConfigEndpointBundle,
+        missingKeyErrorMessage: String
+    ) -> ClientConfigManagerRefreshPayload {
+        let currentPreview = service.previewCurrentConfiguration(target: target)
+        let proposedPreview: ClientConfigPreview
+        if let selectedProxyAPIKey = Self.selectedClientConfigProxyAPIKey(
+            target: target,
+            availableProxyAPIKeys: availableProxyAPIKeys,
+            selectedProxyAPIKeyIDs: selectedProxyAPIKeyIDs
+        ) {
+            do {
+                proposedPreview = try service.previewProposedConfiguration(
+                    target: target,
+                    proxyAPIKey: selectedProxyAPIKey,
+                    endpoints: endpoints
+                )
+            } catch {
+                proposedPreview = Self.errorClientConfigManagerPreview(
+                    service: service,
+                    target: target,
+                    errorMessage: error.localizedDescription
+                )
+            }
+        } else {
+            proposedPreview = Self.errorClientConfigManagerPreview(
+                service: service,
+                target: target,
+                errorMessage: missingKeyErrorMessage
+            )
+        }
+
+        return ClientConfigManagerRefreshPayload(
+            target: target,
+            inspection: service.inspect(target: target, availableProxyAPIKeys: availableProxyAPIKeys),
+            currentPreview: currentPreview,
+            proposedPreview: proposedPreview
+        )
+    }
+
+    nonisolated private static func selectedClientConfigProxyAPIKey(
+        target: ClientConfigTarget,
+        availableProxyAPIKeys: [ProxyAPIKeyRecord],
+        selectedProxyAPIKeyIDs: [ClientConfigTarget: String]
+    ) -> ProxyAPIKeyRecord? {
+        if let selectedID = selectedProxyAPIKeyIDs[target],
+           let matched = availableProxyAPIKeys.first(where: { $0.id == selectedID })
+        {
+            return matched
+        }
+        return availableProxyAPIKeys.first
+    }
+
+    nonisolated private static func clientConfigManagerFilePresentations(
+        target: ClientConfigTarget,
+        preview: ClientConfigPreview,
+        currentPreviews: [ClientConfigTarget: ClientConfigPreview],
+        proposedPreviews: [ClientConfigTarget: ClientConfigPreview]
+    ) -> [ClientConfigPreviewFilePresentation] {
+        preview.files.map { file in
+            ClientConfigPreviewFilePresentation(
+                file: file,
+                changeKind: Self.clientConfigManagerFileChangeKind(
+                    target: target,
+                    path: file.path,
+                    currentPreviews: currentPreviews,
+                    proposedPreviews: proposedPreviews
+                )
+            )
+        }
+    }
+
+    nonisolated private static func clientConfigManagerChangeSummaryCounts(
+        target: ClientConfigTarget,
+        currentPreviews: [ClientConfigTarget: ClientConfigPreview],
+        proposedPreviews: [ClientConfigTarget: ClientConfigPreview]
+    ) -> ClientConfigPreviewChangeSummaryCounts {
+        var counts = ClientConfigPreviewChangeSummaryCounts()
+        for file in proposedPreviews[target]?.files ?? [] {
+            switch Self.clientConfigManagerFileChangeKind(
+                target: target,
+                path: file.path,
+                currentPreviews: currentPreviews,
+                proposedPreviews: proposedPreviews
+            ) {
+            case .willCreate:
+                counts.createCount += 1
+            case .willUpdate:
+                counts.updateCount += 1
+            case .unchanged:
+                counts.unchangedCount += 1
+            case .readFailed:
+                counts.failedCount += 1
+            }
+        }
+        return counts
+    }
+
+    nonisolated private static func clientConfigManagerFileChangeKind(
+        target: ClientConfigTarget,
+        path: String,
+        currentPreviews: [ClientConfigTarget: ClientConfigPreview],
+        proposedPreviews: [ClientConfigTarget: ClientConfigPreview]
+    ) -> ClientConfigPreviewFileChangeKind {
+        let current = currentPreviews[target]?.files.first { $0.path == path }
+        let proposed = proposedPreviews[target]?.files.first { $0.path == path }
 
         if current?.errorMessage?.isEmpty == false || proposed?.errorMessage?.isEmpty == false {
             return .readFailed
@@ -615,53 +1275,111 @@ extension DesktopAppModel {
         return .unchanged
     }
 
-    private func refreshClientConfigManagerPreviews() {
-        for target in ClientConfigTarget.allCases {
-            self.refreshClientConfigManagerPreview(target: target)
-        }
-    }
-
-    private func refreshClientConfigManagerPreview(target: ClientConfigTarget) {
-        self.clientConfigManagerCurrentPreviews[target] = self.clientConfigFileService.previewCurrentConfiguration(target: target)
-        if let selectedProxyAPIKey = self.clientConfigManagerSelectedProxyAPIKeyRecord(for: target) {
-            do {
-                self.clientConfigManagerProposedPreviews[target] = try self.clientConfigFileService.previewProposedConfiguration(
-                    target: target,
-                    proxyAPIKey: selectedProxyAPIKey,
-                    endpoints: self.clientConfigManagerEndpointBundle
-                )
-            } catch {
-                self.clientConfigManagerProposedPreviews[target] = self.errorClientConfigManagerPreview(
-                    target: target,
-                    errorMessage: error.localizedDescription
+    nonisolated private static func errorClientConfigManagerPreview(
+        service: ClientConfigFileService,
+        target: ClientConfigTarget,
+        errorMessage: String
+    ) -> ClientConfigPreview {
+        ClientConfigPreview(
+            target: target,
+            files: service.managedFileURLs(for: target).map {
+                ClientConfigFileTextSnapshot(
+                    path: $0.path,
+                    exists: false,
+                    content: "",
+                    language: Self.clientConfigManagerTextLanguage(for: $0),
+                    errorMessage: errorMessage
                 )
             }
-        } else {
-            self.clientConfigManagerProposedPreviews[target] = self.errorClientConfigManagerPreview(
-                target: target,
-                errorMessage: self.localized(zh: "当前没有可用的本地 API Key。", en: "There is no enabled local API key.")
-            )
+        )
+    }
+
+    nonisolated private static func clientConfigManagerTextLanguage(for url: URL) -> ClientConfigTextLanguage {
+        switch url.pathExtension.lowercased() {
+        case "json":
+            return .json
+        case "toml":
+            return .toml
+        case "env":
+            return .dotenv
+        default:
+            return url.lastPathComponent == ".env" ? .dotenv : .text
         }
-        self.ensureClientConfigManagerPreviewSelection(target: target, mode: .current)
-        self.ensureClientConfigManagerPreviewSelection(target: target, mode: .proposed)
     }
 
     private func ensureClientConfigManagerPreviewSelection(target: ClientConfigTarget, mode: ClientConfigPreviewMode) {
-        let preview = self.clientConfigManagerPreview(for: target, mode: mode)
-        let key = self.clientConfigManagerPreviewSelectionKey(target: target, mode: mode)
-        if let selectedPath = self.clientConfigManagerSelectedPreviewFilePaths[key],
+        self.updateClientConfigManagerState { state in
+            self.ensureClientConfigManagerPreviewSelection(target: target, mode: mode, in: &state)
+        }
+    }
+
+    private func ensureClientConfigManagerPreviewSelection(
+        target: ClientConfigTarget,
+        mode: ClientConfigPreviewMode,
+        in state: inout ClientConfigManagerState
+    ) {
+        let preview = self.clientConfigManagerPreview(for: target, mode: mode, in: state)
+        let key = Self.clientConfigManagerPreviewSelectionKey(target: target, mode: mode)
+        if let selectedPath = state.selectedPreviewFilePaths[key],
            preview.files.contains(where: { $0.path == selectedPath })
         {
             return
         }
-        self.clientConfigManagerSelectedPreviewFilePaths[key] = preview.files.first?.path
+        state.selectedPreviewFilePaths[key] = preview.files.first?.path
     }
 
-    private func clientConfigManagerPreviewSelectionKey(
+    nonisolated private static func clientConfigManagerPreviewSelectionKey(
         target: ClientConfigTarget,
         mode: ClientConfigPreviewMode
     ) -> String {
         "\(target.rawValue):\(mode.rawValue)"
+    }
+
+    nonisolated private static func clientConfigManagerPreviewTextKey(
+        target: ClientConfigTarget,
+        mode: ClientConfigPreviewMode,
+        path: String,
+        revealsSecrets: Bool
+    ) -> String {
+        "preview|\(target.rawValue)|\(mode.rawValue)|\(path)|\(revealsSecrets ? "raw" : "masked")"
+    }
+
+    nonisolated private static func clientConfigManagerBackupTextKey(
+        backupID: String,
+        path: String,
+        revealsSecrets: Bool
+    ) -> String {
+        "backup|\(backupID)|\(path)|\(revealsSecrets ? "raw" : "masked")"
+    }
+
+    nonisolated private static func clientConfigManagerPreviewTextIdentity(
+        previewRevision: Int,
+        target: ClientConfigTarget,
+        mode: ClientConfigPreviewMode,
+        path: String,
+        revealsSecrets: Bool
+    ) -> String {
+        [
+            "preview",
+            "\(previewRevision)",
+            target.rawValue,
+            mode.rawValue,
+            path,
+            revealsSecrets ? "reveal" : "masked",
+        ].joined(separator: "|")
+    }
+
+    nonisolated private static func clientConfigManagerDisplayContent(
+        for file: ClientConfigFileTextSnapshot,
+        revealsSecrets: Bool
+    ) -> String {
+        if let errorMessage = file.errorMessage, !errorMessage.isEmpty, file.content.isEmpty {
+            return errorMessage
+        }
+        guard revealsSecrets == false else {
+            return file.content
+        }
+        return Self.maskedClientConfigContent(file.content)
     }
 
     private func emptyClientConfigManagerPreview(for target: ClientConfigTarget) -> ClientConfigPreview {
@@ -670,7 +1388,7 @@ extension DesktopAppModel {
             files: self.clientConfigFileService.managedFileURLs(for: target).map {
                 ClientConfigFileTextSnapshot(
                     path: $0.path,
-                    exists: FileManager.default.fileExists(atPath: $0.path),
+                    exists: false,
                     content: "",
                     language: self.clientConfigManagerLanguage(for: $0)
                 )
@@ -687,7 +1405,7 @@ extension DesktopAppModel {
             files: self.clientConfigFileService.managedFileURLs(for: target).map {
                 ClientConfigFileTextSnapshot(
                     path: $0.path,
-                    exists: FileManager.default.fileExists(atPath: $0.path),
+                    exists: false,
                     content: "",
                     language: self.clientConfigManagerLanguage(for: $0),
                     errorMessage: errorMessage
@@ -721,14 +1439,14 @@ extension DesktopAppModel {
         }
     }
 
-    private static func maskedClientConfigContent(_ content: String) -> String {
+    nonisolated private static func maskedClientConfigContent(_ content: String) -> String {
         content
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { Self.maskedClientConfigLine(String($0)) }
             .joined(separator: "\n")
     }
 
-    private static func maskedClientConfigLine(_ line: String) -> String {
+    nonisolated private static func maskedClientConfigLine(_ line: String) -> String {
         let sensitiveKeys = [
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
@@ -743,14 +1461,14 @@ extension DesktopAppModel {
         return updated
     }
 
-    private static func maskedDotEnvValue(in line: String, key: String) -> String {
+    nonisolated private static func maskedDotEnvValue(in line: String, key: String) -> String {
         guard let keyRange = line.range(of: "\(key)=") else { return line }
         let leading = line[..<keyRange.lowerBound].trimmingCharacters(in: .whitespaces)
         guard leading.isEmpty else { return line }
         return "\(line[..<keyRange.upperBound])********"
     }
 
-    private static func maskedJSONStringValue(in line: String, key: String) -> String {
+    nonisolated private static func maskedJSONStringValue(in line: String, key: String) -> String {
         guard let keyRange = line.range(of: "\"\(key)\"") else { return line }
         let afterKey = line[keyRange.upperBound...]
         guard let colonRange = afterKey.range(of: ":") else { return line }

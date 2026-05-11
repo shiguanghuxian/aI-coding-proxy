@@ -2025,9 +2025,10 @@ private struct AccountOrderSheet: View {
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
+        let visibleEntries = self.model.accountOrderVisibleEntries
 
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text(self.model.accountOrderSheetTitle)
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(palette.textPrimary)
@@ -2036,25 +2037,49 @@ private struct AccountOrderSheet: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(palette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                self.searchBar(palette: palette)
+
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(self.model.accountOrderVisibleCountText)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(palette.textMuted)
+
+                    Spacer(minLength: 0)
+
+                    Text(self.model.text(.helperAccountOrderSearch))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.textMuted)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
+                }
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
-            .padding(.bottom, 10)
+            .padding(.bottom, 12)
             .frame(maxWidth: .infinity, alignment: .topLeading)
 
             List {
-                ForEach(Array((self.model.accountOrderDraft?.accounts ?? []).enumerated()), id: \.element.id) { entry in
-                    AccountOrderRow(
-                        model: self.model,
-                        index: entry.offset + 1,
-                        account: entry.element
-                    )
-                }
-                .onMove { indices, newOffset in
-                    self.model.moveAccountOrderDraft(fromOffsets: indices, toOffset: newOffset)
+                if visibleEntries.isEmpty {
+                    Text(self.model.text(.placeholderNoMatchingAccountOrder))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(palette.textSecondary)
+                        .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
+                        .listRowSeparator(.hidden)
+                } else if self.model.accountOrderIsSearching {
+                    ForEach(visibleEntries) { entry in
+                        self.row(for: entry)
+                    }
+                } else {
+                    ForEach(visibleEntries) { entry in
+                        self.row(for: entry)
+                    }
+                    .onMove { indices, newOffset in
+                        self.model.moveAccountOrderDraft(fromOffsets: indices, toOffset: newOffset)
+                    }
                 }
             }
-            .frame(minHeight: 360)
+            .frame(minHeight: 440, idealHeight: 520)
 
             Divider()
 
@@ -2077,12 +2102,50 @@ private struct AccountOrderSheet: View {
             .padding(.vertical, 14)
             .background(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.98 : 0.96))
         }
-        .frame(minWidth: 560, idealWidth: 620, maxWidth: 680, minHeight: 520, idealHeight: 560, alignment: .topLeading)
+        .frame(minWidth: 720, idealWidth: 780, maxWidth: 920, minHeight: 640, idealHeight: 720, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(palette.panel)
         )
         .compactOverlayScrollbars()
+    }
+
+    private var searchText: Binding<String> {
+        Binding(
+            get: { self.model.accountOrderDraft?.searchQuery ?? "" },
+            set: { self.model.accountOrderDraft?.searchQuery = $0 }
+        )
+    }
+
+    private func searchBar(palette: AppearancePalette) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.textMuted)
+
+            TextField(self.model.text(.placeholderSearchAccountOrder), text: self.searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(palette.textPrimary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.86 : 0.90))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(palette.border, lineWidth: 1)
+        )
+    }
+
+    private func row(for entry: DesktopAppModel.AccountOrderVisibleEntry) -> some View {
+        AccountOrderRow(
+            model: self.model,
+            index: entry.position,
+            account: entry.account
+        )
     }
 }
 
@@ -2333,6 +2396,7 @@ private struct AccountModelRoutingSheet: View {
 
 private struct AccountOrderRow: View {
     @Environment(\.colorScheme) private var colorScheme
+    @State private var targetPosition = ""
 
     @ObservedObject var model: DesktopAppModel
     let index: Int
@@ -2347,44 +2411,51 @@ private struct AccountOrderRow: View {
                 .foregroundStyle(palette.accent)
                 .frame(width: 28, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(self.account.label)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(palette.textPrimary)
-                            .lineLimit(2)
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(self.account.label)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(palette.textPrimary)
+                                .lineLimit(2)
 
-                        Text(self.account.email?.isEmpty == false ? self.account.email! : self.account.accountID)
+                            Text(self.account.email?.isEmpty == false ? self.account.email! : self.account.accountID)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(palette.textSecondary)
+                                .lineLimit(2)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "line.3.horizontal")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(palette.textMuted)
+                            .help(self.model.localized(zh: "未搜索时仍可拖拽排序", en: "Drag to reorder when search is empty"))
+                    }
+
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            self.pills
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            self.pills
+                        }
+                    }
+
+                    if let issue = self.model.accountRuntimeIssueText(self.account) {
+                        Text(issue)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                             .lineLimit(2)
                     }
-
-                    Spacer(minLength: 0)
-
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(palette.textMuted)
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        self.pills
-                    }
+                Spacer(minLength: 0)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        self.pills
-                    }
-                }
-
-                if let issue = self.model.accountRuntimeIssueText(self.account) {
-                    Text(issue)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(palette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .lineLimit(2)
-                }
+                self.orderActions(palette: palette)
             }
         }
         .padding(.vertical, 4)
@@ -2401,6 +2472,88 @@ private struct AccountOrderRow: View {
                 StatusPill(text: self.model.text(.statusCoolingDown), tone: .warning)
             }
         }
+    }
+
+    private func orderActions(palette: AppearancePalette) -> some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            HStack(spacing: 6) {
+                self.iconButton(
+                    systemName: "arrow.up.to.line.compact",
+                    title: self.model.text(.actionAccountOrderMoveToTop),
+                    disabled: !self.model.canMoveAccountOrderDraftUp(accountID: self.account.id)
+                ) {
+                    self.model.moveAccountOrderDraftToTop(accountID: self.account.id)
+                }
+
+                self.iconButton(
+                    systemName: "chevron.up",
+                    title: self.model.text(.actionAccountOrderMoveUp),
+                    disabled: !self.model.canMoveAccountOrderDraftUp(accountID: self.account.id)
+                ) {
+                    self.model.moveAccountOrderDraftUp(accountID: self.account.id)
+                }
+
+                self.iconButton(
+                    systemName: "chevron.down",
+                    title: self.model.text(.actionAccountOrderMoveDown),
+                    disabled: !self.model.canMoveAccountOrderDraftDown(accountID: self.account.id)
+                ) {
+                    self.model.moveAccountOrderDraftDown(accountID: self.account.id)
+                }
+
+                self.iconButton(
+                    systemName: "arrow.down.to.line.compact",
+                    title: self.model.text(.actionAccountOrderMoveToBottom),
+                    disabled: !self.model.canMoveAccountOrderDraftDown(accountID: self.account.id)
+                ) {
+                    self.model.moveAccountOrderDraftToBottom(accountID: self.account.id)
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField(self.model.text(.placeholderAccountOrderPosition), text: self.$targetPosition)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 64)
+                    .disabled(self.model.accountOrderIsSubmitting)
+                    .onSubmit {
+                        self.applyTargetPosition()
+                    }
+
+                self.iconButton(
+                    systemName: "arrow.turn.down.left",
+                    title: self.model.text(.actionAccountOrderMoveToPosition),
+                    disabled: self.targetPosition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ) {
+                    self.applyTargetPosition()
+                }
+            }
+        }
+        .frame(minWidth: 170, alignment: .trailing)
+    }
+
+    private func applyTargetPosition() {
+        if self.model.moveAccountOrderDraft(accountID: self.account.id, toOneBasedPosition: self.targetPosition) {
+            self.targetPosition = ""
+        }
+    }
+
+    private func iconButton(
+        systemName: String,
+        title: String,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || self.model.accountOrderIsSubmitting)
+        .opacity((disabled || self.model.accountOrderIsSubmitting) ? 0.38 : 1)
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 

@@ -377,29 +377,15 @@ private struct ProxyTopUtilityControls: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            self.actionButton(title: self.model.actionOpenClientConfigManager, action: self.openClientConfigManager)
             if self.model.adminSupportsProxyTesting {
-                self.actionButton(title: self.model.text(.actionTestProxy), action: self.openTestConsole)
-                    .accessibilityIdentifier("proxy-test-proxy-button")
+                Button(self.model.text(.actionTestProxy)) {
+                    self.model.openProxyTestConsole()
+                }
+                .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
+                .accessibilityIdentifier("proxy-test-proxy-button")
             }
         }
         .accessibilityIdentifier("proxy-top-utility-controls")
-    }
-
-    private func actionButton(title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .fixedSize(horizontal: true, vertical: false)
-        }
-        .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
-    }
-
-    private func openTestConsole() {
-        self.model.openProxyTestConsole()
-    }
-
-    private func openClientConfigManager() {
-        self.model.openClientConfigManagerWindow()
     }
 }
 
