@@ -71,16 +71,21 @@ public enum AuthService {
         if payload["tokens"] != nil {
             return try self.jsonString(payload)
         }
-        if let accessToken = payload["access_token"] as? String, let idToken = payload["id_token"] as? String {
+        if let accessToken = payload["access_token"] as? String, !accessToken.isEmpty {
             var tokens: [String: Any] = [
                 "access_token": accessToken,
-                "id_token": idToken,
             ]
+            if let idToken = payload["id_token"] as? String, !idToken.isEmpty {
+                tokens["id_token"] = idToken
+            }
             if let refreshToken = payload["refresh_token"] as? String {
                 tokens["refresh_token"] = refreshToken
             }
             if let accountID = payload["account_id"] as? String {
                 tokens["account_id"] = accountID
+            }
+            if let email = payload["email"] as? String, !email.isEmpty {
+                tokens["email"] = email
             }
             var normalized: [String: Any] = [
                 "auth_mode": payload["auth_mode"] as? String ?? AccountAuthMode.chatGPT.rawValue,
@@ -88,6 +93,9 @@ public enum AuthService {
             ]
             if let lastRefresh = payload["last_refresh"] {
                 normalized["last_refresh"] = lastRefresh
+            }
+            if let expiresAt = self.importedAuthExpiration(from: payload, tokens: tokens) {
+                normalized["expires_at"] = expiresAt
             }
             return try self.jsonString(normalized)
         }
@@ -185,10 +193,10 @@ public enum AuthService {
         let idToken = tokens["id_token"] as? String
         var accountID = tokens["account_id"] as? String
         var principalID = accountID
-        var email: String?
+        var email = (tokens["email"] as? String) ?? (payload["email"] as? String)
         var planType: String?
         if let idToken, let claims = try? self.decodeJWTPayload(idToken) {
-            email = claims["email"] as? String
+            email = (claims["email"] as? String) ?? email
             if let authClaim = claims["https://api.openai.com/auth"] as? [String: Any] {
                 if accountID == nil {
                     accountID = authClaim["chatgpt_account_id"] as? String
@@ -300,8 +308,17 @@ public enum AuthService {
             return true
         }
         let now = Helpers.now()
+        let expiresAt = self.importedAuthExpiration(from: payload, tokens: tokens)
+        if let expiresAt, expiresAt <= now + leadTimeSeconds {
+            return true
+        }
         for key in ["access_token", "id_token"] {
-            guard let token = tokens[key] as? String else { return true }
+            guard let token = tokens[key] as? String else {
+                if key == "id_token", expiresAt != nil {
+                    continue
+                }
+                return true
+            }
             if let exp = self.jwtExpiration(token), exp <= now + leadTimeSeconds {
                 return true
             }
@@ -628,6 +645,34 @@ public enum AuthService {
 
     private static func authMode(from payload: [String: Any]) -> AccountAuthMode {
         AccountAuthMode(rawValue: (payload["auth_mode"] as? String) ?? "") ?? .chatGPT
+    }
+
+    private static func importedAuthExpiration(from payload: [String: Any], tokens: [String: Any]) -> Int64? {
+        let candidates: [Any?] = [
+            payload["expires_at"],
+            payload["expiresAt"],
+            payload["expired"],
+            payload["expires"],
+            tokens["expires_at"],
+            tokens["expiresAt"],
+            tokens["expired"],
+            tokens["expires"],
+        ]
+        for candidate in candidates {
+            if let timestamp = self.int64Value(from: candidate) {
+                return timestamp
+            }
+            if let raw = candidate as? String {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let numeric = Int64(trimmed) {
+                    return numeric
+                }
+                if let date = ISO8601DateFormatter().date(from: trimmed) {
+                    return Int64(date.timeIntervalSince1970)
+                }
+            }
+        }
+        return nil
     }
 
     private static func providerFamily(from payload: [String: Any], authMode: AccountAuthMode) -> AccountProviderFamily {

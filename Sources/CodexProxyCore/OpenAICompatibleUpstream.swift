@@ -208,6 +208,27 @@ public enum OpenAICompatibleUpstream {
             .absoluteString
     }
 
+    public static func imagesURL(
+        from baseURL: String,
+        endpoint: OpenAIImagesEndpoint,
+        providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
+        baseURLMode: ManualAPIKeyBaseURLMode? = nil
+    ) throws -> String {
+        guard providerPreset == .genericOpenAICompatible else {
+            throw ProxyError.message("Images API only supports Generic OpenAI Compatible API key accounts.")
+        }
+        let resolvedBaseURLMode = self.isDefaultOpenAIAPIRoot(baseURL)
+            ? .legacyAppendV1
+            : baseURLMode
+        return try self.baseAPIURL(
+            from: baseURL,
+            providerPreset: providerPreset,
+            baseURLMode: resolvedBaseURLMode
+        )
+            .appendingPathComponent(endpoint.upstreamPath)
+            .absoluteString
+    }
+
     public static func apiBaseURL(
         from baseURL: String,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
@@ -605,6 +626,17 @@ public enum OpenAICompatibleUpstream {
             throw ProxyError.message("根地址格式无效")
         }
         return url
+    }
+
+    private static func isDefaultOpenAIAPIRoot(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.scheme?.lowercased().hasPrefix("http") == true,
+              components.host?.lowercased() == "api.openai.com"
+        else {
+            return false
+        }
+        let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return path.isEmpty
     }
 
     private static func baseAPIURL(

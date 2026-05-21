@@ -34,6 +34,8 @@ struct SettingsView: View {
                     SettingsProxyPanel(model: self.model)
                 case .service:
                     SettingsServicePanel(model: self.model)
+                case .cleanup:
+                    SettingsCleanupPanel(model: self.model)
                 }
             }
             .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -833,7 +835,7 @@ private struct SettingsServicePanel: View {
     }
 }
 
-private struct SettingsInsetPanel<Content: View>: View {
+struct SettingsInsetPanel<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
 
     let title: String

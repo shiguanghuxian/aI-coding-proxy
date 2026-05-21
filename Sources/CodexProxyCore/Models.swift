@@ -1447,6 +1447,7 @@ public struct ManagedProxyHealthcheckRequest: Codable, Sendable, Equatable {
 
 public enum ProxyTestModelFamily: String, Codable, Sendable, Equatable {
     case gpt
+    case image
     case anthropic
     case gemini
 }
@@ -1470,12 +1471,18 @@ public struct ProxyTestModelGroup: Codable, Sendable, Equatable {
 public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
     public var chatCompletions: ProxyTestModelGroup
     public var responses: ProxyTestModelGroup
+    public var imageGenerations: ProxyTestModelGroup
     public var anthropicMessages: ProxyTestModelGroup
     public var geminiGenerateContent: ProxyTestModelGroup
 
     public init(
         chatCompletions: ProxyTestModelGroup,
         responses: ProxyTestModelGroup,
+        imageGenerations: ProxyTestModelGroup = ProxyTestModelGroup(
+            family: .image,
+            models: ["codex-gpt-image-2", "gpt-image-2"],
+            defaultModel: "codex-gpt-image-2"
+        ),
         anthropicMessages: ProxyTestModelGroup,
         geminiGenerateContent: ProxyTestModelGroup = ProxyTestModelGroup(
             family: .gemini,
@@ -1489,6 +1496,7 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
     ) {
         self.chatCompletions = chatCompletions
         self.responses = responses
+        self.imageGenerations = imageGenerations
         self.anthropicMessages = anthropicMessages
         self.geminiGenerateContent = geminiGenerateContent
     }
@@ -1496,6 +1504,7 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case chatCompletions
         case responses
+        case imageGenerations
         case anthropicMessages
         case geminiGenerateContent
     }
@@ -1505,6 +1514,12 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
         self.init(
             chatCompletions: try container.decode(ProxyTestModelGroup.self, forKey: .chatCompletions),
             responses: try container.decode(ProxyTestModelGroup.self, forKey: .responses),
+            imageGenerations: try container.decodeIfPresent(ProxyTestModelGroup.self, forKey: .imageGenerations)
+                ?? ProxyTestModelGroup(
+                    family: .image,
+                    models: Self.defaultImageModels,
+                    defaultModel: Self.defaultImageModels.first ?? "codex-gpt-image-2"
+                ),
             anthropicMessages: try container.decode(ProxyTestModelGroup.self, forKey: .anthropicMessages),
             geminiGenerateContent: try container.decodeIfPresent(ProxyTestModelGroup.self, forKey: .geminiGenerateContent)
                 ?? ProxyTestModelGroup(
@@ -1519,12 +1534,14 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.chatCompletions, forKey: .chatCompletions)
         try container.encode(self.responses, forKey: .responses)
+        try container.encode(self.imageGenerations, forKey: .imageGenerations)
         try container.encode(self.anthropicMessages, forKey: .anthropicMessages)
         try container.encode(self.geminiGenerateContent, forKey: .geminiGenerateContent)
     }
 
     private static let defaultGPTModels = ProxyTranscoder.supportedModels
     private static let defaultGPTModel = ProxyTranscoder.defaultModel
+    private static let defaultImageModels = ["codex-gpt-image-2", "gpt-image-2"]
     private static let defaultAnthropicModels = [
         "claude-sonnet-4-5",
         "claude-sonnet-4-6",
@@ -1550,6 +1567,11 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
             models: Self.defaultGPTModels,
             defaultModel: Self.defaultGPTModel
         ),
+        imageGenerations: ProxyTestModelGroup(
+            family: .image,
+            models: Self.defaultImageModels,
+            defaultModel: Self.defaultImageModels.first ?? "codex-gpt-image-2"
+        ),
         anthropicMessages: ProxyTestModelGroup(
             family: .anthropic,
             models: Self.defaultAnthropicModels,
@@ -1566,6 +1588,7 @@ public struct ProxyTestModelCatalog: Codable, Sendable, Equatable {
 public enum AdminProxyTestEndpoint: String, Codable, Sendable, Equatable {
     case chatCompletions = "chatCompletions"
     case responses = "responses"
+    case imageGenerations = "imageGenerations"
     case anthropicMessages = "anthropicMessages"
     case geminiGenerateContent = "geminiGenerateContent"
 }
@@ -2574,6 +2597,121 @@ public struct RequestLogPage: Codable, Sendable, Equatable {
         try container.encode(self.pageSize, forKey: .pageSize)
         try container.encode(self.availableAPIKeys, forKey: .availableAPIKeys)
         try container.encode(self.availableModels, forKey: .availableModels)
+    }
+}
+
+public struct ReasoningCacheAccountSummary: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { self.accountKey }
+    public var accountKey: String
+    public var accountLabel: String
+    public var entryCount: Int
+    public var expiredCount: Int
+    public var oldestTouchedAt: Int64?
+    public var newestTouchedAt: Int64?
+
+    public init(
+        accountKey: String,
+        accountLabel: String,
+        entryCount: Int,
+        expiredCount: Int,
+        oldestTouchedAt: Int64?,
+        newestTouchedAt: Int64?
+    ) {
+        self.accountKey = accountKey
+        self.accountLabel = accountLabel
+        self.entryCount = max(0, entryCount)
+        self.expiredCount = max(0, expiredCount)
+        self.oldestTouchedAt = oldestTouchedAt
+        self.newestTouchedAt = newestTouchedAt
+    }
+}
+
+public struct ReasoningCacheSummary: Codable, Sendable, Equatable {
+    public var totalCount: Int
+    public var expiredCount: Int
+    public var oldestTouchedAt: Int64?
+    public var newestTouchedAt: Int64?
+    public var accounts: [ReasoningCacheAccountSummary]
+
+    public init(
+        totalCount: Int = 0,
+        expiredCount: Int = 0,
+        oldestTouchedAt: Int64? = nil,
+        newestTouchedAt: Int64? = nil,
+        accounts: [ReasoningCacheAccountSummary] = []
+    ) {
+        self.totalCount = max(0, totalCount)
+        self.expiredCount = max(0, expiredCount)
+        self.oldestTouchedAt = oldestTouchedAt
+        self.newestTouchedAt = newestTouchedAt
+        self.accounts = accounts
+    }
+}
+
+public struct ClearReasoningCacheRequest: Codable, Sendable, Equatable {
+    public var expiredOnly: Bool
+    public var accountKeys: [String]
+    public var olderThanSeconds: Int64?
+    public var clearAll: Bool
+
+    public init(
+        expiredOnly: Bool = false,
+        accountKeys: [String] = [],
+        olderThanSeconds: Int64? = nil,
+        clearAll: Bool = false
+    ) {
+        self.expiredOnly = expiredOnly
+        self.accountKeys = accountKeys
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        self.olderThanSeconds = olderThanSeconds.flatMap { $0 > 0 ? $0 : nil }
+        self.clearAll = clearAll
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiredOnly
+        case expiredOnlySnake = "expired_only"
+        case accountKeys
+        case accountKeysSnake = "account_keys"
+        case olderThanSeconds
+        case olderThanSecondsSnake = "older_than_seconds"
+        case clearAll
+        case clearAllSnake = "clear_all"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            expiredOnly: try container.decodeIfPresent(Bool.self, forKey: .expiredOnly)
+                ?? container.decodeIfPresent(Bool.self, forKey: .expiredOnlySnake)
+                ?? false,
+            accountKeys: try container.decodeIfPresent([String].self, forKey: .accountKeys)
+                ?? container.decodeIfPresent([String].self, forKey: .accountKeysSnake)
+                ?? [],
+            olderThanSeconds: try container.decodeIfPresent(Int64.self, forKey: .olderThanSeconds)
+                ?? container.decodeIfPresent(Int64.self, forKey: .olderThanSecondsSnake),
+            clearAll: try container.decodeIfPresent(Bool.self, forKey: .clearAll)
+                ?? container.decodeIfPresent(Bool.self, forKey: .clearAllSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.expiredOnly, forKey: .expiredOnly)
+        try container.encode(self.accountKeys, forKey: .accountKeys)
+        try container.encodeIfPresent(self.olderThanSeconds, forKey: .olderThanSeconds)
+        try container.encode(self.clearAll, forKey: .clearAll)
+    }
+}
+
+public struct ClearReasoningCacheResult: Codable, Sendable, Equatable {
+    public var deletedCount: Int
+    public var summary: ReasoningCacheSummary
+
+    public init(deletedCount: Int, summary: ReasoningCacheSummary) {
+        self.deletedCount = max(0, deletedCount)
+        self.summary = summary
     }
 }
 

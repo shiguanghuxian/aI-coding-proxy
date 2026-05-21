@@ -930,6 +930,194 @@ public final class SQLiteStore: @unchecked Sendable {
         try self.execute("DELETE FROM request_logs WHERE created_at < ?;", bindings: [.int(cutoff)])
     }
 
+    func upsertChatCompletionsReasoningCacheEntry(
+        cacheKey: String,
+        accountKey: String,
+        sessionKey: String,
+        entry: ChatCompletionsReasoningCacheEntry,
+        capacity: Int
+    ) throws {
+        let key = try self.secretStore.masterKey()
+        let plaintext = try JSONEncoder().encode(entry)
+        let cipher = try CryptoBox.seal(plaintext, using: key)
+        let storedAt = entry.touchedAt
+        try self.execute(
+            """
+            INSERT INTO chat_completions_reasoning_cache (
+                cache_key, account_key, session_key, entry_cipher, expires_at, touched_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                account_key = excluded.account_key,
+                session_key = excluded.session_key,
+                entry_cipher = excluded.entry_cipher,
+                expires_at = excluded.expires_at,
+                touched_at = excluded.touched_at,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(cacheKey),
+                .text(accountKey),
+                .text(sessionKey),
+                .blob(cipher),
+                .int(entry.expiresAt),
+                .int(entry.touchedAt),
+                .int(storedAt),
+                .int(storedAt),
+            ]
+        )
+        try self.pruneExpiredChatCompletionsReasoningCache(now: storedAt)
+        try self.enforceChatCompletionsReasoningCacheCapacity(capacity)
+    }
+
+    func loadChatCompletionsReasoningCacheEntry(
+        accountKey: String,
+        sessionKey: String,
+        now: Int64 = Helpers.now()
+    ) throws -> ChatCompletionsReasoningCacheEntry? {
+        guard let row = try self.querySingle(
+            """
+            SELECT cache_key, entry_cipher, expires_at
+            FROM chat_completions_reasoning_cache
+            WHERE account_key = ? AND session_key = ?
+            LIMIT 1;
+            """,
+            bindings: [.text(accountKey), .text(sessionKey)]
+        ) else {
+            return nil
+        }
+        if row.int("expires_at") <= now {
+            _ = try self.clearChatCompletionsReasoningCache(
+                ClearReasoningCacheRequest(expiredOnly: true),
+                now: now
+            )
+            return nil
+        }
+        do {
+            let key = try self.secretStore.masterKey()
+            let plaintext = try CryptoBox.open(row.blob("entry_cipher"), using: key)
+            return try JSONDecoder().decode(ChatCompletionsReasoningCacheEntry.self, from: plaintext)
+        } catch {
+            _ = try self.clearChatCompletionsReasoningCache(cacheKey: row.text("cache_key"))
+            throw error
+        }
+    }
+
+    func chatCompletionsReasoningCacheSummary(now: Int64 = Helpers.now()) throws -> ReasoningCacheSummary {
+        let rows = try self.query(
+            """
+            SELECT c.account_key AS account_key,
+                   COALESCE(NULLIF(a.label, ''), c.account_key) AS account_label,
+                   COUNT(*) AS entry_count,
+                   SUM(CASE WHEN c.expires_at <= ? THEN 1 ELSE 0 END) AS expired_count,
+                   MIN(c.touched_at) AS oldest_touched_at,
+                   MAX(c.touched_at) AS newest_touched_at
+            FROM chat_completions_reasoning_cache c
+            LEFT JOIN accounts a
+              ON c.account_key = a.principal_id || '|' || a.account_id
+            GROUP BY c.account_key, account_label
+            ORDER BY newest_touched_at DESC, account_label COLLATE NOCASE ASC;
+            """,
+            bindings: [.int(now)]
+        )
+        let accounts = rows.map { row in
+            ReasoningCacheAccountSummary(
+                accountKey: row.text("account_key"),
+                accountLabel: row.text("account_label"),
+                entryCount: Int(row.int("entry_count")),
+                expiredCount: Int(row.int("expired_count")),
+                oldestTouchedAt: row.optionalInt("oldest_touched_at"),
+                newestTouchedAt: row.optionalInt("newest_touched_at")
+            )
+        }
+        return ReasoningCacheSummary(
+            totalCount: accounts.reduce(0) { $0 + $1.entryCount },
+            expiredCount: accounts.reduce(0) { $0 + $1.expiredCount },
+            oldestTouchedAt: accounts.compactMap(\.oldestTouchedAt).min(),
+            newestTouchedAt: accounts.compactMap(\.newestTouchedAt).max(),
+            accounts: accounts
+        )
+    }
+
+    @discardableResult
+    func pruneExpiredChatCompletionsReasoningCache(now: Int64 = Helpers.now()) throws -> Int {
+        try self.deleteChatCompletionsReasoningCache(whereSQL: "expires_at <= ?", bindings: [.int(now)])
+    }
+
+    @discardableResult
+    func clearChatCompletionsReasoningCache(accountKey: String) throws -> Int {
+        try self.deleteChatCompletionsReasoningCache(whereSQL: "account_key = ?", bindings: [.text(accountKey)])
+    }
+
+    @discardableResult
+    func clearChatCompletionsReasoningCache(_ request: ClearReasoningCacheRequest, now: Int64 = Helpers.now()) throws -> Int {
+        if request.clearAll {
+            return try self.deleteChatCompletionsReasoningCache(whereSQL: nil, bindings: [])
+        }
+
+        var clauses: [String] = []
+        var bindings: [Binding] = []
+        if request.expiredOnly {
+            clauses.append("expires_at <= ?")
+            bindings.append(.int(now))
+        }
+        if let olderThanSeconds = request.olderThanSeconds {
+            clauses.append("touched_at < ?")
+            bindings.append(.int(max(0, now - olderThanSeconds)))
+        }
+        if request.accountKeys.isEmpty == false {
+            clauses.append("account_key IN (\(Self.sqlPlaceholders(count: request.accountKeys.count)))")
+            bindings.append(contentsOf: request.accountKeys.map { .text($0) })
+        }
+        guard clauses.isEmpty == false else {
+            throw ProxyError.message("请选择要清理的 reasoning 回传缓存范围。")
+        }
+        return try self.deleteChatCompletionsReasoningCache(whereSQL: clauses.joined(separator: " AND "), bindings: bindings)
+    }
+
+    @discardableResult
+    private func clearChatCompletionsReasoningCache(cacheKey: String) throws -> Int {
+        try self.deleteChatCompletionsReasoningCache(whereSQL: "cache_key = ?", bindings: [.text(cacheKey)])
+    }
+
+    @discardableResult
+    private func deleteChatCompletionsReasoningCache(whereSQL: String?, bindings: [Binding]) throws -> Int {
+        let sql: String
+        if let whereSQL, whereSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            sql = "DELETE FROM chat_completions_reasoning_cache WHERE \(whereSQL);"
+        } else {
+            sql = "DELETE FROM chat_completions_reasoning_cache;"
+        }
+        return try self.withDatabaseLock {
+            try self.execute(sql, bindings: bindings)
+            return Int(sqlite3_changes(self.db))
+        }
+    }
+
+    private func enforceChatCompletionsReasoningCacheCapacity(_ capacity: Int) throws {
+        let capacity = max(1, capacity)
+        let count = Int((try self.querySingle(
+            "SELECT COUNT(*) AS entry_count FROM chat_completions_reasoning_cache;"
+        ))?.int("entry_count") ?? 0)
+        guard count > capacity else { return }
+        let overflow = count - capacity
+        try self.execute(
+            """
+            DELETE FROM chat_completions_reasoning_cache
+            WHERE cache_key IN (
+                SELECT cache_key
+                FROM chat_completions_reasoning_cache
+                ORDER BY touched_at ASC, updated_at ASC
+                LIMIT ?
+            );
+            """,
+            bindings: [.int(Int64(overflow))]
+        )
+    }
+
+    private static func sqlPlaceholders(count: Int) -> String {
+        Array(repeating: "?", count: max(0, count)).joined(separator: ", ")
+    }
+
     private static func migrate(on db: OpaquePointer?) throws {
         try self.execute("PRAGMA journal_mode=WAL;", on: db)
         try self.execute("PRAGMA foreign_keys=ON;", on: db)
@@ -1116,6 +1304,33 @@ public final class SQLiteStore: @unchecked Sendable {
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_hash ON request_logs(api_key_hash);", on: db)
+        try self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_completions_reasoning_cache (
+                cache_key TEXT PRIMARY KEY,
+                account_key TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                entry_cipher BLOB NOT NULL,
+                expires_at INTEGER NOT NULL,
+                touched_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """,
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reasoning_cache_account_key ON chat_completions_reasoning_cache(account_key);",
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reasoning_cache_expires_at ON chat_completions_reasoning_cache(expires_at);",
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reasoning_cache_touched_at ON chat_completions_reasoning_cache(touched_at);",
+            on: db
+        )
     }
 
     private static func execute(_ sql: String, on db: OpaquePointer?, bindings: [Binding] = []) throws {

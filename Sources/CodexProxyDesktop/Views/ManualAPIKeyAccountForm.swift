@@ -81,6 +81,10 @@ struct ManualAPIKeyAccountForm: View {
                             .foregroundStyle(palette.textSecondary)
                             .lineLimit(self.compact ? 2 : 3)
                             .fixedSize(horizontal: false, vertical: true)
+
+                        if self.draft.upstreamAdapter == .chatCompletions {
+                            self.reasoningCacheIsolationNotice(palette: palette)
+                        }
                     }
                 }
             }
@@ -115,6 +119,31 @@ struct ManualAPIKeyAccountForm: View {
                 .toggleStyle(.switch)
             }
         }
+    }
+
+    private func reasoningCacheIsolationNotice(palette: AppearancePalette) -> some View {
+        return HStack(alignment: .top, spacing: self.compact ? 7 : 9) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: self.compact ? 11 : 13, weight: .semibold))
+                .foregroundStyle(palette.info)
+                .frame(width: self.compact ? 14 : 16, height: self.compact ? 14 : 16)
+            Text(self.model.text(.helperReasoningCacheAccountIsolation))
+                .font(.system(size: self.compact ? 10 : 11, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(self.compact ? 4 : 5)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(self.compact ? 9 : 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: self.compact ? 9 : 12, style: .continuous)
+                .fill(palette.infoSoft.opacity(self.colorScheme == .dark ? 0.34 : 0.62))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: self.compact ? 9 : 12, style: .continuous)
+                .stroke(palette.infoBorder.opacity(self.colorScheme == .dark ? 0.40 : 0.55), lineWidth: 1)
+        )
     }
 }
 

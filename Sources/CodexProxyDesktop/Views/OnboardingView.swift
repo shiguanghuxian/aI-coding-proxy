@@ -75,6 +75,15 @@ struct OnboardingView: View {
         }
         .background(palette.windowBottom)
         .compactOverlayScrollbars()
+        .sheet(
+            item: Binding(
+                get: { self.model.authImportDraft },
+                set: { newValue in self.model.authImportDraft = newValue }
+            )
+        ) { presentedDraft in
+            AuthImportSheet(model: self.model, presentedDraft: presentedDraft)
+                .interactiveDismissDisabled(self.model.authImportIsSubmitting)
+        }
     }
 }
 
@@ -258,7 +267,7 @@ private struct OnboardingAccountPoolStep: View {
                     symbol: "tray.and.arrow.down.fill",
                     tone: .neutral
                 ) {
-                    Task { await self.model.importJSONFiles() }
+                    self.model.presentAuthImportSheet()
                 }
             }
 

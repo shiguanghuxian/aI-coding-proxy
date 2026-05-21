@@ -198,7 +198,7 @@ extension DesktopAppModel {
                         id: "quick-start-accounts",
                         number: 1,
                         title: t("创建或导入账号池账号", "Create or import account-pool accounts"),
-                        detail: t("进入账号页，优先使用 OAuth 登录、导入当前授权或导入 JSON；如果你手里只有上游根地址和 API Key，就用“手动添加”创建独立账号。", "Open Accounts and start with OAuth Login, Import Current, or Import JSON. If you only have an upstream base URL and API key, use Manual Add to create a separate account."),
+                        detail: t("进入账号页，优先使用 OAuth 登录、导入当前授权或导入授权信息；如果你手里只有上游根地址和 API Key，就用“手动添加”创建独立账号。", "Open Accounts and start with OAuth Login, Import Current, or Import Auth. If you only have an upstream base URL and API key, use Manual Add to create a separate account."),
                         action: accountsAction
                     ),
                     HelpDocument.Step(
@@ -300,11 +300,11 @@ extension DesktopAppModel {
                     HelpDocument.Section(
                         id: "accounts-import",
                         title: t("如何创建或导入账号", "How to create or import accounts"),
-                        summary: t("你可以在同一个账号池里混合 OAuth 账号、当前本地授权、批量 JSON 导入，以及手动 API Key 账号。", "You can mix OAuth accounts, current local auth imports, batch JSON imports, and manual API key accounts in the same pool."),
+                        summary: t("你可以在同一个账号池里混合 OAuth 账号、当前本地授权、已登录授权 JSON、账号备份，以及手动 API Key 账号。", "You can mix OAuth accounts, current local auth imports, logged-in auth JSON, account backups, and manual API key accounts in the same pool."),
                         bullets: [
                             t("`OAuth 登录` 会打开浏览器授权并在回调成功后自动导入账号。", "`OAuth Login` opens the browser flow and imports the account after the callback succeeds."),
                             t("`导入当前` 会读取当前本机的 `~/.codex/auth.json` 并加入账号池。", "`Import Current` reads the local `~/.codex/auth.json` and adds it to the pool."),
-                            t("`导入 JSON` 适合批量恢复备份账号；`导出备份` 则会导出当前保存的全部账号。", "`Import JSON` restores backup accounts in bulk, while `Export Backup` writes out every saved account."),
+                            t("`导入授权信息` 支持粘贴已登录授权 JSON，也可以选择账号备份 JSON 文件批量恢复；`导出备份` 则会导出当前保存的全部账号。", "`Import Auth` accepts pasted logged-in auth JSON and can also restore account backup JSON files in bulk; `Export Backup` writes out every saved account."),
                             t(
                                 "`Google / Gemini Login` 用于导入官方 Gemini CLI 支持的个人 Google 账号，包含 AI Pro / Ultra，也兼容个人 free tier 的自动 onboarding；这类账号现在只给 Gemini CLI / 原生 Gemini endpoint 使用。`手动添加` 仍用于兼容 API Key 账号，支持 OpenAI 兼容、Anthropic API 兼容和 Google Gemini 兼容预设。",
                                 "`Google / Gemini Login` imports a personal Google account supported by the official Gemini CLI flow, including AI Pro / Ultra and personal free-tier auto-onboarding. These accounts are now reserved for Gemini CLI and the native Gemini endpoint only. `Manual Add` still handles compatible API key accounts, including OpenAI-compatible, Anthropic API-compatible, and Google Gemini-compatible presets."

@@ -72,6 +72,8 @@ final class AdminAPIClient {
     typealias RequestLogsHandler = @Sendable (RequestLogQuery) async throws -> RequestLogPage
     typealias RequestLogFiltersHandler = @Sendable (RequestLogQuery) async throws -> RequestLogFilterOptions
     typealias RequestLogsExportHandler = @Sendable (RequestLogQuery) async throws -> Data
+    typealias ReasoningCacheSummaryHandler = @Sendable () async throws -> ReasoningCacheSummary
+    typealias ClearReasoningCacheHandler = @Sendable (ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult
     typealias GetStatusHandler = @Sendable () async throws -> ProxyStatus
     typealias GetStatsHandler = @Sendable () async throws -> AdminStatsSummary
     typealias SaveSettingsHandler = @Sendable (AppConfig) async throws -> AppConfig
@@ -112,6 +114,8 @@ final class AdminAPIClient {
     private let requestLogsHandler: RequestLogsHandler?
     private let requestLogFiltersHandler: RequestLogFiltersHandler?
     private let requestLogsExportHandler: RequestLogsExportHandler?
+    private let reasoningCacheSummaryHandler: ReasoningCacheSummaryHandler?
+    private let clearReasoningCacheHandler: ClearReasoningCacheHandler?
     private let getStatusHandler: GetStatusHandler?
     private let getStatsHandler: GetStatsHandler?
     private let saveSettingsHandler: SaveSettingsHandler?
@@ -159,6 +163,8 @@ final class AdminAPIClient {
         requestLogsHandler: RequestLogsHandler? = nil,
         requestLogFiltersHandler: RequestLogFiltersHandler? = nil,
         requestLogsExportHandler: RequestLogsExportHandler? = nil,
+        reasoningCacheSummaryHandler: ReasoningCacheSummaryHandler? = nil,
+        clearReasoningCacheHandler: ClearReasoningCacheHandler? = nil,
         getStatusHandler: GetStatusHandler? = nil,
         getStatsHandler: GetStatsHandler? = nil,
         saveSettingsHandler: SaveSettingsHandler? = nil,
@@ -199,6 +205,8 @@ final class AdminAPIClient {
         self.requestLogsHandler = requestLogsHandler
         self.requestLogFiltersHandler = requestLogFiltersHandler
         self.requestLogsExportHandler = requestLogsExportHandler
+        self.reasoningCacheSummaryHandler = reasoningCacheSummaryHandler
+        self.clearReasoningCacheHandler = clearReasoningCacheHandler
         self.getStatusHandler = getStatusHandler
         self.getStatsHandler = getStatsHandler
         self.saveSettingsHandler = saveSettingsHandler
@@ -654,6 +662,30 @@ final class AdminAPIClient {
             return stats
         }
         return try await self.controller().statsSummary()
+    }
+
+    func getReasoningCacheSummary() async throws -> ReasoningCacheSummary {
+        if let reasoningCacheSummaryHandler {
+            return try await reasoningCacheSummaryHandler()
+        }
+        if let summary: ReasoningCacheSummary = try await self.httpRequest("/reasoning-cache/summary", method: "GET") {
+            return summary
+        }
+        return try await self.controller().reasoningCacheSummary()
+    }
+
+    func clearReasoningCache(_ request: ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult {
+        if let clearReasoningCacheHandler {
+            return try await clearReasoningCacheHandler(request)
+        }
+        if let result: ClearReasoningCacheResult = try await self.httpRequest(
+            "/reasoning-cache/clear",
+            method: "POST",
+            body: request
+        ) {
+            return result
+        }
+        return try await self.controller().clearReasoningCache(request)
     }
 
     func getProxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {

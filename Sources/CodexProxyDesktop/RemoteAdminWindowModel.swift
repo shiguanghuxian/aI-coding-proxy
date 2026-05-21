@@ -266,8 +266,8 @@ final class RemoteAdminWindowModel: ObservableObject {
         return (
             self.localized(zh: "远端账号池还是空的", en: "The remote account pool is still empty"),
             self.localized(
-                zh: "先手动新增 API Key、导入 JSON 备份，或一键把当前桌面端本地账号池同步到这台远端主机。这个窗口不会触发本机 OAuth。",
-                en: "Add a manual API key, import a JSON backup, or sync the current desktop app's local account pool to this remote host. This window does not trigger local OAuth flows."
+                zh: "先手动新增 API Key、导入授权信息或备份 JSON，或一键把当前桌面端本地账号池同步到这台远端主机。这个窗口不会触发本机 OAuth。",
+                en: "Add a manual API key, import auth or backup JSON, or sync the current desktop app's local account pool to this remote host. This window does not trigger local OAuth flows."
             )
         )
     }

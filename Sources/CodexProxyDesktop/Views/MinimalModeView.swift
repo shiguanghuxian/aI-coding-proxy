@@ -40,6 +40,15 @@ struct MinimalModeView: View {
             }
         }
         .compactOverlayScrollbars()
+        .sheet(
+            item: Binding(
+                get: { self.model.authImportDraft },
+                set: { newValue in self.model.authImportDraft = newValue }
+            )
+        ) { presentedDraft in
+            AuthImportSheet(model: self.model, presentedDraft: presentedDraft)
+                .interactiveDismissDisabled(self.model.authImportIsSubmitting)
+        }
     }
 
     @ViewBuilder
@@ -757,7 +766,7 @@ private struct MinimalAccountsSection: View {
                     symbol: "tray.and.arrow.down.fill",
                     tone: .neutral
                 ) {
-                    Task { await self.model.importJSONFiles() }
+                    self.model.presentAuthImportSheet()
                 }
             }
 

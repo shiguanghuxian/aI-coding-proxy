@@ -124,8 +124,8 @@ public enum Paths {
 }
 
 public enum RuntimeInfo {
-    public static let releaseVersion = "1.0.1"
-    public static let displayVersion = "1.0.1"
+    public static let releaseVersion = "1.0.2"
+    public static let displayVersion = "1.0.2"
     public static let daemonServerToken = "CodexProxyDaemon/\(releaseVersion)"
 }
 

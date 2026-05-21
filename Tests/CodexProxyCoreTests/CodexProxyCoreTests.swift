@@ -1331,7 +1331,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(content.first?["text"] as? String, "First answer")
     }
 
-    func testChatRequestConversionDropsAssistantReasoningContentForChatUpstream() throws {
+    func testChatRequestConversionPreservesAssistantReasoningContentForChatUpstream() throws {
         let payload: [String: Any] = [
             "model": "gpt-5.4",
             "messages": [
@@ -1357,10 +1357,10 @@ final class CodexProxyCoreTests: XCTestCase {
         }))
 
         XCTAssertEqual(assistantMessage["content"] as? String, "First answer")
-        XCTAssertNil(assistantMessage["reasoning_content"])
+        XCTAssertEqual(assistantMessage["reasoning_content"] as? String, "internal trace")
     }
 
-    func testChatRequestConversionPreservesAssistantToolCallsWithoutReasoningContent() throws {
+    func testChatRequestConversionPreservesAssistantToolCallsWithReasoningContent() throws {
         let payload: [String: Any] = [
             "model": "gpt-5.4",
             "messages": [
@@ -1397,7 +1397,7 @@ final class CodexProxyCoreTests: XCTestCase {
             ($0["role"] as? String) == "assistant" && ($0["tool_calls"] as? [[String: Any]]) != nil
         }))
 
-        XCTAssertNil(assistantMessage["reasoning_content"])
+        XCTAssertEqual(assistantMessage["reasoning_content"] as? String, "tool-call thinking")
         let toolCalls = try XCTUnwrap(assistantMessage["tool_calls"] as? [[String: Any]])
         XCTAssertEqual(toolCalls.first?["id"] as? String, "call_cli_tool")
         XCTAssertEqual((toolCalls.first?["function"] as? [String: Any])?["name"] as? String, "run_command")
@@ -1453,7 +1453,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(messages.count, 4)
         XCTAssertEqual(messages[1]["role"] as? String, "assistant")
         XCTAssertEqual(messages[1]["content"] as? String, "I will inspect.")
-        XCTAssertNil(messages[1]["reasoning_content"])
+        XCTAssertEqual(messages[1]["reasoning_content"] as? String, "tool thinking")
         let toolCalls = try XCTUnwrap(messages[1]["tool_calls"] as? [[String: Any]])
         XCTAssertEqual(toolCalls.map { $0["id"] as? String }, ["call_list", "call_read"])
         XCTAssertEqual((toolCalls[0]["function"] as? [String: Any])?["name"] as? String, "list_directory")
@@ -1461,6 +1461,482 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(messages[2]["role"] as? String, "tool")
         XCTAssertEqual(messages[2]["tool_call_id"] as? String, "call_list")
         XCTAssertEqual(messages[3]["tool_call_id"] as? String, "call_read")
+    }
+
+    func testUpstreamChatCompletionsRequestMapsReasoningItemToAssistantReasoningContent() throws {
+        let normalizedRequest: [String: Any] = [
+            "model": "gpt-5.4",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "Inspect"]],
+                ],
+                [
+                    "type": "reasoning",
+                    "summary": [["type": "summary_text", "text": "Need a tool"]],
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_list",
+                    "name": "list_directory",
+                    "arguments": #"{"path":"."}"#,
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_list",
+                    "output": #"{"entries":["Package.swift"]}"#,
+                ],
+            ],
+        ]
+
+        let upstream = ProxyTranscoder.upstreamChatCompletionsRequest(
+            from: normalizedRequest,
+            upstreamModel: "deepseek-reasoner",
+            stream: false
+        )
+        let messages = try XCTUnwrap(upstream["messages"] as? [[String: Any]])
+        let assistantMessage = try XCTUnwrap(messages.first(where: {
+            ($0["role"] as? String) == "assistant"
+        }))
+
+        XCTAssertEqual(assistantMessage["reasoning_content"] as? String, "Need a tool")
+        let toolCalls = try XCTUnwrap(assistantMessage["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls.first?["id"] as? String, "call_list")
+    }
+
+    func testChatCompletionsReasoningCacheRestoresByToolCallID() throws {
+        let cache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        cache.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "id matched thinking",
+                callID: "call_original",
+                name: "run_command",
+                arguments: #"{"command":"pwd"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 1_000
+        )
+
+        let restored = cache.apply(
+            to: [
+                "messages": [[
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [[
+                        "id": "call_original",
+                        "type": "function",
+                        "function": [
+                            "name": "different_name",
+                            "arguments": #"{"changed":true}"#,
+                        ],
+                    ]],
+                ]],
+            ],
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 1_001
+        )
+        let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["reasoning_content"] as? String, "id matched thinking")
+    }
+
+    func testChatCompletionsReasoningCacheRestoresByToolCallSignatureWithGeneratedPromptCacheKey() throws {
+        let proxyKey = AuthenticatedProxyKeyContext(
+            apiKeyHash: "hash-mimo",
+            proxyKeyID: "proxy-mimo",
+            dataSource: .openAI
+        )
+        let firstRequest: [String: Any] = [
+            "model": "mimo-v4",
+            "instructions": "",
+            "input": [[
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": "inspect repo"]],
+            ]],
+        ]
+        let sameSessionRequest: [String: Any] = [
+            "model": "mimo-v4",
+            "instructions": "",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "inspect repo"]],
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_changed",
+                    "name": "run_command",
+                    "arguments": #"{"command":"ls","path":"."}"#,
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_changed",
+                    "output": "Package.swift",
+                ],
+            ],
+        ]
+        let isolatedRequest: [String: Any] = [
+            "model": "mimo-v4",
+            "instructions": "",
+            "input": [[
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": "different seed"]],
+            ]],
+        ]
+        let firstContext = PromptCacheSupport.context(
+            headers: [:],
+            requestPayload: firstRequest,
+            normalizedRequest: firstRequest,
+            requestedModel: "mimo-v4",
+            proxyKey: proxyKey
+        )
+        let sameSessionContext = PromptCacheSupport.context(
+            headers: [:],
+            requestPayload: sameSessionRequest,
+            normalizedRequest: sameSessionRequest,
+            requestedModel: "mimo-v4",
+            proxyKey: proxyKey
+        )
+        let isolatedContext = PromptCacheSupport.context(
+            headers: [:],
+            requestPayload: isolatedRequest,
+            normalizedRequest: isolatedRequest,
+            requestedModel: "mimo-v4",
+            proxyKey: proxyKey
+        )
+        XCTAssertEqual(firstContext.upstreamPromptCacheKey, sameSessionContext.upstreamPromptCacheKey)
+        XCTAssertNotEqual(firstContext.upstreamPromptCacheKey, isolatedContext.upstreamPromptCacheKey)
+
+        let cache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        cache.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "signature matched thinking",
+                callID: "call_original",
+                name: "run_command",
+                arguments: #"{"path":".","command":"ls"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: firstContext.upstreamPromptCacheKey,
+            now: 2_000
+        )
+
+        let request: [String: Any] = [
+            "messages": [[
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [[
+                    "id": "call_changed",
+                    "type": "function",
+                    "function": [
+                        "name": "run_command",
+                        "arguments": #"{ "command" : "ls", "path" : "." }"#,
+                    ],
+                ]],
+            ]],
+        ]
+        let restored = cache.apply(
+            to: request,
+            accountKey: "account-a",
+            sessionKey: sameSessionContext.upstreamPromptCacheKey,
+            now: 2_001
+        )
+        let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["reasoning_content"] as? String, "signature matched thinking")
+
+        let isolated = cache.apply(
+            to: request,
+            accountKey: "account-a",
+            sessionKey: isolatedContext.upstreamPromptCacheKey,
+            now: 2_002
+        )
+        let isolatedMessages = try XCTUnwrap(isolated["messages"] as? [[String: Any]])
+        XCTAssertNil(isolatedMessages.first?["reasoning_content"])
+    }
+
+    func testChatCompletionsReasoningCacheRestoresByAssistantTextFingerprint() throws {
+        let cache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        cache.record(
+            completedResponse: [
+                "output": [
+                    [
+                        "type": "reasoning",
+                        "content": [["type": "output_text", "text": "final answer thinking"]],
+                    ],
+                    [
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [["type": "output_text", "text": "Final answer"]],
+                    ],
+                ],
+            ],
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 3_000
+        )
+
+        let restored = cache.apply(
+            to: [
+                "messages": [[
+                    "role": "assistant",
+                    "content": "Final answer",
+                ]],
+            ],
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 3_001
+        )
+        let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["reasoning_content"] as? String, "final answer thinking")
+    }
+
+    func testChatCompletionsReasoningCacheDoesNotUseFinalAnswerFingerprintForToolCallAssistant() throws {
+        let cache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        cache.record(
+            completedResponse: [
+                "output": [
+                    [
+                        "type": "reasoning",
+                        "content": [["type": "output_text", "text": "final answer thinking"]],
+                    ],
+                    [
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [["type": "output_text", "text": "I will inspect."]],
+                    ],
+                ],
+            ],
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 3_000
+        )
+
+        let restored = cache.apply(
+            to: [
+                "messages": [[
+                    "role": "assistant",
+                    "content": "I will inspect.",
+                    "tool_calls": [[
+                        "id": "call_unknown",
+                        "type": "function",
+                        "function": [
+                            "name": "run_command",
+                            "arguments": #"{"command":"pwd"}"#,
+                        ],
+                    ]],
+                ]],
+            ],
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 3_001
+        )
+        let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+        XCTAssertNil(messages.first?["reasoning_content"])
+    }
+
+    func testChatCompletionsReasoningCacheOnlyUsesToolFallbackForSingleCandidate() throws {
+        let single = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        single.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "single tool thinking",
+                callID: "call_one",
+                name: "run_command",
+                arguments: #"{"command":"pwd"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_000
+        )
+        let unknownToolRequest: [String: Any] = [
+            "messages": [[
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [[
+                    "id": "call_unknown",
+                    "type": "function",
+                    "function": [
+                        "name": "read_file",
+                        "arguments": #"{"path":"README.md"}"#,
+                    ],
+                ]],
+            ]],
+        ]
+        let restored = single.apply(
+            to: unknownToolRequest,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_001
+        )
+        let restoredMessages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+        XCTAssertEqual(restoredMessages.first?["reasoning_content"] as? String, "single tool thinking")
+
+        let multiple = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        multiple.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "first tool thinking",
+                callID: "call_one",
+                name: "run_command",
+                arguments: #"{"command":"pwd"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_000
+        )
+        multiple.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "second tool thinking",
+                callID: "call_two",
+                name: "read_file",
+                arguments: #"{"path":"Package.swift"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_001
+        )
+        let notRestored = multiple.apply(
+            to: unknownToolRequest,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_002
+        )
+        let notRestoredMessages = try XCTUnwrap(notRestored["messages"] as? [[String: Any]])
+        XCTAssertNil(notRestoredMessages.first?["reasoning_content"])
+    }
+
+    func testChatCompletionsReasoningCachePersistsEncryptedAcrossStoreReload() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await Self.withEnvironment(["CODEX_PROXY_DISABLE_KEYCHAIN": "1"]) {
+            let secretStore = SecretStore(dataDirectory: directory)
+            do {
+                let firstStore = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+                let firstCache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8, store: firstStore)
+                firstCache.record(
+                    completedResponse: Self.completedReasoningToolCallResponse(
+                        reasoning: "persistent private thinking",
+                        callID: "call_persisted",
+                        name: "run_command",
+                        arguments: #"{"command":"pwd"}"#
+                    ),
+                    accountKey: "account-a",
+                    sessionKey: "session-a",
+                    now: 10_000
+                )
+            }
+
+            let reloadedStore = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+            let persistedSummary = try reloadedStore.chatCompletionsReasoningCacheSummary(now: 10_001)
+            XCTAssertEqual(persistedSummary.totalCount, 1)
+            XCTAssertEqual(persistedSummary.expiredCount, 0)
+            let persisted = try XCTUnwrap(reloadedStore.loadChatCompletionsReasoningCacheEntry(
+                accountKey: "account-a",
+                sessionKey: "session-a",
+                now: 10_001
+            ))
+            XCTAssertEqual(persisted.byToolCallID["call_persisted"], "persistent private thinking")
+            let reloadedCache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8, store: reloadedStore)
+            let restored = reloadedCache.apply(
+                to: [
+                    "messages": [[
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [[
+                            "id": "call_persisted",
+                            "type": "function",
+                            "function": [
+                                "name": "run_command",
+                                "arguments": #"{"command":"pwd"}"#,
+                            ],
+                        ]],
+                    ]],
+                ],
+                accountKey: "account-a",
+                sessionKey: "session-a",
+                now: 10_001
+            )
+            let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.first?["reasoning_content"] as? String, "persistent private thinking")
+
+            let databaseText = try Self.sqliteBackingText(dataDirectory: directory)
+            XCTAssertFalse(databaseText.contains("persistent private thinking"))
+        }
+    }
+
+    func testChatCompletionsReasoningCachePersistentClearAndExpiry() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await Self.withEnvironment(["CODEX_PROXY_DISABLE_KEYCHAIN": "1"]) {
+            let store = try SQLiteStore(dataDirectory: directory, secretStore: SecretStore(dataDirectory: directory))
+            let cache = ChatCompletionsReasoningCache(ttlSeconds: 10, capacity: 8, store: store)
+            cache.record(
+                completedResponse: Self.completedReasoningToolCallResponse(
+                    reasoning: "expired thinking",
+                    callID: "call_expired",
+                    name: "run_command",
+                    arguments: #"{"command":"date"}"#
+                ),
+                accountKey: "account-a",
+                sessionKey: "session-expired",
+                now: 1_000
+            )
+
+            XCTAssertEqual(try store.chatCompletionsReasoningCacheSummary(now: 1_005).totalCount, 1)
+            let clearedExpired = try cache.clear(ClearReasoningCacheRequest(expiredOnly: true), now: 1_011)
+            XCTAssertEqual(clearedExpired.deletedCount, 1)
+            XCTAssertEqual(clearedExpired.summary.totalCount, 0)
+
+            cache.record(
+                completedResponse: Self.completedReasoningToolCallResponse(
+                    reasoning: "active thinking",
+                    callID: "call_active",
+                    name: "run_command",
+                    arguments: #"{"command":"pwd"}"#
+                ),
+                accountKey: "account-b",
+                sessionKey: "session-active",
+                now: 1_020
+            )
+
+            let clearedAccount = try cache.clear(ClearReasoningCacheRequest(accountKeys: ["account-b"]), now: 1_021)
+            XCTAssertEqual(clearedAccount.deletedCount, 1)
+            XCTAssertEqual(clearedAccount.summary.totalCount, 0)
+        }
+    }
+
+    func testUpstreamChatCompletionsRequestPreservesThinkingParameter() throws {
+        let payload: [String: Any] = [
+            "model": "mimo-v4",
+            "messages": [
+                ["role": "user", "content": "Think with Xiaomi mode"],
+            ],
+            "thinking": [
+                "type": "enabled",
+                "budget_tokens": 512,
+            ],
+        ]
+
+        let converted = try ProxyTranscoder.convertChatCompletionsRequest(
+            payload,
+            allowCustomModelPassthrough: true
+        )
+        let upstream = ProxyTranscoder.upstreamChatCompletionsRequest(
+            from: converted.request,
+            upstreamModel: "mimo-v4",
+            stream: false
+        )
+        let thinking = try XCTUnwrap(upstream["thinking"] as? [String: Any])
+        XCTAssertEqual(thinking["type"] as? String, "enabled")
+        XCTAssertEqual(thinking["budget_tokens"] as? Int, 512)
     }
 
     func testUpstreamChatCompletionsRequestMapsBuiltInToolsMaxTokensAndUser() throws {
@@ -1519,6 +1995,253 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(functions[0]["description"] as? String, "Search the web")
         XCTAssertNotNil(functions[2]["parameters"])
         XCTAssertNotNil(functions[3]["parameters"])
+    }
+
+    func testOpenAIImagesURLHelperBuildsDefaultAndCustomEndpoints() throws {
+        XCTAssertEqual(
+            try OpenAICompatibleUpstream.imagesURL(
+                from: "https://api.openai.com",
+                endpoint: .generations
+            ),
+            "https://api.openai.com/v1/images/generations"
+        )
+        XCTAssertEqual(
+            try OpenAICompatibleUpstream.imagesURL(
+                from: "https://images.example.com/proxy/v1",
+                endpoint: .edits,
+                baseURLMode: .exactAPIPrefix
+            ),
+            "https://images.example.com/proxy/v1/images/edits"
+        )
+        XCTAssertThrowsError(
+            try OpenAICompatibleUpstream.imagesURL(
+                from: "https://api.anthropic.com",
+                endpoint: .variations,
+                providerPreset: .anthropicAPICompatible
+            )
+        )
+    }
+
+    func testOpenAIImagesJSONRequestKeepsGPTImage2WithoutModelWhitelist() throws {
+        let body = Data(#"{"model":"gpt-image-2","prompt":"Draw a small red cabin","response_format":"b64_json"}"#.utf8)
+        let info = OpenAIImagesProxySupport.requestInfo(
+            body: body,
+            headers: ["content-type": "application/json"],
+            endpoint: .generations
+        )
+
+        XCTAssertEqual(info.model, "gpt-image-2")
+        XCTAssertEqual(info.prompt, "Draw a small red cabin")
+        XCTAssertEqual(info.responseFormat, "b64_json")
+
+        let bridge = try XCTUnwrap(
+            OpenAIImagesProxySupport.responsesBridgeRequest(
+                info: info,
+                resolvedModel: info.model
+            )
+        )
+        XCTAssertEqual(bridge["model"] as? String, "gpt-image-2")
+        let tools = try XCTUnwrap(bridge["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.first?["type"] as? String, "image_generation")
+    }
+
+    func testChatGPTWebImageSupportIncludesCodexAndGPTImageModels() throws {
+        XCTAssertEqual(OpenAIImagesProxySupport.defaultChatGPTWebImageModel, "codex-gpt-image-2")
+        XCTAssertEqual(OpenAIImagesProxySupport.chatGPTWebImageModels, ["codex-gpt-image-2", "gpt-image-2"])
+        XCTAssertEqual(OpenAIImagesProxySupport.chatGPTWebImageModelSlug(for: "codex-gpt-image-2"), "codex-gpt-image-2")
+        XCTAssertEqual(OpenAIImagesProxySupport.chatGPTWebImageModelSlug(for: "gpt-image-2"), "gpt-5-3")
+
+        let prepare = OpenAIImagesProxySupport.chatGPTWebPreparePayload(
+            prompt: "Draw a moonlit cabin",
+            model: "codex-gpt-image-2"
+        )
+        XCTAssertEqual(prepare["model"] as? String, "codex-gpt-image-2")
+        XCTAssertEqual(prepare["system_hints"] as? [String], ["picture_v2"])
+        let partialQuery = try XCTUnwrap(prepare["partial_query"] as? [String: Any])
+        let content = try XCTUnwrap(partialQuery["content"] as? [String: Any])
+        XCTAssertEqual(content["parts"] as? [String], ["Draw a moonlit cabin"])
+        XCTAssertEqual(prepare["supports_buffering"] as? Bool, true)
+
+        let resources = OpenAIImagesProxySupport.chatGPTWebPOWResources(
+            fromHTML: #"<html data-build="fallback-build"><head><script src="/assets/c/abc123/_app.js"></script></head></html>"#
+        )
+        XCTAssertEqual(resources.scriptSources, ["/assets/c/abc123/_app.js"])
+        XCTAssertEqual(resources.dataBuild, "c/abc123/_")
+    }
+
+    func testChatGPTWebTurnstileTokenSolvesDXProgram() throws {
+        let sourceP = "source-p"
+        let expectedToken = Data("turnstile-token".utf8).base64EncodedString()
+        let dx = Self.chatGPTTurnstileDX(
+            instructions: [
+                [2, 30, "turnstile-token"],
+                [2, 31, "turnstile-token"],
+                [20, 30, 31, 3, 30],
+            ],
+            sourceP: sourceP
+        )
+
+        XCTAssertEqual(
+            OpenAIImagesProxySupport.chatGPTWebTurnstileToken(dx: dx, sourceP: sourceP),
+            expectedToken
+        )
+        XCTAssertNil(OpenAIImagesProxySupport.chatGPTWebTurnstileToken(dx: "not-base64", sourceP: sourceP))
+    }
+
+    func testChatGPTWebTurnstileTokenSolvesAuthenticatedPlainDXProgram() throws {
+        let expectedToken = Data("turnstile-token".utf8).base64EncodedString()
+        let dx = Self.chatGPTTurnstileDX(
+            instructions: [
+                [2, 30, "turnstile-token"],
+                [2, 31, "turnstile-token"],
+                [20, 30, 31, 3, 30],
+            ],
+            sourceP: ""
+        )
+
+        XCTAssertEqual(
+            OpenAIImagesProxySupport.chatGPTWebTurnstileToken(dx: dx, sourceP: ""),
+            expectedToken
+        )
+    }
+
+    func testChatGPTWebTurnstileTokenSupportsNativeObjectOps() throws {
+        let sourceP = "source-p"
+        let jsonToken = #"{"answer": "turnstile-token"}"#
+        let dx = Self.chatGPTTurnstileDX(
+            instructions: [
+                [2, 40, "window.Object.create"],
+                [17, 30, 40],
+                [2, 41, "window.Reflect.set"],
+                [2, 42, "answer"],
+                [2, 43, "turnstile-token"],
+                [7, 41, 30, 42, 43],
+                [15, 44, 30],
+                [2, 45, jsonToken],
+                [20, 44, 45, 3, 44],
+            ],
+            sourceP: sourceP
+        )
+
+        XCTAssertEqual(
+            OpenAIImagesProxySupport.chatGPTWebTurnstileToken(dx: dx, sourceP: sourceP),
+            Data(jsonToken.utf8).base64EncodedString()
+        )
+    }
+
+    func testChatGPTWebImageConversationStateExtractsImageReferences() {
+        let sse = Data((
+            #"data: {"conversation_id":"conv_123","message":{"author":{"role":"tool"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_abc"},{"asset_pointer":"sediment://sed_xyz"}]},"metadata":{"async_task_type":"image_gen"}}}"#
+                + "\n\n"
+        ).utf8)
+        let state = OpenAIImagesProxySupport.chatGPTWebConversationState(
+            from: ProxyTranscoder.decodeSSE(sse)
+        )
+
+        XCTAssertEqual(state.conversationID, "conv_123")
+        XCTAssertEqual(state.fileIDs, ["file_abc"])
+        XCTAssertEqual(state.sedimentIDs, ["sed_xyz"])
+        XCTAssertTrue(state.hasImageReferences)
+    }
+
+    func testChatGPTWebImagesAPIResponseConvertsDownloadedBytesToB64JSON() throws {
+        let payload = OpenAIImagesProxySupport.chatGPTWebImagesAPIResponse(
+            imageData: [Data("PNGDATA".utf8)],
+            created: 1_710_000_000
+        )
+
+        XCTAssertEqual(payload["created"] as? Int, 1_710_000_000)
+        let data = try XCTUnwrap(payload["data"] as? [[String: String]])
+        XCTAssertEqual(data.first?["b64_json"], Data("PNGDATA".utf8).base64EncodedString())
+    }
+
+    func testOpenAIImagesMultipartRequestExtractsTextFieldsAndImageWithoutMutatingOriginalBody() throws {
+        let boundary = "ImagesBoundary"
+        let bodyText = """
+        --\(boundary)\r
+        Content-Disposition: form-data; name="model"\r
+        \r
+        gpt-image-2\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="prompt"\r
+        \r
+        Edit the logo\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="response_format"\r
+        \r
+        b64_json\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="image"; filename="logo.png"\r
+        Content-Type: image/png\r
+        \r
+        PNGDATA\r
+        --\(boundary)--\r
+
+        """
+        let body = Data(bodyText.utf8)
+        let info = OpenAIImagesProxySupport.requestInfo(
+            body: body,
+            headers: ["content-type": "multipart/form-data; boundary=\(boundary)"],
+            endpoint: .edits
+        )
+
+        XCTAssertTrue(info.isMultipart)
+        XCTAssertEqual(info.model, "gpt-image-2")
+        XCTAssertEqual(info.prompt, "Edit the logo")
+        XCTAssertEqual(info.responseFormat, "b64_json")
+        XCTAssertEqual(info.inputImageDataURIs.count, 1)
+        XCTAssertTrue(info.inputImageDataURIs[0].hasPrefix("data:image/png;base64,"))
+        XCTAssertEqual(body, Data(bodyText.utf8))
+    }
+
+    func testOpenAIImagesBridgeResponseConvertsCompletedImageToImagesPayload() throws {
+        let response = Data(
+            #"""
+            {
+              "id": "resp_image",
+              "object": "response",
+              "created_at": 1710000000,
+              "status": "completed",
+              "model": "gpt-image-2",
+              "output": [
+                {
+                  "type": "image_generation_call",
+                  "result": "QUJDREVGRw=="
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        let payload = try OpenAIImagesProxySupport.imagesAPIResponse(
+            fromResponsesBody: response,
+            requestedModel: "gpt-image-2"
+        )
+
+        XCTAssertEqual(payload["created"] as? Int, 1_710_000_000)
+        let data = try XCTUnwrap(payload["data"] as? [[String: String]])
+        XCTAssertEqual(data.first?["b64_json"], "QUJDREVGRw==")
+    }
+
+    func testOpenAIImagesBridgeCompatibilityFailureKeepsAuthRateAndQuotaErrorsAuthoritative() {
+        XCTAssertTrue(
+            OpenAIImagesProxySupport.isResponsesBridgeCompatibilityFailure(
+                statusCode: 501,
+                bodyText: #"{"error":{"message":"unsupported endpoint image_generation"}}"#
+            )
+        )
+        XCTAssertFalse(
+            OpenAIImagesProxySupport.isResponsesBridgeCompatibilityFailure(
+                statusCode: 401,
+                bodyText: #"{"error":{"message":"invalid auth token"}}"#
+            )
+        )
+        XCTAssertFalse(
+            OpenAIImagesProxySupport.isResponsesBridgeCompatibilityFailure(
+                statusCode: 429,
+                bodyText: #"{"error":{"message":"rate limit exceeded"}}"#
+            )
+        )
     }
 
     func testUpstreamChatCompletionsRequestMapsInputImageToChatImageURLContent() throws {
@@ -1615,7 +2338,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(imageURL["detail"] as? String, "low")
     }
 
-    func testCompletedChatCompletionDropsReasoningContentForRoundTrip() throws {
+    func testCompletedChatCompletionPreservesReasoningContentForRoundTrip() throws {
         let payload: [String: Any] = [
             "id": "chatcmpl_reasoning",
             "created": 1_710_000_000,
@@ -1638,8 +2361,11 @@ final class CodexProxyCoreTests: XCTestCase {
             requestedModel: "deepseek-reasoner"
         )
         let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        let reasoning = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "reasoning" }))
         let message = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "message" }))
+        let reasoningContent = try XCTUnwrap(reasoning["content"] as? [[String: Any]])
 
+        XCTAssertEqual(reasoningContent.first?["text"] as? String, "deepseek thinking")
         XCTAssertNil(message["reasoning_content"])
         XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "Ready")
 
@@ -1649,10 +2375,10 @@ final class CodexProxyCoreTests: XCTestCase {
         )
         let choice = try XCTUnwrap((chatCompletion["choices"] as? [[String: Any]])?.first)
         let chatMessage = try XCTUnwrap(choice["message"] as? [String: Any])
-        XCTAssertNil(chatMessage["reasoning_content"])
+        XCTAssertEqual(chatMessage["reasoning_content"] as? String, "deepseek thinking")
     }
 
-    func testToolCallChatCompletionReasoningContentIsNotCachedOrExposed() throws {
+    func testToolCallChatCompletionReasoningContentIsPreservedAsReasoningItem() throws {
         let payload: [String: Any] = [
             "id": "chatcmpl_reasoning_tool",
             "created": 1_710_000_000,
@@ -1683,6 +2409,9 @@ final class CodexProxyCoreTests: XCTestCase {
             requestedModel: "deepseek-reasoner"
         )
         let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        let reasoning = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "reasoning" }))
+        let reasoningContent = try XCTUnwrap(reasoning["content"] as? [[String: Any]])
+        XCTAssertEqual(reasoningContent.first?["text"] as? String, "deepseek tool thinking")
         let functionCall = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "function_call" }))
         XCTAssertNil(functionCall["reasoning_content"])
     }
@@ -1718,14 +2447,16 @@ final class CodexProxyCoreTests: XCTestCase {
 
         XCTAssertTrue((completed["id"] as? String)?.hasPrefix("resp_") == true)
         XCTAssertNotEqual(completed["id"] as? String, "chatcmpl_reasoning_only")
-        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "reasoning answer")
+        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "")
         let completedInput = try XCTUnwrap(completed["input"] as? [[String: Any]])
         XCTAssertEqual(completedInput.count, 1)
         XCTAssertEqual(completedInput.first?["role"] as? String, "user")
         let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
         let message = try XCTUnwrap(output.first)
-        XCTAssertTrue((message["id"] as? String)?.hasPrefix("msg_") == true)
-        XCTAssertNil(message["reasoning_content"])
+        let reasoningContent = try XCTUnwrap(message["content"] as? [[String: Any]])
+        XCTAssertTrue((message["id"] as? String)?.hasPrefix("reason_") == true)
+        XCTAssertEqual(message["type"] as? String, "reasoning")
+        XCTAssertEqual(reasoningContent.first?["text"] as? String, "reasoning answer")
     }
 
     func testStreamingChatCompletionMapsReasoningContentToReasoningItem() throws {
@@ -1756,6 +2487,13 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(reasoningContent.first?["text"] as? String, "think more")
         XCTAssertNil(message["reasoning_content"])
         XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "Ready")
+        let chatCompletion = ProxyTranscoder.chatCompletionFromCompletedResponse(
+            completedResponse: completed,
+            requestedModel: "deepseek-reasoner"
+        )
+        let choice = try XCTUnwrap((chatCompletion["choices"] as? [[String: Any]])?.first)
+        let chatMessage = try XCTUnwrap(choice["message"] as? [String: Any])
+        XCTAssertEqual(chatMessage["reasoning_content"] as? String, "think more")
         let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
         XCTAssertEqual(usage.cacheHitTokens, 1)
     }
@@ -4030,6 +4768,111 @@ final class CodexProxyCoreTests: XCTestCase {
         let accounts = try await service.listAccounts()
         XCTAssertEqual(accounts.count, 1)
         XCTAssertTrue(accounts[0].enabled)
+    }
+
+    func testImportRawCodexLoggedInAuthObjectCreatesChatGPTOAuthAccount() async throws {
+        let upstream = Self.makeChatGPTUsageApplication(usagePlanType: "plus")
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let service = try Self.makeAccountService(dataDirectory: directory)
+            var config = AppConfig()
+            config.chatGPTBaseURL = "http://localhost:\(client.port ?? 0)"
+            let idToken = "header.\(Self.base64URL(["sub": "principal-raw", "https://api.openai.com/auth": ["chatgpt_account_id": "account-raw", "chatgpt_plan_type": "plus"]])).sig"
+            let raw = """
+            {
+              "access_token": "access-raw",
+              "account_id": "account-raw",
+              "client_id": "client-raw",
+              "disabled": false,
+              "email": "raw@example.com",
+              "expired": "2099-05-18T17:29:58Z",
+              "id_token": "\(idToken)",
+              "last_refresh": "2026-05-08T17:29:59Z",
+              "refresh_token": "refresh-raw",
+              "type": "codex"
+            }
+            """
+
+            let result = try await service.importAuthJSONAccounts(
+                items: [.init(source: "raw-auth.json", content: raw)],
+                config: config
+            )
+
+            XCTAssertEqual(result.importedCount, 1)
+            XCTAssertEqual(result.updatedCount, 0)
+            XCTAssertTrue(result.failures.isEmpty)
+
+            let accounts = try await service.listAccounts()
+            let account = try XCTUnwrap(accounts.first)
+            XCTAssertEqual(account.authMode, .chatGPT)
+            XCTAssertEqual(account.providerFamily, .openAI)
+            XCTAssertEqual(account.accountID, "account-raw")
+            XCTAssertEqual(account.email, "raw@example.com")
+            XCTAssertEqual(account.label, "raw@example.com")
+            XCTAssertTrue(account.enabled)
+            XCTAssertEqual(account.effectivePlanType, "plus")
+        }
+    }
+
+    func testImportRawAuthArrayAppliesDisabledAndKeepsImportingAfterInvalidCandidate() async throws {
+        let upstream = Self.makeChatGPTUsageApplication(usagePlanType: "plus")
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let service = try Self.makeAccountService(dataDirectory: directory)
+            var config = AppConfig()
+            config.chatGPTBaseURL = "http://localhost:\(client.port ?? 0)"
+            let disabledIDToken = "header.\(Self.base64URL(["sub": "principal-disabled", "https://api.openai.com/auth": ["chatgpt_account_id": "account-disabled"]])).sig"
+            let enabledIDToken = "header.\(Self.base64URL(["sub": "principal-enabled", "https://api.openai.com/auth": ["chatgpt_account_id": "account-enabled"]])).sig"
+            let raw = """
+            [
+              {
+                "access_token": "access-disabled",
+                "account_id": "account-disabled",
+                "disabled": true,
+                "email": "disabled@example.com",
+                "id_token": "\(disabledIDToken)",
+                "refresh_token": "refresh-disabled",
+                "type": "codex"
+              },
+              {
+                "account_id": "account-invalid",
+                "email": "invalid@example.com",
+                "type": "codex"
+              },
+              {
+                "access_token": "access-enabled",
+                "account_id": "account-enabled",
+                "disabled": false,
+                "email": "enabled@example.com",
+                "id_token": "\(enabledIDToken)",
+                "refresh_token": "refresh-enabled",
+                "type": "codex"
+              }
+            ]
+            """
+
+            let result = try await service.importAuthJSONAccounts(
+                items: [.init(source: "raw-array.json", content: raw)],
+                config: config
+            )
+
+            XCTAssertEqual(result.importedCount, 2)
+            XCTAssertEqual(result.updatedCount, 0)
+            XCTAssertEqual(result.failures.count, 1)
+            XCTAssertEqual(result.failures.first?.source, "raw-array.json")
+            XCTAssertTrue(result.failures.first?.error.contains("access_token") == true)
+
+            let accounts = try await service.listAccounts()
+                .sorted { $0.accountID < $1.accountID }
+            XCTAssertEqual(accounts.map(\.accountID), ["account-disabled", "account-enabled"])
+            XCTAssertEqual(accounts.map(\.enabled), [false, true])
+        }
     }
 
     func testExportAndReimportBackupPreservesDisabledState() async throws {
@@ -10663,6 +11506,25 @@ final class CodexProxyCoreTests: XCTestCase {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    private static func chatGPTTurnstileDX(instructions: [[Any]], sourceP: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: instructions)
+        let program = String(decoding: data, as: UTF8.self)
+        let encoded = self.xor(program, key: sourceP)
+        return Data(encoded.utf8).base64EncodedString()
+    }
+
+    private static func xor(_ text: String, key: String) -> String {
+        guard key.isEmpty == false else { return text }
+        let textScalars = Array(text.unicodeScalars)
+        let keyScalars = Array(key.unicodeScalars)
+        var scalars = String.UnicodeScalarView()
+        for (index, scalar) in textScalars.enumerated() {
+            let value = scalar.value ^ keyScalars[index % keyScalars.count].value
+            scalars.append(UnicodeScalar(value) ?? "\u{FFFD}")
+        }
+        return String(scalars)
+    }
+
     private static func makeAccountService(dataDirectory: URL) throws -> AccountService {
         let secretStore = SecretStore(dataDirectory: dataDirectory)
         let store = try SQLiteStore(dataDirectory: dataDirectory, secretStore: secretStore)
@@ -10844,6 +11706,20 @@ final class CodexProxyCoreTests: XCTestCase {
         return names
     }
 
+    private static func sqliteBackingText(dataDirectory: URL) throws -> String {
+        let databaseURL = Paths.databaseURL(in: dataDirectory)
+        let candidates = [
+            databaseURL,
+            URL(fileURLWithPath: databaseURL.path + "-wal"),
+            URL(fileURLWithPath: databaseURL.path + "-shm"),
+        ]
+        return try candidates.reduce(into: "") { result, url in
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            let data = try Data(contentsOf: url)
+            result += String(decoding: data, as: UTF8.self)
+        }
+    }
+
     private static func bindText(_ value: String, at index: Int32, to statement: OpaquePointer?) throws {
         guard sqlite3_bind_text(statement, index, value, -1, sqliteTransientDestructor) == SQLITE_OK else {
             throw ProxyError.message("legacy sqlite text bind failed")
@@ -11007,6 +11883,29 @@ final class CodexProxyCoreTests: XCTestCase {
             )
         }
         return Application(router: router)
+    }
+
+    private static func completedReasoningToolCallResponse(
+        reasoning: String,
+        callID: String,
+        name: String,
+        arguments: String
+    ) -> [String: Any] {
+        [
+            "output": [
+                [
+                    "type": "reasoning",
+                    "content": [["type": "output_text", "text": reasoning]],
+                ],
+                [
+                    "type": "function_call",
+                    "id": callID,
+                    "call_id": callID,
+                    "name": name,
+                    "arguments": arguments,
+                ],
+            ],
+        ]
     }
 
     private static func makeOpenAICompatibleValidationFallbackApplication(

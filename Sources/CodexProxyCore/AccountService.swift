@@ -40,9 +40,15 @@ public final class AccountService: @unchecked Sendable {
         var updated = 0
         var failures: [ImportAccountFailure] = []
         for item in items {
+            let candidates: [AuthJsonImportInput]
             do {
-                let candidates = try self.expandAuthImportInput(item)
-                for candidate in candidates {
+                candidates = try self.expandAuthImportInput(item)
+            } catch {
+                failures.append(.init(source: item.source, error: error.localizedDescription))
+                continue
+            }
+            for candidate in candidates {
+                do {
                     let record = try await self.prepareAccount(
                         text: candidate.content,
                         sourceLabel: candidate.label ?? item.label,
@@ -57,9 +63,9 @@ public final class AccountService: @unchecked Sendable {
                     } else {
                         imported += 1
                     }
+                } catch {
+                    failures.append(.init(source: candidate.source, error: error.localizedDescription))
                 }
-            } catch {
-                failures.append(.init(source: item.source, error: error.localizedDescription))
             }
         }
         return ImportAccountsResult(
@@ -972,7 +978,7 @@ public final class AccountService: @unchecked Sendable {
                     source: item.source,
                     content: authJSON,
                     label: account["label"] as? String ?? item.label,
-                    enabled: account["enabled"] as? Bool,
+                    enabled: self.importEnabledFlag(from: account, fallback: item.enabled),
                     managedProxyNodeName: (account["managedProxyNodeName"] as? String) ?? (account["managed_proxy_node_name"] as? String),
                     modelRouting: try Self.decodeAccountModelRouting(
                         from: account["modelRouting"] ?? account["model_routing"]
@@ -989,12 +995,38 @@ public final class AccountService: @unchecked Sendable {
                     source: item.source,
                     content: String(decoding: authJSONData, as: UTF8.self),
                     label: item.label,
-                    enabled: item.enabled,
+                    enabled: self.importEnabledFlag(from: object, fallback: item.enabled),
                     automaticCooldownDisabled: item.automaticCooldownDisabled
                 )
             }
         }
+        if let object = json as? [String: Any] {
+            return [
+                AuthJsonImportInput(
+                    source: item.source,
+                    content: item.content,
+                    label: item.label,
+                    enabled: self.importEnabledFlag(from: object, fallback: item.enabled),
+                    managedProxyNodeName: item.managedProxyNodeName,
+                    modelRouting: item.modelRouting,
+                    automaticCooldownDisabled: item.automaticCooldownDisabled
+                ),
+            ]
+        }
         return [item]
+    }
+
+    private func importEnabledFlag(from object: [String: Any], fallback: Bool?) -> Bool? {
+        if let fallback {
+            return fallback
+        }
+        if let enabled = object["enabled"] as? Bool {
+            return enabled
+        }
+        if let disabled = object["disabled"] as? Bool {
+            return !disabled
+        }
+        return nil
     }
 
     private func accountLabel(sourceLabel: String?, extracted: ExtractedAuth) -> String {

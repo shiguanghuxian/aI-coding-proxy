@@ -113,6 +113,15 @@ final class DaemonHTTPService: @unchecked Sendable {
         router.post("v1/responses") { request, _ in
             try await self.respond(to: request, kind: .publicAPI)
         }
+        router.post("v1/images/generations") { request, _ in
+            try await self.respond(to: request, kind: .publicAPI)
+        }
+        router.post("v1/images/edits") { request, _ in
+            try await self.respond(to: request, kind: .publicAPI)
+        }
+        router.post("v1/images/variations") { request, _ in
+            try await self.respond(to: request, kind: .publicAPI)
+        }
         router.post("v1/messages") { request, _ in
             try await self.respond(to: request, kind: .publicAPI)
         }
@@ -429,6 +438,18 @@ final class DaemonHTTPService: @unchecked Sendable {
             return self.fromProxyResponse(proxy)
         }
 
+        if request.method == "POST", let imagesEndpoint = OpenAIImagesEndpoint(path: request.path) {
+            let proxy = try await self.controller.proxyImages(
+                body: request.body,
+                endpoint: imagesEndpoint,
+                proxyKey: proxyKey,
+                apiKeyValue: apiKey,
+                headers: request.headers,
+                selectedAccountKey: selectedAccountKey
+            )
+            return self.fromProxyResponse(proxy)
+        }
+
         if request.method == "POST", request.path == "/v1/messages" {
             do {
                 let proxy = try await self.controller.proxyAnthropicMessages(
@@ -601,6 +622,11 @@ final class DaemonHTTPService: @unchecked Sendable {
             )
         case ("GET", "/admin/stats/request-filters"):
             return try self.codableResponse(try await self.controller.requestLogFilters(query: self.requestLogQuery(from: request)))
+        case ("GET", "/admin/reasoning-cache/summary"):
+            return try self.codableResponse(try await self.controller.reasoningCacheSummary())
+        case ("POST", "/admin/reasoning-cache/clear"):
+            let payload = try self.decode(ClearReasoningCacheRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.clearReasoningCache(payload))
         default:
             if let response = try await self.handleAccountManagementRoute(request) {
                 return response

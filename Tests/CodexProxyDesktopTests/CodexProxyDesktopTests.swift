@@ -485,6 +485,57 @@ private final class RemoteDeployStub: @unchecked Sendable, RemoteDeploying {
     }
 }
 
+private final class ReasoningCacheMaintenanceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSummary: ReasoningCacheSummary
+    private var storedSummaryCallCount = 0
+    private var storedClearRequests: [ClearReasoningCacheRequest] = []
+    private var storedConfirmations: [DesktopAppModel.ReasoningCacheClearConfirmationContent] = []
+
+    init(summary: ReasoningCacheSummary = ReasoningCacheSummary()) {
+        self.storedSummary = summary
+    }
+
+    func summary() -> ReasoningCacheSummary {
+        self.lock.withLock {
+            self.storedSummaryCallCount += 1
+            return self.storedSummary
+        }
+    }
+
+    func setSummary(_ summary: ReasoningCacheSummary) {
+        self.lock.withLock {
+            self.storedSummary = summary
+        }
+    }
+
+    func recordClear(_ request: ClearReasoningCacheRequest, resultSummary: ReasoningCacheSummary) -> ClearReasoningCacheResult {
+        self.lock.withLock {
+            self.storedClearRequests.append(request)
+            self.storedSummary = resultSummary
+        }
+        return ClearReasoningCacheResult(deletedCount: 3, summary: resultSummary)
+    }
+
+    func recordConfirmation(_ content: DesktopAppModel.ReasoningCacheClearConfirmationContent) {
+        self.lock.withLock {
+            self.storedConfirmations.append(content)
+        }
+    }
+
+    func summaryCallCount() -> Int {
+        self.lock.withLock { self.storedSummaryCallCount }
+    }
+
+    func clearRequests() -> [ClearReasoningCacheRequest] {
+        self.lock.withLock { self.storedClearRequests }
+    }
+
+    func confirmations() -> [DesktopAppModel.ReasoningCacheClearConfirmationContent] {
+        self.lock.withLock { self.storedConfirmations }
+    }
+}
+
 final class CodexProxyDesktopTests: XCTestCase {
     @MainActor
     func testDesktopMainWindowFindsTaggedMainWindow() {
@@ -497,9 +548,10 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     func testSettingsTabOrderMatchesPlannedInformationArchitecture() {
-        XCTAssertEqual(SettingsTab.allCases, [.appearance, .general, .proxy, .service])
+        XCTAssertEqual(SettingsTab.allCases, [.appearance, .general, .proxy, .service, .cleanup])
         XCTAssertEqual(SettingsTab.appearance.rawValue, "appearance")
         XCTAssertEqual(SettingsTab.service.rawValue, "service")
+        XCTAssertEqual(SettingsTab.cleanup.rawValue, "cleanup")
     }
 
     func testOverviewTabSymbolsMatchUnifiedDashboardStrip() {
@@ -630,6 +682,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(formSource.contains("$draft.automaticCooldownDisabled"))
         XCTAssertTrue(accountsSource.contains("canUpdateAccountCooldownPolicy"))
         XCTAssertTrue(accountsSource.contains("accountCooldownPolicyActionTitle"))
+        XCTAssertTrue(formSource.contains("self.draft.upstreamAdapter == .chatCompletions"))
+        XCTAssertTrue(formSource.contains(".helperReasoningCacheAccountIsolation"))
     }
 
 
@@ -3673,6 +3727,176 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testSettingsCleanupPanelDeclaresReasoningCacheMaintenanceUI() throws {
+        let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
+        let cleanupSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsCleanupView.swift")
+
+        XCTAssertTrue(settingsSource.contains("SettingsCleanupPanel(model: self.model)"))
+        XCTAssertTrue(cleanupSource.contains(".sectionReasoningCache"))
+        XCTAssertTrue(cleanupSource.contains(".actionClearExpiredReasoningCache"))
+        XCTAssertTrue(cleanupSource.contains(".actionClearReasoningCacheByAccount"))
+        XCTAssertTrue(cleanupSource.contains(".actionClearReasoningCacheOlderThan"))
+        XCTAssertTrue(cleanupSource.contains(".actionClearAllReasoningCache"))
+        XCTAssertTrue(cleanupSource.contains(".helperReasoningCacheAccountIsolation"))
+        XCTAssertFalse(cleanupSource.contains("reasoning_content"))
+    }
+
+    @MainActor
+    func testReasoningCacheSummaryLoadsAndNormalizesSelection() async {
+        let summary = ReasoningCacheSummary(
+            totalCount: 3,
+            expiredCount: 1,
+            oldestTouchedAt: 1_776_000_000,
+            newestTouchedAt: 1_776_000_200,
+            accounts: [
+                ReasoningCacheAccountSummary(
+                    accountKey: "account-b",
+                    accountLabel: "Beta",
+                    entryCount: 2,
+                    expiredCount: 1,
+                    oldestTouchedAt: 1_776_000_000,
+                    newestTouchedAt: 1_776_000_200
+                ),
+                ReasoningCacheAccountSummary(
+                    accountKey: "account-a",
+                    accountLabel: "Alpha",
+                    entryCount: 1,
+                    expiredCount: 0,
+                    oldestTouchedAt: 1_776_000_050,
+                    newestTouchedAt: 1_776_000_050
+                ),
+            ]
+        )
+        let probe = ReasoningCacheMaintenanceProbe(summary: summary)
+        let admin = AdminAPIClient(reasoningCacheSummaryHandler: { probe.summary() })
+        let model = DesktopAppModel(admin: admin)
+
+        await model.loadReasoningCacheSummary()
+
+        XCTAssertEqual(probe.summaryCallCount(), 1)
+        XCTAssertEqual(model.reasoningCacheSummary, summary)
+        XCTAssertEqual(model.reasoningCacheAccountOptions.map(\.accountKey), ["account-a", "account-b"])
+        XCTAssertEqual(model.reasoningCacheSelectedAccountKey, "account-a")
+        XCTAssertFalse(model.reasoningCacheIsRefreshing)
+    }
+
+    @MainActor
+    func testReasoningCacheClearActionsSendExpectedRequestsAndPublishBanner() async {
+        let activeSummary = ReasoningCacheSummary(
+            totalCount: 4,
+            expiredCount: 1,
+            oldestTouchedAt: 1_776_000_000,
+            newestTouchedAt: 1_776_000_300,
+            accounts: [
+                ReasoningCacheAccountSummary(
+                    accountKey: "account-a",
+                    accountLabel: "Alpha",
+                    entryCount: 4,
+                    expiredCount: 1,
+                    oldestTouchedAt: 1_776_000_000,
+                    newestTouchedAt: 1_776_000_300
+                ),
+            ]
+        )
+        let emptySummary = ReasoningCacheSummary()
+        let probe = ReasoningCacheMaintenanceProbe(summary: activeSummary)
+        let admin = AdminAPIClient(clearReasoningCacheHandler: { request in
+            probe.recordClear(request, resultSummary: emptySummary)
+        })
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearReasoningCacheHandler: { content in
+                probe.recordConfirmation(content)
+                return true
+            }
+        )
+
+        model.reasoningCacheSummary = activeSummary
+        model.reasoningCacheSelectedAccountKey = "account-a"
+        await model.clearExpiredReasoningCache()
+
+        model.reasoningCacheSummary = activeSummary
+        model.reasoningCacheSelectedAccountKey = "account-a"
+        await model.clearSelectedAccountReasoningCache()
+
+        model.reasoningCacheSummary = activeSummary
+        model.reasoningCacheSelectedAccountKey = "account-a"
+        model.reasoningCacheOlderThanSeconds = ReasoningCacheOlderThanPreset.oneDay.rawValue
+        await model.clearReasoningCacheOlderThanSelectedPreset()
+
+        model.reasoningCacheSummary = activeSummary
+        model.reasoningCacheSelectedAccountKey = "account-a"
+        await model.clearAllReasoningCache()
+
+        let requests = probe.clearRequests()
+        XCTAssertEqual(requests.count, 4)
+        XCTAssertTrue(requests[0].expiredOnly)
+        XCTAssertEqual(requests[1].accountKeys, ["account-a"])
+        XCTAssertEqual(requests[2].olderThanSeconds, ReasoningCacheOlderThanPreset.oneDay.rawValue)
+        XCTAssertTrue(requests[3].clearAll)
+        XCTAssertEqual(probe.confirmations().count, 4)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successReasoningCacheCleared))
+        XCTAssertFalse(model.reasoningCacheIsClearing)
+    }
+
+    @MainActor
+    func testReasoningCacheClearCancellationDoesNotCallAdmin() async {
+        let summary = ReasoningCacheSummary(
+            totalCount: 1,
+            expiredCount: 0,
+            accounts: [
+                ReasoningCacheAccountSummary(
+                    accountKey: "account-a",
+                    accountLabel: "Alpha",
+                    entryCount: 1,
+                    expiredCount: 0,
+                    oldestTouchedAt: 1_776_000_000,
+                    newestTouchedAt: 1_776_000_000
+                ),
+            ]
+        )
+        let probe = ReasoningCacheMaintenanceProbe(summary: summary)
+        let admin = AdminAPIClient(clearReasoningCacheHandler: { request in
+            probe.recordClear(request, resultSummary: ReasoningCacheSummary())
+        })
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearReasoningCacheHandler: { content in
+                probe.recordConfirmation(content)
+                return false
+            }
+        )
+        model.reasoningCacheSummary = summary
+
+        await model.clearAllReasoningCache()
+
+        XCTAssertEqual(probe.confirmations().count, 1)
+        XCTAssertTrue(probe.clearRequests().isEmpty)
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertFalse(model.reasoningCacheIsClearing)
+    }
+
+    @MainActor
+    func testReasoningCacheCleanupLocalizationCopy() {
+        let model = DesktopAppModel()
+
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.text(.sectionCleanup), "Cleanup")
+        XCTAssertEqual(model.text(.sectionReasoningCache), "Reasoning Backfill Cache")
+        XCTAssertEqual(model.text(.actionClearAllReasoningCache), "Clear All")
+        XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("never backfilled across accounts"))
+        XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("Disabling or deleting"))
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.text(.sectionCleanup), "清理")
+        XCTAssertEqual(model.text(.sectionReasoningCache), "Reasoning 回传缓存")
+        XCTAssertEqual(model.text(.actionClearAllReasoningCache), "全部清理")
+        XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("不会跨账号"))
+        XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("禁用或删除"))
+    }
+
+    @MainActor
     func testTitlebarDeclaresKeepAwakeButton() throws {
         let appSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProxyDesktopApp.swift")
         let sharedSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SharedUI.swift")
@@ -6677,6 +6901,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("self.model.text(.actionTestProxy)"))
         XCTAssertTrue(source.contains("case .testProxy:"))
         XCTAssertTrue(source.contains("return self.model.adminSupportsProxyTesting"))
+        XCTAssertTrue(source.contains(".accessibilityIdentifier(\"accounts-more-quick-actions-menu\")"))
         XCTAssertTrue(source.contains(".accessibilityIdentifier(\"accounts-test-proxy-button\")"))
     }
 
@@ -7066,10 +7291,23 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.providerPresetGenericOpenAICompatible), "Generic OpenAI Compatible")
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "Aliyun / Qwen Coding Plan")
         XCTAssertEqual(model.text(.proxyTestTitle), "Test Console")
+        XCTAssertEqual(model.text(.optionImageGenerations), "Images")
+        XCTAssertEqual(model.text(.labelGeneratedImages), "Generated Images")
+        XCTAssertEqual(model.text(.labelImagePreview), "Image Preview")
+        XCTAssertEqual(model.text(.labelImageURL), "Image URL")
         XCTAssertEqual(
             model.text(.helperQuickActionTestProxy),
             "Open the test console to verify the current proxy path without leaving the app."
         )
+        XCTAssertEqual(model.text(.labelQuickActionLoginGroup), "Login")
+        XCTAssertEqual(model.text(.labelQuickActionImportGroup), "Add / Import")
+        XCTAssertEqual(model.text(.labelQuickActionMaintenanceGroup), "Maintenance")
+        XCTAssertEqual(model.text(.actionMoreQuickActions), "More")
+        XCTAssertEqual(
+            model.text(.helperMoreQuickActions),
+            "Export backups, test the proxy, or refresh usage."
+        )
+        XCTAssertEqual(model.text(.helperAccountCardLastError), "Click to view the full error message.")
 
         model.preferences.languageMode = .zhHans
         XCTAssertEqual(model.text(.labelOpenAIBaseURL), "OpenAI 兼容根地址")
@@ -7077,10 +7315,23 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.providerPresetGenericOpenAICompatible), "通用 OpenAI 兼容")
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "阿里百炼 / Qwen Coding Plan")
         XCTAssertEqual(model.text(.proxyTestTitle), "测试控制台")
+        XCTAssertEqual(model.text(.optionImageGenerations), "图片生成")
+        XCTAssertEqual(model.text(.labelGeneratedImages), "生成图片")
+        XCTAssertEqual(model.text(.labelImagePreview), "图片预览")
+        XCTAssertEqual(model.text(.labelImageURL), "图片 URL")
         XCTAssertEqual(
             model.text(.helperQuickActionTestProxy),
             "直接打开测试控制台，在应用内验证当前代理链路是否正常。"
         )
+        XCTAssertEqual(model.text(.labelQuickActionLoginGroup), "登录")
+        XCTAssertEqual(model.text(.labelQuickActionImportGroup), "新增 / 导入")
+        XCTAssertEqual(model.text(.labelQuickActionMaintenanceGroup), "维护")
+        XCTAssertEqual(model.text(.actionMoreQuickActions), "更多")
+        XCTAssertEqual(
+            model.text(.helperMoreQuickActions),
+            "导出备份、测试代理或刷新用量。"
+        )
+        XCTAssertEqual(model.text(.helperAccountCardLastError), "点击查看完整错误信息。")
     }
 
     @MainActor
@@ -7139,17 +7390,240 @@ final class CodexProxyDesktopTests: XCTestCase {
 
     func testAccountsQuickActionLayoutGroupsKeepPlannedOrder() {
         XCTAssertEqual(
-            AccountsQuickActionLayoutGroups.primary,
-            [.openAILogin, .anthropicLogin, .geminiLogin, .importCurrent, .manualAdd]
+            AccountsQuickActionLayoutGroups.login,
+            [.openAILogin, .anthropicLogin, .geminiLogin]
         )
         XCTAssertEqual(
-            AccountsQuickActionLayoutGroups.secondary,
-            [.importJSON, .exportBackup, .testProxy, .refreshUsage]
+            AccountsQuickActionLayoutGroups.addImport,
+            [.importCurrent, .importLocalToRemote, .manualAdd, .importJSON]
+        )
+        XCTAssertEqual(
+            AccountsQuickActionLayoutGroups.overflow,
+            [.exportBackup, .testProxy, .refreshUsage]
         )
         XCTAssertEqual(
             AccountsQuickActionLayoutGroups.all,
-            AccountsQuickActionLayoutGroups.primary + AccountsQuickActionLayoutGroups.secondary
+            AccountsQuickActionLayoutGroups.login
+                + AccountsQuickActionLayoutGroups.addImport
+                + AccountsQuickActionLayoutGroups.overflow
         )
+    }
+
+    @MainActor
+    func testAccountsQuickActionToolbarGroupsCommonActionsAndMoreMenu() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+
+        XCTAssertTrue(source.contains("self.model.text(.labelQuickActionLoginGroup)"))
+        XCTAssertTrue(source.contains("self.model.text(.labelQuickActionImportGroup)"))
+        XCTAssertTrue(source.contains("self.model.text(.labelQuickActionMaintenanceGroup).uppercased()"))
+        XCTAssertTrue(source.contains("private func moreQuickActionsGroup(palette: AppearancePalette) -> some View"))
+        XCTAssertTrue(source.contains("private func moreQuickActionsMenu(palette: AppearancePalette) -> some View"))
+        XCTAssertTrue(source.contains("private func moreQuickActionsMenuLabel(palette: AppearancePalette) -> some View"))
+        XCTAssertTrue(source.contains("Menu {"))
+        XCTAssertTrue(source.contains(".accessibilityIdentifier(\"accounts-more-quick-actions-menu\")"))
+        XCTAssertTrue(source.contains("self.moreQuickActionsMenuLabel(palette: palette)"))
+        XCTAssertTrue(source.contains(".padding(.horizontal, 9)"))
+        XCTAssertTrue(source.contains(".padding(.vertical, 6)"))
+        XCTAssertTrue(source.contains("self.moreQuickActionsGroup(palette: palette)"))
+        XCTAssertFalse(source.contains("Spacer(minLength: 0)\n                    self.moreQuickActionsMenu(palette: palette)"))
+        XCTAssertFalse(source.contains(".fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.90 : 0.98))"))
+        XCTAssertTrue(source.contains("AccountsQuickActionLayoutGroups.overflow"))
+        XCTAssertTrue(source.contains("Label(self.model.text(.actionExportBackup), systemImage: \"archivebox.fill\")"))
+        XCTAssertTrue(source.contains("Label(self.model.text(.actionTestProxy), systemImage: \"bolt.badge.checkmark\")"))
+        XCTAssertTrue(source.contains("Label(self.model.text(.actionRefreshUsage), systemImage: \"arrow.clockwise.circle.fill\")"))
+    }
+
+    @MainActor
+    func testAccountsQuickActionToolbarRendersGroupedPrimaryActions() {
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .english
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1240, height: 900),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let hostingView = NSHostingView(
+            rootView: AccountsView(model: model)
+                .frame(width: 1240, height: 900)
+        )
+        hostingView.frame = window.contentLayoutRect
+        window.contentView = hostingView
+
+        Self.renderHostedView(hostingView)
+        XCTAssertGreaterThan(Self.hostedSubviewCount(in: hostingView, named: "NSButton"), 0)
+    }
+
+    @MainActor
+    func testPastedAuthImportCallsAdminRefreshesAccountsAndShowsSummary() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let importedAccount = Self.makeAccount(id: "imported-auth", label: "Imported Auth", accountID: "account-imported")
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                probe.accounts()
+            },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                probe.setAccounts([importedAccount])
+                return ImportAccountsResult(totalCount: 1, importedCount: 1, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        var draft = DesktopAppModel.AuthImportDraft()
+        draft.pastedJSON = #"{"access_token":"access","account_id":"account-imported","id_token":"header.payload.sig","refresh_token":"refresh","type":"codex"}"#
+        model.authImportDraft = draft
+
+        await model.submitAuthImportDraft()
+
+        let calls = probe.importCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].count, 1)
+        XCTAssertEqual(calls[0][0].source, "pasted-auth.json")
+        XCTAssertEqual(calls[0][0].content, draft.pastedJSON)
+        XCTAssertEqual(model.accounts.map(\.id), [importedAccount.id])
+        XCTAssertNil(model.authImportDraft)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.localization.successTitle(for: .importJSON))
+        XCTAssertTrue(model.banners.first?.detail?.contains("新增 1 个") == true || model.banners.first?.detail?.contains("Imported 1") == true)
+    }
+
+    @MainActor
+    func testPastedAuthImportRejectsBlankAndInvalidJSONWithoutCallingAdmin() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                return ImportAccountsResult(totalCount: 1, importedCount: 1, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+
+        model.authImportDraft = DesktopAppModel.AuthImportDraft()
+        await model.submitAuthImportDraft()
+        XCTAssertTrue(probe.importCalls().isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .warning)
+        XCTAssertEqual(model.banners.first?.detail, model.text(.helperAuthImportPasteRequired))
+
+        model.banners.removeAll()
+        var invalid = DesktopAppModel.AuthImportDraft()
+        invalid.pastedJSON = "{"
+        model.authImportDraft = invalid
+        await model.submitAuthImportDraft()
+        XCTAssertTrue(probe.importCalls().isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .warning)
+        XCTAssertEqual(model.banners.first?.detail, model.text(.helperAuthImportJSONInvalid))
+    }
+
+    @MainActor
+    func testAuthImportFileModeUsesInjectedFileSelectionAndReader() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let importedAccount = Self.makeAccount(id: "file-imported-auth", label: "File Import", accountID: "account-file")
+        let firstURL = URL(fileURLWithPath: "/tmp/first-auth.json")
+        let secondURL = URL(fileURLWithPath: "/tmp/second-auth.json")
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                probe.accounts()
+            },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                probe.setAccounts([importedAccount])
+                return ImportAccountsResult(totalCount: 2, importedCount: 2, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            importAuthFileSelectionHandler: { [firstURL, secondURL] },
+            importAuthFileReader: { url in
+                #"{"access_token":"\#(url.lastPathComponent)","account_id":"\#(url.deletingPathExtension().lastPathComponent)"}"#
+            }
+        )
+        var draft = DesktopAppModel.AuthImportDraft()
+        draft.mode = .file
+        model.authImportDraft = draft
+
+        await model.submitAuthImportDraft()
+
+        let calls = probe.importCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].map(\.source), ["first-auth.json", "second-auth.json"])
+        XCTAssertTrue(calls[0][0].content.contains("first-auth.json"))
+        XCTAssertEqual(model.accounts.map(\.id), [importedAccount.id])
+        XCTAssertNil(model.authImportDraft)
+    }
+
+    @MainActor
+    func testAuthImportFileModeCancelDoesNotCallAdmin() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                return ImportAccountsResult(totalCount: 1, importedCount: 1, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            importAuthFileSelectionHandler: { nil }
+        )
+        var draft = DesktopAppModel.AuthImportDraft()
+        draft.mode = .file
+        model.authImportDraft = draft
+
+        await model.submitAuthImportDraft()
+
+        XCTAssertTrue(probe.importCalls().isEmpty)
+        XCTAssertNotNil(model.authImportDraft)
+    }
+
+    @MainActor
+    func testAuthImportPartialFailurePublishesWarningSummary() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                return ImportAccountsResult(
+                    totalCount: 1,
+                    importedCount: 0,
+                    updatedCount: 1,
+                    failures: [.init(source: "pasted-auth.json", error: "missing access_token")]
+                )
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        var draft = DesktopAppModel.AuthImportDraft()
+        draft.pastedJSON = #"{"access_token":"access","account_id":"account"}"#
+        model.authImportDraft = draft
+
+        await model.submitAuthImportDraft()
+
+        XCTAssertEqual(model.banners.first?.tone, .warning)
+        XCTAssertEqual(model.banners.first?.title, model.text(.warningAuthImportPartialFailure))
+        XCTAssertTrue(model.banners.first?.detail?.contains("missing access_token") == true)
+    }
+
+    @MainActor
+    func testAuthImportSheetSourceDeclaresPasteAndFileControls() throws {
+        let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        let sheetSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AuthImportSheet.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertTrue(accountsSource.contains("AuthImportSheet"))
+        XCTAssertTrue(accountsSource.contains("self.model.presentAuthImportSheet()"))
+        XCTAssertTrue(sheetSource.contains("Spacer(minLength: 0)"))
+        XCTAssertTrue(sheetSource.contains("TextEditor(text: self.pastedJSONBinding)"))
+        XCTAssertTrue(sheetSource.contains("self.model.text(.actionPasteAuthJSON)"))
+        XCTAssertTrue(sheetSource.contains("self.model.text(.actionChooseAuthJSONFiles)"))
+        XCTAssertFalse(sheetSource.contains("minHeight: 460"))
+        XCTAssertFalse(sheetSource.contains("idealHeight: 560"))
+        XCTAssertFalse(sheetSource.contains("minHeight: 170"))
+        XCTAssertTrue(preferencesSource.contains(".actionImportJSON: \"导入授权信息\""))
+        XCTAssertTrue(preferencesSource.contains(".actionImportJSON: \"Import Auth\""))
+        XCTAssertTrue(preferencesSource.contains("已登录授权 JSON"))
+        XCTAssertTrue(preferencesSource.contains("logged-in auth JSON"))
     }
 
     @MainActor
@@ -9080,7 +9554,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.accounts = [updatedAccount]
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 1200),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 1200),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
@@ -9088,7 +9562,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         defer { window.orderOut(nil) }
         let hostingView = NSHostingView(
             rootView: AccountsView(model: model)
-                .frame(width: 380, alignment: .leading)
+                .frame(width: 480, alignment: .leading)
         )
         hostingView.frame = window.contentLayoutRect
         window.contentView = hostingView
@@ -9865,6 +10339,188 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         model.refreshingAccountIDs.insert(account.id)
         XCTAssertEqual(model.accountCardRefreshActionTitle(for: account.id), "刷新中")
+    }
+
+    @MainActor
+    func testAccountCardActionsUseSingleLineOverflowMenu() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        guard let actionStart = source.range(of: "    private var actionButtons: some View {"),
+              let actionEnd = source.range(
+                of: "    private var refreshUsageButtonLabel",
+                range: actionStart.upperBound..<source.endIndex
+              ),
+              let menuStart = source.range(of: "    private var moreActionsMenu: some View {"),
+              let menuEnd = source.range(
+                of: "private struct AccountLastErrorPillButton",
+                range: menuStart.upperBound..<source.endIndex
+              )
+        else {
+            return XCTFail("Missing AccountCard action sections")
+        }
+        let actionSource = String(source[actionStart.lowerBound..<actionEnd.lowerBound])
+        let menuSource = String(source[menuStart.lowerBound..<menuEnd.lowerBound])
+
+        XCTAssertTrue(actionSource.contains("HStack(alignment: .center, spacing: 6) {"))
+        XCTAssertTrue(actionSource.contains("self.refreshUsageButton"))
+        XCTAssertTrue(actionSource.contains("self.editActionButton"))
+        XCTAssertTrue(actionSource.contains("self.outboundNodeButton"))
+        XCTAssertTrue(actionSource.contains("self.modelRoutingButton"))
+        XCTAssertTrue(actionSource.contains("Spacer(minLength: 0)"))
+        XCTAssertTrue(actionSource.contains("self.moreActionsMenu"))
+        XCTAssertTrue(actionSource.contains("AccountCardActionFrameProbe(identifier: \"account-card-actions-\\(self.account.id)\")"))
+        XCTAssertFalse(actionSource.contains("QuickActionWrapLayout"))
+        XCTAssertFalse(actionSource.contains("self.cooldownPolicyButton"))
+        XCTAssertFalse(actionSource.contains("self.stopCooldownButton"))
+
+        XCTAssertFalse(menuSource.contains("self.model.text(.actionEditModelRouting)"))
+        XCTAssertTrue(menuSource.contains("self.model.canUpdateAccountCooldownPolicy(self.account)"))
+        XCTAssertTrue(menuSource.contains("self.model.accountCooldownPolicyActionTitle(self.account)"))
+        XCTAssertTrue(menuSource.contains("self.model.canStopAccountCooldown(self.account)"))
+        XCTAssertTrue(menuSource.contains("self.model.text(.actionStopAccountCooldown)"))
+        XCTAssertTrue(menuSource.contains("self.model.toggleAccountEnabled(self.account)"))
+        XCTAssertTrue(menuSource.contains("self.model.removeAccount(self.account)"))
+    }
+
+    @MainActor
+    func testAccountCardLastErrorUsesPopoverBadgeAndWiderCards() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        guard let cardStart = source.range(of: "private struct AccountCard: View"),
+              let cardEnd = source.range(
+                of: "private struct AccountClientAccessPanel",
+                range: cardStart.upperBound..<source.endIndex
+              )
+        else {
+            return XCTFail("Missing AccountCard source")
+        }
+        let cardSource = String(source[cardStart.lowerBound..<cardEnd.lowerBound])
+
+        XCTAssertTrue(source.contains("private let accountCardWidth: CGFloat = 400"))
+        XCTAssertTrue(cardSource.contains("@State private var isLastErrorPopoverPresented = false"))
+        XCTAssertTrue(cardSource.contains("AccountLastErrorPillButton("))
+        XCTAssertTrue(cardSource.contains("AccountCardFrameProbe(identifier: \"account-card-\\(self.account.id)\")"))
+        XCTAssertTrue(cardSource.contains("private struct AccountLastErrorPopover: View"))
+        XCTAssertTrue(cardSource.contains(".popover(isPresented: self.$isPresented, arrowEdge: .bottom)"))
+        XCTAssertTrue(cardSource.contains(".frame(width: 360, alignment: .leading)"))
+        XCTAssertTrue(cardSource.contains(".frame(maxHeight: 260)"))
+        XCTAssertTrue(cardSource.contains(".accessibilityIdentifier(\"account-card-last-error-\\(self.accountID)\")"))
+        XCTAssertTrue(cardSource.contains("self.model.text(.helperAccountCardLastError)"))
+        XCTAssertFalse(cardSource.contains("if let error = self.errorText {\n                VStack(alignment: .leading, spacing: 8)"))
+        XCTAssertFalse(cardSource.contains("Text(error)\n                        .font(.system(size: 11, weight: .medium))"))
+    }
+
+    @MainActor
+    func testAccountCardActionsStaySingleLineAtCompactWidth() throws {
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .zhHans
+        model.preferences.accountPoolDisplayMode = .cards
+        model.selectedPage = .accounts
+
+        let account = Self.makeAccount(
+            id: "dense-card-actions",
+            label: "Dense Card Actions",
+            accountID: "api-key-dense-card-actions",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://api.example.com/v1",
+            cooldownUntil: Helpers.now() + 3_600
+        )
+        model.accounts = [account]
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 980),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let hostingView = NSHostingView(
+            rootView: AccountsView(model: model)
+                .frame(width: 480, alignment: .leading)
+        )
+        hostingView.frame = window.contentLayoutRect
+        window.contentView = hostingView
+
+        Self.renderHostedView(hostingView)
+
+        let renderedText = Self.hostedTextValues(in: hostingView).joined(separator: "\n")
+        XCTAssertTrue(renderedText.contains(model.accountCardMoreActionTitle))
+
+        let actionFrame = try XCTUnwrap(
+            Self.hostedViewFrame(
+                withAccessibilityIdentifier: "account-card-actions-\(account.id)",
+                in: hostingView
+            )
+        )
+        XCTAssertGreaterThan(hostingView.fittingSize.height, 0)
+        XCTAssertLessThan(actionFrame.height, 40)
+        XCTAssertLessThanOrEqual(actionFrame.maxX, hostingView.bounds.maxX + 1)
+    }
+
+    @MainActor
+    func testAccountCardLastErrorPopoverDoesNotChangeCardHeight() throws {
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .english
+        model.preferences.accountPoolDisplayMode = .cards
+        model.selectedPage = .accounts
+
+        let longError = """
+        Upstream request failed while refreshing this account. The provider returned a verbose diagnostic with retry headers, route metadata, and a long message that previously made the account card much taller than neighboring cards.
+        """
+        let healthyAccount = Self.makeAccount(
+            id: "card-height-healthy",
+            label: "Height Matched Card",
+            accountID: "acct-card-height-a",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://api.example.com/v1"
+        )
+        let errorAccount = Self.makeAccount(
+            id: "card-height-error",
+            label: "Height Matched Card",
+            accountID: "acct-card-height-b",
+            authMode: .openAIAPIKey,
+            upstreamBaseURL: "https://api.example.com/v1",
+            usageError: longError
+        )
+        model.accounts = [healthyAccount, errorAccount]
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 1_000),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let hostingView = NSHostingView(
+            rootView: AccountsView(model: model)
+                .frame(width: 920, alignment: .leading)
+        )
+        hostingView.frame = window.contentLayoutRect
+        window.contentView = hostingView
+
+        Self.renderHostedView(hostingView)
+
+        let healthyFrame = try XCTUnwrap(
+            Self.hostedViewFrame(
+                withAccessibilityIdentifier: "account-card-\(healthyAccount.id)",
+                in: hostingView
+            )
+        )
+        let errorFrame = try XCTUnwrap(
+            Self.hostedViewFrame(
+                withAccessibilityIdentifier: "account-card-\(errorAccount.id)",
+                in: hostingView
+            )
+        )
+        let errorButtonFrame = try XCTUnwrap(
+            Self.hostedViewFrame(
+                withAccessibilityIdentifier: "account-card-last-error-\(errorAccount.id)",
+                in: hostingView
+            )
+        )
+        let renderedText = Self.hostedTextValues(in: hostingView).joined(separator: "\n")
+
+        XCTAssertLessThanOrEqual(abs(healthyFrame.height - errorFrame.height), 2)
+        XCTAssertGreaterThan(errorButtonFrame.width, 0)
+        XCTAssertFalse(renderedText.contains("verbose diagnostic with retry headers"))
     }
 
     @MainActor
@@ -13173,13 +13829,38 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(declarations.first?["name"] as? String, "run_command")
     }
 
+    func testImageProxyTestDraftBuildsGenerationPayload() throws {
+        let draft = ProxyTestDraft(
+            endpoint: .imageGenerations,
+            systemPrompt: "ignored system",
+            userPrompt: "Draw a glass teapot",
+            toolsJSON: #"[{"name":"ignored"}]"#,
+            stream: true,
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key"
+        )
+
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: draft.requestData()) as? [String: Any])
+
+        XCTAssertEqual(payload["model"] as? String, "codex-gpt-image-2")
+        XCTAssertEqual(payload["prompt"] as? String, "Draw a glass teapot")
+        XCTAssertEqual(payload["n"] as? Int, 1)
+        XCTAssertEqual(payload["size"] as? String, "1024x1024")
+        XCTAssertNil(payload["stream"])
+        XCTAssertNil(payload["instructions"])
+        XCTAssertNil(payload["tools"])
+        XCTAssertFalse(draft.requestPreview().contains("ignored system"))
+    }
+
     func testProxyTestModelCatalogSeparatesFamilies() {
         let catalog = ProxyTestModelCatalog.defaultCatalog
         let gptModels = ProxyTestEndpoint.chatCompletions.availableModels(in: catalog)
+        let imageModels = ProxyTestEndpoint.imageGenerations.availableModels(in: catalog)
         let anthropicModels = ProxyTestEndpoint.anthropicMessages.availableModels(in: catalog)
         let geminiModels = ProxyTestEndpoint.geminiGenerateContent.availableModels(in: catalog)
 
         XCTAssertEqual(gptModels, ProxyTranscoder.supportedModels)
+        XCTAssertEqual(imageModels, ["codex-gpt-image-2", "gpt-image-2"])
         XCTAssertTrue(anthropicModels.contains("claude-sonnet-4-6"))
         XCTAssertTrue(anthropicModels.contains("claude-opus-4-6"))
         XCTAssertTrue(anthropicModels.contains("claude-3-5-haiku-latest"))
@@ -13189,6 +13870,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertFalse(geminiModels.contains("claude-sonnet-4-6"))
         XCTAssertTrue(ProxyTestEndpoint.chatCompletions.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.responses.supportsCustomModelEntry)
+        XCTAssertTrue(ProxyTestEndpoint.imageGenerations.supportsCustomModelEntry)
+        XCTAssertFalse(ProxyTestEndpoint.imageGenerations.supportsStreaming)
+        XCTAssertFalse(ProxyTestEndpoint.imageGenerations.supportsSystemPrompt)
         XCTAssertTrue(ProxyTestEndpoint.anthropicMessages.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.geminiGenerateContent.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.anthropicMessages.prefersAnthropicRootBaseURL)
@@ -13337,6 +14021,57 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer proxy-key")
     }
 
+    func testProxyPublicAPIClientImageGenerationUsesImagesEndpointAndHeaders() async throws {
+        defer { ProxyPublicAPIClientMockURLProtocol.resetHandler() }
+
+        let capture = CapturedURLRequest()
+        ProxyPublicAPIClientMockURLProtocol.setHandler { request in
+            capture.record(request)
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+            )
+            return (response, Data(#"{"created":1710000000,"data":[{"b64_json":"AQID"}]}"#.utf8))
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ProxyPublicAPIClientMockURLProtocol.self]
+        let client = ProxyPublicAPIClient(session: URLSession(configuration: configuration))
+        let draft = ProxyTestDraft(
+            endpoint: .imageGenerations,
+            model: "gpt-image-2",
+            userPrompt: "Draw a silver key",
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key",
+            selectedAccountKey: "key-openai-account"
+        )
+
+        _ = try await client.executeNonStream(draft: draft)
+
+        let request = try XCTUnwrap(capture.request())
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8787/v1/images/generations")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer proxy-key")
+        XCTAssertEqual(request.value(forHTTPHeaderField: ProxyHeaderName.proxyTestConsole), "1")
+        XCTAssertEqual(request.value(forHTTPHeaderField: ProxyHeaderName.testAccountKey), "key-openai-account")
+        let body = String(decoding: try XCTUnwrap(capture.bodyData()), as: UTF8.self)
+        XCTAssertTrue(body.contains(#""model":"gpt-image-2""#), body)
+        XCTAssertTrue(body.contains(#""prompt":"Draw a silver key""#), body)
+    }
+
+    func testProxyTestConsoleSourceIncludesImageGenerationUI() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ProxyTestConsoleView.swift")
+
+        XCTAssertTrue(source.contains("supportsStreaming"))
+        XCTAssertTrue(source.contains("supportsSystemPrompt"))
+        XCTAssertTrue(source.contains("ProxyTestImageResultsPanel"))
+        XCTAssertTrue(source.contains("labelGeneratedImages"))
+        XCTAssertTrue(source.contains("labelImageURL"))
+    }
+
     func testProxyPublicAPIClientModelsUsesBaseURLAsAPIPrefix() async throws {
         defer { ProxyPublicAPIClientMockURLProtocol.resetHandler() }
 
@@ -13383,6 +14118,15 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.proxyTestDraft.model = "claude-sonnet-4-6"
         model.updateProxyTestEndpoint(.geminiGenerateContent)
         XCTAssertEqual(model.proxyTestDraft.model, ProxyTestModelCatalog.defaultCatalog.geminiGenerateContent.defaultModel)
+
+        model.proxyTestDraft.stream = true
+        model.proxyTestDraft.model = "gpt-5.4"
+        model.updateProxyTestEndpoint(.imageGenerations)
+        XCTAssertEqual(model.proxyTestDraft.model, "codex-gpt-image-2")
+        XCTAssertFalse(model.proxyTestDraft.stream)
+
+        model.updateProxyTestEndpoint(.responses)
+        XCTAssertEqual(model.proxyTestDraft.model, ProxyTestModelCatalog.defaultCatalog.responses.defaultModel)
     }
 
     @MainActor
@@ -13404,6 +14148,44 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertNotNil(warning)
         XCTAssertTrue(warning?.detail.contains("gpt-5.4") == true)
         XCTAssertTrue(draft.hasPrompt)
+    }
+
+    @MainActor
+    func testProxyTestImageGenerationResultParsesBase64PreviewData() async {
+        let client = ProxyPublicAPIClient(
+            executeNonStreamHandler: { draft in
+                XCTAssertEqual(draft.endpoint, .imageGenerations)
+                XCTAssertEqual(draft.model, "codex-gpt-image-2")
+                return SimpleHTTPResponse(
+                    statusCode: 200,
+                    headers: ["content-type": "application/json"],
+                    body: Data(#"{"created":1710000000,"data":[{"b64_json":"AQID","revised_prompt":"A tidy silver key"},{"url":"https://example.com/generated.png"}]}"#.utf8)
+                )
+            }
+        )
+        let model = DesktopAppModel(publicProxyClient: client)
+        model.proxyTestConnectionHealthy = true
+        model.proxyTestDraft = ProxyTestDraft(
+            endpoint: .imageGenerations,
+            userPrompt: "Draw a silver key",
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key"
+        )
+
+        model.startProxyTest()
+
+        await Self.waitForCondition {
+            model.proxyTestRunState == .completed
+        }
+        XCTAssertEqual(model.proxyTestRunState, .completed)
+        let result = model.proxyTestResult
+        XCTAssertEqual(result?.httpStatus, 200)
+        XCTAssertEqual(result?.imageOutputs.count, 2)
+        XCTAssertEqual(result?.imageOutputs.first?.imageData, Data([1, 2, 3]))
+        XCTAssertEqual(result?.imageOutputs.first?.revisedPrompt, "A tidy silver key")
+        XCTAssertEqual(result?.imageOutputs.last?.url, "https://example.com/generated.png")
+        XCTAssertEqual(result?.assistantText, "https://example.com/generated.png")
+        XCTAssertTrue(result?.rawResponseJSON.contains("b64_json") == true)
     }
 
     @MainActor
@@ -15477,17 +16259,52 @@ private actor ManagedProxyWebsiteProbeAttemptProbe {
 private final class CapturedURLRequest: @unchecked Sendable {
     private let lock = NSLock()
     private var storedRequest: URLRequest?
+    private var storedBody: Data?
 
     func record(_ request: URLRequest) {
+        let body = Self.requestBodyData(from: request)
         self.lock.lock()
         defer { self.lock.unlock() }
         self.storedRequest = request
+        self.storedBody = body
     }
 
     func request() -> URLRequest? {
         self.lock.lock()
         defer { self.lock.unlock() }
         return self.storedRequest
+    }
+
+    func bodyData() -> Data? {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.storedBody
+    }
+
+    private static func requestBodyData(from request: URLRequest) -> Data? {
+        if let httpBody = request.httpBody {
+            return httpBody
+        }
+
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let readCount = buffer.withUnsafeMutableBufferPointer { pointer in
+                stream.read(pointer.baseAddress!, maxLength: pointer.count)
+            }
+            guard readCount > 0 else {
+                break
+            }
+            data.append(buffer, count: readCount)
+        }
+        return data
     }
 }
 

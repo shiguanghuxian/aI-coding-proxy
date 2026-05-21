@@ -6,6 +6,7 @@ import SwiftUI
 enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
     case chatCompletions
     case responses
+    case imageGenerations
     case anthropicMessages
     case geminiGenerateContent
 
@@ -17,6 +18,8 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return "chat/completions"
         case .responses:
             return "responses"
+        case .imageGenerations:
+            return "images/generations"
         case .anthropicMessages:
             return "messages"
         case .geminiGenerateContent:
@@ -36,8 +39,22 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
         true
     }
 
+    var supportsStreaming: Bool {
+        self != .imageGenerations
+    }
+
+    var supportsSystemPrompt: Bool {
+        self != .imageGenerations
+    }
+
+    var supportsToolsJSON: Bool {
+        self == .anthropicMessages || self == .geminiGenerateContent
+    }
+
     var modelFamily: ProxyTestModelFamily {
         switch self {
+        case .imageGenerations:
+            return .image
         case .anthropicMessages:
             return .anthropic
         case .geminiGenerateContent:
@@ -55,6 +72,8 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return catalog.chatCompletions
         case .responses:
             return catalog.responses
+        case .imageGenerations:
+            return catalog.imageGenerations
         case .geminiGenerateContent:
             return catalog.geminiGenerateContent
         }
@@ -77,6 +96,9 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
         if self.availableModels(in: catalog).contains(trimmed) {
             return true
         }
+        if self == .imageGenerations {
+            return true
+        }
         return Self.inferredFamily(for: trimmed) == self.modelFamily
     }
 
@@ -86,6 +108,8 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return ProxyTestDraft.defaultAnthropicModel
         case .geminiGenerateContent:
             return ProxyTestDraft.defaultGeminiModel
+        case .imageGenerations:
+            return ProxyTestDraft.defaultImageModel
         case .chatCompletions, .responses:
             return ProxyTestDraft.defaultOpenAIModel
         }
@@ -94,6 +118,9 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
     fileprivate static func inferredFamily(for model: String) -> ProxyTestModelFamily? {
         let lower = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lower.isEmpty else { return nil }
+        if lower.contains("image") {
+            return .image
+        }
         if lower.contains("claude") || lower.contains("sonnet") || lower.contains("opus") || lower.contains("haiku") {
             return .anthropic
         }
@@ -139,6 +166,18 @@ struct ProxyTestUsage: Equatable, Sendable {
     }
 }
 
+struct ProxyTestImageOutput: Equatable, Sendable {
+    var imageData: Data?
+    var url: String?
+    var revisedPrompt: String?
+
+    init(imageData: Data? = nil, url: String? = nil, revisedPrompt: String? = nil) {
+        self.imageData = imageData
+        self.url = url
+        self.revisedPrompt = revisedPrompt
+    }
+}
+
 struct ProxyTestResult: Equatable, Sendable {
     var assistantText: String
     var rawResponseJSON: String
@@ -146,6 +185,7 @@ struct ProxyTestResult: Equatable, Sendable {
     var latencyMilliseconds: Int?
     var httpStatus: Int?
     var usage: ProxyTestUsage?
+    var imageOutputs: [ProxyTestImageOutput]
     var errorSummary: String?
     var rawError: String?
 
@@ -156,6 +196,7 @@ struct ProxyTestResult: Equatable, Sendable {
         latencyMilliseconds: Int? = nil,
         httpStatus: Int? = nil,
         usage: ProxyTestUsage? = nil,
+        imageOutputs: [ProxyTestImageOutput] = [],
         errorSummary: String? = nil,
         rawError: String? = nil
     ) {
@@ -165,6 +206,7 @@ struct ProxyTestResult: Equatable, Sendable {
         self.latencyMilliseconds = latencyMilliseconds
         self.httpStatus = httpStatus
         self.usage = usage
+        self.imageOutputs = imageOutputs
         self.errorSummary = errorSummary
         self.rawError = rawError
     }
@@ -172,6 +214,7 @@ struct ProxyTestResult: Equatable, Sendable {
 
 struct ProxyTestDraft: Equatable, Sendable {
     static let defaultOpenAIModel: String = ProxyTranscoder.defaultModel
+    static let defaultImageModel = "codex-gpt-image-2"
     static let defaultAnthropicModel = "claude-sonnet-4-5"
     static let defaultGeminiModel = "gemini-2.5-flash"
 
@@ -197,7 +240,9 @@ struct ProxyTestDraft: Equatable, Sendable {
         selectedAccountKey: String = ""
     ) {
         self.endpoint = endpoint
-        self.model = model
+        self.model = endpoint == .imageGenerations && model == Self.defaultOpenAIModel
+            ? Self.defaultImageModel
+            : model
         self.systemPrompt = systemPrompt
         self.userPrompt = userPrompt
         self.toolsJSON = toolsJSON
@@ -247,6 +292,15 @@ struct ProxyTestDraft: Equatable, Sendable {
                 payload["instructions"] = system
             }
             return payload
+        case .imageGenerations:
+            return [
+                "model": self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? ProxyTestDraft.defaultImageModel
+                    : self.model,
+                "prompt": self.userPrompt,
+                "n": 1,
+                "size": "1024x1024",
+            ]
         case .anthropicMessages:
             var payload: [String: Any] = [
                 "model": self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? ProxyTestDraft.defaultAnthropicModel : self.model,
@@ -576,7 +630,7 @@ actor ProxyPublicAPIClient {
         switch draft.endpoint {
         case .geminiGenerateContent:
             return ["x-goog-api-key": draft.apiKey]
-        case .chatCompletions, .responses, .anthropicMessages:
+        case .chatCompletions, .responses, .imageGenerations, .anthropicMessages:
             return ["Authorization": "Bearer \(draft.apiKey)"]
         }
     }
@@ -611,7 +665,7 @@ actor ProxyPublicAPIClient {
 
     private static func requestURL(for draft: ProxyTestDraft, stream: Bool) throws -> URL {
         switch draft.endpoint {
-        case .chatCompletions, .responses:
+        case .chatCompletions, .responses, .imageGenerations:
             return try self.openAIAPIBaseURL(from: draft.endpointURL).appendingPathComponent(draft.endpoint.pathComponent)
         case .anthropicMessages:
             return try self.v1BaseURL(from: draft.endpointURL).appendingPathComponent(draft.endpoint.pathComponent)
@@ -726,10 +780,18 @@ extension DesktopAppModel {
         for draft: ProxyTestDraft
     ) -> String? {
         guard let account = self.proxyTestSelectedAccount(for: draft),
-              account.authMode == .geminiOAuth,
-              draft.endpoint != .geminiGenerateContent
+              (
+                (account.authMode == .geminiOAuth && draft.endpoint != .geminiGenerateContent)
+                    || (draft.endpoint == .imageGenerations && account.authMode.providerFamily != .openAI)
+              )
         else {
             return nil
+        }
+        if draft.endpoint == .imageGenerations {
+            return self.localized(
+                zh: "Images 图片生成测试只支持 OpenAI 授权登录账号和 OpenAI API Key 类型账号。",
+                en: "Images generation tests only support OpenAI authorized login accounts and OpenAI API key accounts."
+            )
         }
         return self.localized(
             zh: "`Google / Gemini Login` 账号现在只支持 Gemini CLI / Gemini endpoint。测试台里选中这类账号时，只能测试 Gemini endpoint。",
@@ -887,6 +949,8 @@ extension DesktopAppModel {
             return self.text(.optionChatCompletions)
         case .responses:
             return self.text(.optionResponses)
+        case .imageGenerations:
+            return self.text(.optionImageGenerations)
         case .anthropicMessages:
             return self.text(.optionAnthropicMessages)
         case .geminiGenerateContent:
@@ -966,8 +1030,12 @@ extension DesktopAppModel {
     func updateProxyTestEndpoint(_ endpoint: ProxyTestEndpoint) {
         guard self.proxyTestDraft.endpoint != endpoint else { return }
         self.proxyTestDraft.endpoint = endpoint
+        if !endpoint.supportsStreaming {
+            self.proxyTestDraft.stream = false
+        }
         self.applyProxyTestConnectionDefaults(
-            resetModelIfNeeded: !endpoint.acceptsModelFamily(self.proxyTestDraft.model, catalog: self.proxyTestModelCatalog)
+            resetModelIfNeeded: endpoint == .imageGenerations
+                || !endpoint.acceptsModelFamily(self.proxyTestDraft.model, catalog: self.proxyTestModelCatalog)
         )
         self.syncProxyTestModelList()
     }
@@ -1066,7 +1134,7 @@ extension DesktopAppModel {
         defer { self.proxyTestTask = nil }
 
         do {
-            if snapshot.stream {
+            if snapshot.endpoint.supportsStreaming && snapshot.stream {
                 try await self.executeStreamingProxyTest(snapshot: snapshot, startedAt: startedAt)
             } else {
                 let response: SimpleHTTPResponse
@@ -1125,6 +1193,8 @@ extension DesktopAppModel {
             switch snapshot.endpoint {
             case .responses:
                 throw ProxyError.message("上游未返回 response.completed")
+            case .imageGenerations:
+                break
             case .anthropicMessages:
                 throw ProxyError.message("Anthropic stream did not finish with `message_stop`.")
             case .geminiGenerateContent:
@@ -1143,6 +1213,9 @@ extension DesktopAppModel {
     private func applyProxyTestConnectionDefaults(resetModelIfNeeded: Bool = false) {
         self.proxyTestDraft.endpointURL = self.currentProxyTestBaseURL(for: self.proxyTestDraft.endpoint)
         self.proxyTestDraft.apiKey = self.resolvedProxyTestAPIKey()
+        if !self.proxyTestDraft.endpoint.supportsStreaming {
+            self.proxyTestDraft.stream = false
+        }
         let trimmedModel = self.proxyTestDraft.model.trimmingCharacters(in: .whitespacesAndNewlines)
         if resetModelIfNeeded || trimmedModel.isEmpty {
             self.proxyTestDraft.model = self.defaultProxyTestModel(for: self.proxyTestDraft.endpoint)
@@ -1244,7 +1317,7 @@ extension DesktopAppModel {
             endpoint: self.adminProxyTestEndpoint(for: draft.endpoint),
             model: model,
             payloadJSON: String(decoding: try draft.requestData(), as: UTF8.self),
-            stream: draft.stream,
+            stream: draft.endpoint.supportsStreaming && draft.stream,
             selectedAccountKey: selectedAccountKey,
             proxyAPIKey: usesAdminOnlyGeminiExecution
                 ? nil
@@ -1272,8 +1345,8 @@ extension DesktopAppModel {
         guard self.proxyTestResolvedAdminTransportMode == .legacyGeminiOnly else { return nil }
         guard self.proxyTestUsesAdminOnlyGeminiExecution(for: draft) == false else { return nil }
         return self.localized(
-            zh: "当前远端服务仍是旧版测试协议，只支持固定到 `Google / Gemini Login` 账号的 Gemini endpoint 测试。要测试 Chat / Responses / Anthropic，请重新部署或升级远端 daemon。",
-            en: "This remote service still uses the legacy proxy-test protocol. Only Gemini endpoint tests pinned to a `Google / Gemini Login` account are available. Redeploy or upgrade the remote daemon to test Chat, Responses, or Anthropic routes."
+            zh: "当前远端服务仍是旧版测试协议，只支持固定到 `Google / Gemini Login` 账号的 Gemini endpoint 测试。要测试 Chat / Responses / Images / Anthropic，请重新部署或升级远端 daemon。",
+            en: "This remote service still uses the legacy proxy-test protocol. Only Gemini endpoint tests pinned to a `Google / Gemini Login` account are available. Redeploy or upgrade the remote daemon to test Chat, Responses, Images, or Anthropic routes."
         )
     }
 
@@ -1283,6 +1356,8 @@ extension DesktopAppModel {
             return .chatCompletions
         case .responses:
             return .responses
+        case .imageGenerations:
+            return .imageGenerations
         case .anthropicMessages:
             return .anthropicMessages
         case .geminiGenerateContent:
@@ -1361,9 +1436,27 @@ extension DesktopAppModel {
             if self.proxyTestDraft.endpoint == .anthropicMessages {
                 return self.anthropicAccessProxyAPIKeyValue ?? ""
             }
+            if self.proxyTestDraft.endpoint == .imageGenerations {
+                return self.openAIProxyTestAPIKeyValue
+            }
             return self.localProxyAPIKeyValue
         }
         return self.compatibleProxyTestAPIKey(for: account)?.key ?? ""
+    }
+
+    private var openAIProxyTestAPIKeyValue: String {
+        let runtimeKey = self.status?.apiKey.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !runtimeKey.isEmpty {
+            return runtimeKey
+        }
+        let matchingKeys = self.configuredProxyAPIKeys.filter { record in
+            record.enabled && (record.dataSource == .openAI || record.dataSource == .all)
+        }
+        let record = matchingKeys.first(where: { $0.dataSource == .openAI && $0.allowedAccountKeys.isEmpty })
+            ?? matchingKeys.first(where: { $0.dataSource == .all && $0.allowedAccountKeys.isEmpty })
+            ?? matchingKeys.first
+        let key = record?.key.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return key.isEmpty ? self.localProxyAPIKeyValue : key
     }
 
     private func proxyTestMissingMatchingAPIKeyTextKey(for account: AccountSummary) -> LocalizedTextKey {
@@ -1392,6 +1485,11 @@ extension DesktopAppModel {
                     "当前模型与接口不匹配",
                     "当前 \(self.label(for: draft.endpoint)) 接口通常应使用 GPT 模型，`\((draft.model))` 看起来属于 Anthropic / Claude 模型族。请求仍会继续发送，但建议切换到 GPT 候选。"
                 )
+            case .image:
+                return (
+                    "当前模型与接口不匹配",
+                    "当前 \(self.label(for: draft.endpoint)) 接口通常应使用图片生成模型，例如 `\(ProxyTestDraft.defaultImageModel)`。`\((draft.model))` 看起来属于其他模型族。请求仍会继续发送，但建议切换到图片生成模型。"
+                )
             case .anthropic:
                 return (
                     "当前模型与接口不匹配",
@@ -1410,6 +1508,11 @@ extension DesktopAppModel {
             return (
                 "The selected model may not match this endpoint",
                 "The current \(self.label(for: draft.endpoint)) endpoint usually expects GPT-family models. `\(draft.model)` looks like an Anthropic / Claude model. The request will still be sent, but switching to a GPT candidate is recommended."
+            )
+        case .image:
+            return (
+                "The selected model may not match this endpoint",
+                "The current \(self.label(for: draft.endpoint)) endpoint usually expects an image generation model such as `\(ProxyTestDraft.defaultImageModel)`. `\(draft.model)` looks like a different model family. The request will still be sent, but switching to an image model is recommended."
             )
         case .anthropic:
             return (
@@ -1520,6 +1623,8 @@ extension DesktopAppModel {
                 default:
                     continue
                 }
+            case .imageGenerations:
+                continue
             case .anthropicMessages:
                 let type = (object["type"] as? String) ?? event.event ?? ""
                 switch type {
@@ -1640,6 +1745,14 @@ extension DesktopAppModel {
                 httpStatus: response.statusCode,
                 usage: extractResponsesUsage(from: object["usage"])
             )
+        case .imageGenerations:
+            let outputs = self.extractImageOutputs(from: object["data"])
+            return ProxyTestResult(
+                assistantText: self.imageSummaryText(for: outputs),
+                rawResponseJSON: rawString,
+                httpStatus: response.statusCode,
+                imageOutputs: outputs
+            )
         case .anthropicMessages:
             return ProxyTestResult(
                 assistantText: AnthropicTranscoder.extractText(from: object),
@@ -1655,6 +1768,38 @@ extension DesktopAppModel {
                 usage: extractGeminiUsage(from: object["usageMetadata"])
             )
         }
+    }
+
+    private static func extractImageOutputs(from value: Any?) -> [ProxyTestImageOutput] {
+        guard let items = value as? [[String: Any]] else { return [] }
+        return items.compactMap { item in
+            let imageData = self.imageData(fromBase64Value: item["b64_json"] as? String)
+            let url = self.trimmed(item["url"] as? String)
+            let revisedPrompt = self.trimmed(item["revised_prompt"] as? String)
+            guard imageData != nil || url != nil else { return nil }
+            return ProxyTestImageOutput(imageData: imageData, url: url, revisedPrompt: revisedPrompt)
+        }
+    }
+
+    private static func imageData(fromBase64Value value: String?) -> Data? {
+        guard var raw = self.trimmed(value) else { return nil }
+        if raw.lowercased().hasPrefix("data:image/"),
+           let comma = raw.firstIndex(of: ",")
+        {
+            raw = String(raw[raw.index(after: comma)...])
+        }
+        return Data(base64Encoded: raw)
+    }
+
+    private static func imageSummaryText(for outputs: [ProxyTestImageOutput]) -> String {
+        let urls = outputs.compactMap(\.url)
+        if urls.isEmpty == false {
+            return urls.joined(separator: "\n")
+        }
+        guard outputs.isEmpty == false else {
+            return ""
+        }
+        return outputs.count == 1 ? "Generated 1 image." : "Generated \(outputs.count) images."
     }
 
     private static func extractChatCompletionText(from object: [String: Any]) -> String {
@@ -1778,6 +1923,11 @@ extension DesktopAppModel {
             return number
         }
         return 0
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func prettyResponseString(from data: Data) -> String {

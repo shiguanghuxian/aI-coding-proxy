@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 
 struct ProxyTestConsoleView: View {
@@ -194,26 +195,32 @@ struct ProxyTestConsoleView: View {
                 }
 
                 ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 12) {
-                        self.modelField
-                        self.streamField
-                    }
+                    if self.model.proxyTestDraft.endpoint.supportsStreaming {
+                        HStack(alignment: .top, spacing: 12) {
+                            self.modelField
+                            self.streamField
+                        }
 
-                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            self.modelField
+                            self.streamField
+                        }
+                    } else {
                         self.modelField
-                        self.streamField
                     }
                 }
 
-                FormFieldPanel(title: self.model.text(.labelSystemPrompt)) {
-                    PromptEditor(
-                        text: Binding(
-                            get: { self.model.proxyTestDraft.systemPrompt },
-                            set: { self.model.proxyTestDraft.systemPrompt = $0 }
-                        ),
-                        placeholder: self.model.text(.placeholderProxyTestSystem)
-                    )
-                    .disabled(self.model.proxyTestRunState == .running)
+                if self.model.proxyTestDraft.endpoint.supportsSystemPrompt {
+                    FormFieldPanel(title: self.model.text(.labelSystemPrompt)) {
+                        PromptEditor(
+                            text: Binding(
+                                get: { self.model.proxyTestDraft.systemPrompt },
+                                set: { self.model.proxyTestDraft.systemPrompt = $0 }
+                            ),
+                            placeholder: self.model.text(.placeholderProxyTestSystem)
+                        )
+                        .disabled(self.model.proxyTestRunState == .running)
+                    }
                 }
 
                 FormFieldPanel(title: self.model.text(.labelUserPrompt)) {
@@ -227,9 +234,7 @@ struct ProxyTestConsoleView: View {
                     .disabled(self.model.proxyTestRunState == .running)
                 }
 
-                if self.model.proxyTestDraft.endpoint == .anthropicMessages
-                    || self.model.proxyTestDraft.endpoint == .geminiGenerateContent
-                {
+                if self.model.proxyTestDraft.endpoint.supportsToolsJSON {
                     FormFieldPanel(title: self.model.text(.labelToolsJSON)) {
                         PromptEditor(
                             text: Binding(
@@ -318,13 +323,27 @@ struct ProxyTestConsoleView: View {
                     }
                 }
 
-                ConsoleTextPanel(
-                    title: self.model.text(.labelResponseText),
-                    value: result.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? self.model.text(.placeholderProxyTestResult)
-                        : result.assistantText,
-                    minHeight: 180
-                )
+                if !result.imageOutputs.isEmpty {
+                    ProxyTestImageResultsPanel(
+                        title: self.model.text(.labelGeneratedImages),
+                        previewTitle: self.model.text(.labelImagePreview),
+                        urlTitle: self.model.text(.labelImageURL),
+                        copyTitle: self.model.text(.commonCopy),
+                        outputs: result.imageOutputs
+                    ) { url in
+                        self.model.copyToPasteboard(url, context: .copyEndpoint)
+                    }
+                }
+
+                if result.imageOutputs.isEmpty {
+                    ConsoleTextPanel(
+                        title: self.model.text(.labelResponseText),
+                        value: result.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? self.model.text(.placeholderProxyTestResult)
+                            : result.assistantText,
+                        minHeight: 180
+                    )
+                }
 
                 if !result.rawResponseJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     ConsoleTextPanel(
@@ -687,6 +706,120 @@ private struct PromptEditor: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(palette.border, lineWidth: 1)
         )
+    }
+}
+
+private struct ProxyTestImageResultsPanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let previewTitle: String
+    let urlTitle: String
+    let copyTitle: String
+    let outputs: [ProxyTestImageOutput]
+    let copyURL: (String) -> Void
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text(self.title.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(palette.textMuted)
+
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(self.outputs.enumerated()), id: \.offset) { _, output in
+                    self.outputCard(output, palette: palette)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func outputCard(_ output: ProxyTestImageOutput, palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let image = self.image(from: output.imageData) {
+                Text(self.previewTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.textSecondary)
+
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 320)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(palette.consoleBackground.opacity(self.colorScheme == .dark ? 0.90 : 0.82))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(palette.border, lineWidth: 1)
+                    )
+            }
+
+            if let revisedPrompt = output.revisedPrompt, !revisedPrompt.isEmpty {
+                Text(revisedPrompt)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.textSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let url = output.url, !url.isEmpty {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        self.urlText(url, palette: palette)
+                        Spacer(minLength: 12)
+                        self.copyButton(url, palette: palette)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        self.urlText(url, palette: palette)
+                        HStack {
+                            Spacer()
+                            self.copyButton(url, palette: palette)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.84 : 0.90))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(palette.border, lineWidth: 1)
+        )
+    }
+
+    private func urlText(_ url: String, palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(self.urlTitle)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(palette.textMuted)
+            Text(url)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(palette.textPrimary)
+                .textSelection(.enabled)
+                .lineLimit(3)
+        }
+    }
+
+    private func copyButton(_ url: String, palette: AppearancePalette) -> some View {
+        Button(self.copyTitle) {
+            self.copyURL(url)
+        }
+        .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+    }
+
+    private func image(from data: Data?) -> NSImage? {
+        guard let data else { return nil }
+        return NSImage(data: data)
     }
 }
 

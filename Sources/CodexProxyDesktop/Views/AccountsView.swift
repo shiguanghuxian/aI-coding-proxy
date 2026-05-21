@@ -18,34 +18,26 @@ enum AccountsQuickActionID: String, CaseIterable, Identifiable {
 }
 
 enum AccountsQuickActionLayoutGroups {
-    static let primary: [AccountsQuickActionID] = [
+    static let login: [AccountsQuickActionID] = [
         .openAILogin,
         .anthropicLogin,
         .geminiLogin,
+    ]
+
+    static let addImport: [AccountsQuickActionID] = [
         .importCurrent,
-        .manualAdd,
-    ]
-
-    static let secondary: [AccountsQuickActionID] = [
-        .importJSON,
-        .exportBackup,
-        .testProxy,
-        .refreshUsage,
-    ]
-
-    static let remoteAdminPrimary: [AccountsQuickActionID] = [
         .importLocalToRemote,
         .manualAdd,
+        .importJSON,
     ]
 
-    static let remoteAdminSecondary: [AccountsQuickActionID] = [
-        .importJSON,
+    static let overflow: [AccountsQuickActionID] = [
         .exportBackup,
         .testProxy,
         .refreshUsage,
     ]
 
-    static let all: [AccountsQuickActionID] = primary + secondary
+    static let all: [AccountsQuickActionID] = login + addImport + overflow
 }
 
 struct AccountsView: View {
@@ -62,7 +54,7 @@ struct AccountsView: View {
 
     static let accountPoolDetailDrawerWidth: CGFloat = 404
 
-    private let accountCardWidth: CGFloat = 340
+    private let accountCardWidth: CGFloat = 400
 
     private var accountColumns: [GridItem] {
         [GridItem(.adaptive(minimum: self.accountCardWidth, maximum: self.accountCardWidth), spacing: 16, alignment: .top)]
@@ -104,6 +96,15 @@ struct AccountsView: View {
                 presentedDraft: presentedDraft
             )
                 .interactiveDismissDisabled(self.model.manualAPIKeyIsSubmitting)
+        }
+        .sheet(
+            item: Binding(
+                get: { self.model.authImportDraft },
+                set: { newValue in self.model.authImportDraft = newValue }
+            )
+        ) { presentedDraft in
+            AuthImportSheet(model: self.model, presentedDraft: presentedDraft)
+                .interactiveDismissDisabled(self.model.authImportIsSubmitting)
         }
         .sheet(
             item: Binding(
@@ -169,14 +170,33 @@ struct AccountsView: View {
                 .foregroundStyle(palette.textMuted)
 
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    self.quickActionRow(self.primaryQuickActions + self.secondaryQuickActions)
+                HStack(alignment: .top, spacing: 10) {
+                    self.quickActionGroup(
+                        title: self.model.text(.labelQuickActionLoginGroup),
+                        actions: self.loginQuickActions,
+                        palette: palette
+                    )
+                    self.quickActionGroup(
+                        title: self.model.text(.labelQuickActionImportGroup),
+                        actions: self.addImportQuickActions,
+                        palette: palette
+                    )
+                    self.moreQuickActionsGroup(palette: palette)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    self.quickActionWrappedRow(self.primaryQuickActions)
-                    self.quickActionWrappedRow(self.secondaryQuickActions)
+                VStack(alignment: .leading, spacing: 10) {
+                    self.quickActionGroup(
+                        title: self.model.text(.labelQuickActionLoginGroup),
+                        actions: self.loginQuickActions,
+                        palette: palette
+                    )
+                    self.quickActionGroup(
+                        title: self.model.text(.labelQuickActionImportGroup),
+                        actions: self.addImportQuickActions,
+                        palette: palette
+                    )
+                    self.moreQuickActionsGroup(palette: palette)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -199,16 +219,139 @@ struct AccountsView: View {
         .shadow(color: palette.shadow.opacity(self.colorScheme == .dark ? 0.14 : 0.06), radius: 8, x: 0, y: 4)
     }
 
-    private func quickActionWrappedRow(_ actions: [AccountsQuickActionID]) -> some View {
-        QuickActionWrapLayout(horizontalSpacing: 6, verticalSpacing: 6) {
-            self.quickActionRow(actions)
+    @ViewBuilder
+    private func quickActionGroup(
+        title: String,
+        actions: [AccountsQuickActionID],
+        palette: AppearancePalette
+    ) -> some View {
+        if actions.isEmpty == false {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title.uppercased())
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(palette.textMuted)
+
+                QuickActionWrapLayout(horizontalSpacing: 6, verticalSpacing: 6) {
+                    self.quickActionRow(actions)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.70 : 0.78))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(palette.border.opacity(0.86), lineWidth: 1)
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
     private func quickActionRow(_ actions: [AccountsQuickActionID]) -> some View {
         ForEach(actions.filter(self.supportsQuickAction)) { action in
+            self.quickActionButton(for: action)
+        }
+    }
+
+    @ViewBuilder
+    private func moreQuickActionsMenu(palette: AppearancePalette) -> some View {
+        let actions = self.overflowQuickActions
+        if actions.isEmpty == false {
+            Menu {
+                ForEach(actions) { action in
+                    self.quickActionMenuButton(for: action)
+                }
+            } label: {
+                self.moreQuickActionsMenuLabel(palette: palette)
+            }
+            .menuStyle(.borderlessButton)
+            .help(self.model.text(.helperMoreQuickActions))
+            .accessibilityIdentifier("accounts-more-quick-actions-menu")
+            .fixedSize()
+        }
+    }
+
+    private func moreQuickActionsMenuLabel(palette: AppearancePalette) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "ellipsis.circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(palette.textSecondary)
+
+            Text(self.model.text(.actionMoreQuickActions))
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(palette.textPrimary)
+                .lineLimit(1)
+
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(palette.textMuted)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .contentShape(Capsule())
+        .background(
+            Capsule(style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.92 : 1.0))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(palette.border, lineWidth: 1)
+        )
+        .shadow(color: palette.shadow.opacity(self.colorScheme == .dark ? 0.06 : 0.0048), radius: 4, x: 0, y: 1.5)
+    }
+
+    @ViewBuilder
+    private func moreQuickActionsGroup(palette: AppearancePalette) -> some View {
+        let actions = self.overflowQuickActions
+        if actions.isEmpty == false {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(self.model.text(.labelQuickActionMaintenanceGroup).uppercased())
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(palette.textMuted)
+
+                self.moreQuickActionsMenu(palette: palette)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.70 : 0.78))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(palette.border.opacity(0.86), lineWidth: 1)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func quickActionMenuButton(for action: AccountsQuickActionID) -> some View {
+        switch action {
+        case .exportBackup:
+            Button {
+                self.exportAccounts()
+            } label: {
+                Label(self.model.text(.actionExportBackup), systemImage: "archivebox.fill")
+            }
+        case .testProxy:
+            Button {
+                self.openTestProxy()
+            } label: {
+                Label(self.model.text(.actionTestProxy), systemImage: "bolt.badge.checkmark")
+            }
+            .accessibilityIdentifier("accounts-test-proxy-button")
+        case .refreshUsage:
+            Button {
+                self.refreshUsage()
+            } label: {
+                Label(self.model.text(.actionRefreshUsage), systemImage: "arrow.clockwise.circle.fill")
+            }
+        case .openAILogin, .anthropicLogin, .geminiLogin, .importCurrent, .importLocalToRemote, .manualAdd, .importJSON:
             self.quickActionButton(for: action)
         }
     }
@@ -362,7 +505,7 @@ struct AccountsView: View {
     }
 
     private func importJSON() {
-        Task { await self.model.importJSONFiles() }
+        self.model.presentAuthImportSheet()
     }
 
     private func exportAccounts() {
@@ -400,22 +543,16 @@ struct AccountsView: View {
         true
     }
 
-    private var primaryQuickActions: [AccountsQuickActionID] {
-        switch self.presentationContext {
-        case .standard:
-            return AccountsQuickActionLayoutGroups.primary
-        case .remoteAdmin:
-            return AccountsQuickActionLayoutGroups.remoteAdminPrimary
-        }
+    private var loginQuickActions: [AccountsQuickActionID] {
+        AccountsQuickActionLayoutGroups.login.filter(self.supportsQuickAction)
     }
 
-    private var secondaryQuickActions: [AccountsQuickActionID] {
-        switch self.presentationContext {
-        case .standard:
-            return AccountsQuickActionLayoutGroups.secondary
-        case .remoteAdmin:
-            return AccountsQuickActionLayoutGroups.remoteAdminSecondary
-        }
+    private var addImportQuickActions: [AccountsQuickActionID] {
+        AccountsQuickActionLayoutGroups.addImport.filter(self.supportsQuickAction)
+    }
+
+    private var overflowQuickActions: [AccountsQuickActionID] {
+        AccountsQuickActionLayoutGroups.overflow.filter(self.supportsQuickAction)
     }
 }
 
@@ -523,7 +660,7 @@ private struct AccountsOnboardingCallout: View {
                     symbol: "tray.and.arrow.down.fill",
                     tone: .neutral
                 ) {
-                    Task { await self.model.importJSONFiles() }
+                    self.model.presentAuthImportSheet()
                 }
             }
 
@@ -2564,23 +2701,25 @@ private struct AccountCard: View {
     @ObservedObject var model: DesktopAppModel
     let width: CGFloat
 
+    @State private var isLastErrorPopoverPresented = false
+
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .top, spacing: 13) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(self.account.isCurrent ? palette.successSoft : palette.accentSoft)
                     Image(systemName: self.account.isCurrent ? "checkmark.seal.fill" : "person.crop.circle.badge.checkmark")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(self.account.isCurrent ? palette.success : palette.accent)
                 }
-                .frame(width: 38, height: 38)
+                .frame(width: 42, height: 42)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(self.account.label)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 15.5, weight: .semibold))
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2670,54 +2809,13 @@ private struct AccountCard: View {
                 AccountClientAccessPanel(model: self.model, presentation: clientAccess)
             }
 
-            HStack(alignment: .center, spacing: 6) {
-                self.refreshUsageButton
-                self.editActionButton
-                self.outboundNodeButton
-                self.modelRoutingButton
-                self.cooldownPolicyButton
-                self.stopCooldownButton
-                Spacer(minLength: 0)
-                self.moreActionsMenu
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if let error = self.errorText {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(palette.warning)
-                        Text(self.model.text(.labelLastError))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(palette.textPrimary)
-                    }
-
-                    Text(error)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(palette.textSecondary)
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .help(error)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(palette.warningSoft.opacity(self.colorScheme == .dark ? 0.28 : 0.56))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(palette.warning.opacity(0.18), lineWidth: 1)
-                )
-            }
+            self.actionButtons
         }
-        .padding(16)
+        .padding(17)
         .frame(width: self.width, alignment: .leading)
+        .background(AccountCardFrameProbe(identifier: "account-card-\(self.account.id)"))
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [palette.panel.opacity(self.colorScheme == .dark ? 0.96 : 0.95), palette.panelRaised.opacity(self.colorScheme == .dark ? 0.92 : 0.90)],
@@ -2727,10 +2825,10 @@ private struct AccountCard: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(palette.border, lineWidth: 1)
         )
-        .shadow(color: palette.shadow.opacity(self.colorScheme == .dark ? 0.16 : 0.06), radius: 10, x: 0, y: 6)
+        .shadow(color: palette.shadow.opacity(self.colorScheme == .dark ? 0.16 : 0.07), radius: 12, x: 0, y: 6)
         .opacity(self.account.enabled ? 1.0 : 0.90)
         .saturation(self.account.enabled ? 1.0 : 0.76)
     }
@@ -2759,6 +2857,15 @@ private struct AccountCard: View {
             if self.account.isCoolingDown() {
                 StatusPill(text: self.model.text(.statusCoolingDown), tone: .warning)
             }
+
+            if let errorText = self.errorText {
+                AccountLastErrorPillButton(
+                    model: self.model,
+                    accountID: self.account.id,
+                    errorText: errorText,
+                    isPresented: self.$isLastErrorPopoverPresented
+                )
+            }
         }
     }
 
@@ -2781,6 +2888,19 @@ private struct AccountCard: View {
 
     private var isRefreshingUsage: Bool {
         self.model.isRefreshingUsage(for: self.account.id)
+    }
+
+    private var actionButtons: some View {
+        HStack(alignment: .center, spacing: 6) {
+            self.refreshUsageButton
+            self.editActionButton
+            self.outboundNodeButton
+            self.modelRoutingButton
+            Spacer(minLength: 0)
+            self.moreActionsMenu
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AccountCardActionFrameProbe(identifier: "account-card-actions-\(self.account.id)"))
     }
 
     private var refreshUsageButtonLabel: some View {
@@ -2824,28 +2944,6 @@ private struct AccountCard: View {
     }
 
     @ViewBuilder
-    private var stopCooldownButton: some View {
-        if self.model.canStopAccountCooldown(self.account) {
-            Button(self.model.text(.actionStopAccountCooldown)) {
-                Task { await self.model.stopAccountCooldown(self.account) }
-            }
-            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
-            .fixedSize(horizontal: true, vertical: false)
-        }
-    }
-
-    @ViewBuilder
-    private var cooldownPolicyButton: some View {
-        if self.model.canUpdateAccountCooldownPolicy(self.account) {
-            Button(self.model.accountCooldownPolicyActionTitle(self.account)) {
-                Task { await self.model.toggleAccountCooldownPolicy(self.account) }
-            }
-            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
-            .fixedSize(horizontal: true, vertical: false)
-        }
-    }
-
-    @ViewBuilder
     private var editActionButton: some View {
         if let title = self.model.accountCardEditActionTitle(for: self.account) {
             Button(title) {
@@ -2858,6 +2956,20 @@ private struct AccountCard: View {
 
     private var moreActionsMenu: some View {
         Menu {
+            if self.model.canUpdateAccountCooldownPolicy(self.account) {
+                Button(self.model.accountCooldownPolicyActionTitle(self.account)) {
+                    Task { await self.model.toggleAccountCooldownPolicy(self.account) }
+                }
+            }
+
+            if self.model.canStopAccountCooldown(self.account) {
+                Button(self.model.text(.actionStopAccountCooldown)) {
+                    Task { await self.model.stopAccountCooldown(self.account) }
+                }
+            }
+
+            Divider()
+
             Button(self.account.enabled ? self.model.text(.actionDisableAccount) : self.model.text(.actionEnableAccount)) {
                 Task { await self.model.toggleAccountEnabled(self.account) }
             }
@@ -2877,6 +2989,117 @@ private struct AccountCard: View {
         .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
         .menuStyle(.borderlessButton)
         .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+private struct AccountLastErrorPillButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+    let accountID: String
+    let errorText: String
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        Button {
+            self.isPresented.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(palette.warning)
+
+                Text(self.model.text(.labelLastError))
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(palette.warning)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5.5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(palette.warningSoft.opacity(self.colorScheme == .dark ? 0.84 : 1.0))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(palette.warning.opacity(0.24), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .background(AccountCardFrameProbe(identifier: "account-card-last-error-\(self.accountID)"))
+        .help(self.model.text(.helperAccountCardLastError))
+        .accessibilityLabel(self.model.text(.labelLastError))
+        .accessibilityIdentifier("account-card-last-error-\(self.accountID)")
+        .popover(isPresented: self.$isPresented, arrowEdge: .bottom) {
+            AccountLastErrorPopover(model: self.model, errorText: self.errorText)
+        }
+        .interactiveCursor()
+    }
+}
+
+private struct AccountLastErrorPopover: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+    let errorText: String
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(palette.warning)
+
+                Text(self.model.text(.labelLastError))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(palette.textPrimary)
+            }
+
+            ScrollView {
+                Text(self.errorText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.textSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
+        }
+        .padding(14)
+        .frame(width: 360, alignment: .leading)
+        .background(palette.panel.opacity(self.colorScheme == .dark ? 0.96 : 1.0))
+    }
+}
+
+private struct AccountCardFrameProbe: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.identifier = NSUserInterfaceItemIdentifier(self.identifier)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.identifier = NSUserInterfaceItemIdentifier(self.identifier)
+    }
+}
+
+private struct AccountCardActionFrameProbe: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.identifier = NSUserInterfaceItemIdentifier(self.identifier)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.identifier = NSUserInterfaceItemIdentifier(self.identifier)
     }
 }
 

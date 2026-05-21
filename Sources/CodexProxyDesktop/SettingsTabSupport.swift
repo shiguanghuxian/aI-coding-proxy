@@ -7,6 +7,7 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
     case general
     case proxy
     case service
+    case cleanup
 
     var id: String { self.rawValue }
 
@@ -20,6 +21,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return "network"
         case .service:
             return "server.rack"
+        case .cleanup:
+            return "trash"
         }
     }
 
@@ -33,6 +36,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .proxyTitle
         case .service:
             return .sectionService
+        case .cleanup:
+            return .sectionCleanup
         }
     }
 
@@ -46,6 +51,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .sectionOutboundProxy
         case .service:
             return .sectionService
+        case .cleanup:
+            return .sectionCleanup
         }
     }
 
@@ -59,6 +66,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .proxySubtitle
         case .service:
             return .helperServiceDiagnostics
+        case .cleanup:
+            return .helperCleanup
         }
     }
 }

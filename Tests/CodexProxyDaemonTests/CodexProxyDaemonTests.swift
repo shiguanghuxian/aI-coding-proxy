@@ -982,7 +982,7 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
-    func testGenericChatCompletionsDoesNotRestoreDeepSeekReasoningCache() async throws {
+    func testGenericChatCompletionsRestoresDeepSeekReasoningCache() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
 
@@ -1014,7 +1014,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                 ProxyHeaderName.testAccountKey: added.accountKey,
                 "conversation_id": "generic-reasoning-session",
             ]
-            _ = await harness.service.handle(
+            let first = await harness.service.handle(
                 Self.makePublicRequest(
                     path: "/v1/chat/completions",
                     body: #"{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":false}"#,
@@ -1023,9 +1023,77 @@ final class CodexProxyDaemonTests: XCTestCase {
                 ),
                 kind: .publicAPI
             )
+            let firstResponseBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstResponseBody))
             let firstSnapshot = await probe.snapshot()
             let firstBody = try XCTUnwrap(firstSnapshot.chatRequestBodies.last)
             XCTAssertFalse(firstBody.contains(#""thinking""#), firstBody)
+
+            let second = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"""
+                    {"model":"deepseek-chat","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_cli_tool_turn_changed","type":"function","function":{"name":"run_command","arguments":"{\"command\":\"ls\"}"}}]},{"role":"tool","tool_call_id":"call_cli_tool_turn_changed","content":"file.txt"},{"role":"user","content":"continue"}],"stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+
+            let secondBody = try await Self.data(from: second.body)
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
+            XCTAssertTrue(Self.string(from: secondBody).contains("Tool turn complete"), Self.string(from: secondBody))
+            let snapshot = await probe.snapshot()
+            let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(followUpBody.contains(#""reasoning_content":"cached generic thinking""#), followUpBody)
+            XCTAssertFalse(followUpBody.contains(#""thinking""#), followUpBody)
+        }
+    }
+
+    func testGenericStreamingChatCompletionsRestoresDeepSeekReasoningCache() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-chat"],
+            chatCompletionsReasoningContent: "stream cached thinking",
+            requireReasoningContentForAssistantToolCallHistory: true,
+            responsesAvailable: false,
+            toolTurnMode: true
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Generic Chat",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-generic-chat",
+                    enabled: true
+                )
+            )
+
+            let headers = [
+                ProxyHeaderName.testAccountKey: added.accountKey,
+                "conversation_id": "generic-stream-reasoning-session",
+            ]
+            let first = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let firstBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstBody))
 
             let second = await harness.service.handle(
                 Self.makePublicRequest(
@@ -1040,11 +1108,153 @@ final class CodexProxyDaemonTests: XCTestCase {
             )
 
             let secondBody = try await Self.data(from: second.body)
-            XCTAssertFalse((200..<300).contains(second.statusCode), Self.string(from: secondBody))
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
             let snapshot = await probe.snapshot()
             let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
-            XCTAssertFalse(followUpBody.contains(#""reasoning_content":"cached generic thinking""#), followUpBody)
-            XCTAssertFalse(followUpBody.contains(#""thinking""#), followUpBody)
+            XCTAssertTrue(followUpBody.contains(#""reasoning_content":"stream cached thinking""#), followUpBody)
+        }
+    }
+
+    func testGenericResponsesChatCompletionsRestoresXiaomiReasoningWithGeneratedPromptCacheKey() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["mimo-v4"],
+            chatCompletionsReasoningContent: "mimo generated key thinking",
+            requireReasoningContentForAssistantToolCallHistory: true,
+            responsesAvailable: false,
+            toolTurnMode: true
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Xiaomi Chat",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-xiaomi-chat",
+                    enabled: true
+                )
+            )
+
+            let headers = [
+                ProxyHeaderName.testAccountKey: added.accountKey,
+            ]
+            let first = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"mimo-v4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]}],"stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let firstBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstBody))
+
+            let second = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"mimo-v4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]},{"type":"function_call","call_id":"call_generated_key_changed","name":"run_command","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_generated_key_changed","output":"file.txt"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+
+            let secondBody = try await Self.data(from: second.body)
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
+            XCTAssertTrue(Self.string(from: secondBody).contains("Tool turn complete"), Self.string(from: secondBody))
+            let snapshot = await probe.snapshot()
+            let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(followUpBody.contains(#""reasoning_content":"mimo generated key thinking""#), followUpBody)
+            XCTAssertTrue(followUpBody.contains(#""tool_calls""#), followUpBody)
+            XCTAssertFalse(followUpBody.contains(#""conversation_id""#), followUpBody)
+        }
+    }
+
+    func testGenericResponsesChatCompletionsPersistsXiaomiReasoningAcrossControllerRestart() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["mimo-v4"],
+            chatCompletionsReasoningContent: "persisted mimo thinking",
+            requireReasoningContentForAssistantToolCallHistory: true,
+            responsesAvailable: false,
+            toolTurnMode: true
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Restarted Xiaomi Chat",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-xiaomi-persisted-chat",
+                    enabled: true
+                )
+            )
+
+            let headers = [ProxyHeaderName.testAccountKey: added.accountKey]
+            let first = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"mimo-v4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]}],"stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let firstBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstBody))
+            let firstSummary = try await harness.controller.reasoningCacheSummary()
+            XCTAssertEqual(firstSummary.totalCount, 1)
+
+            let restartedController = try Self.makeController(dataDirectory: harness.dataDirectory)
+            try await restartedController.bootstrap()
+            let restartedConfig = try await restartedController.loadConfig()
+            let restartedService = DaemonHTTPService(
+                controller: restartedController,
+                publicHost: "127.0.0.1",
+                publicPort: 8787,
+                adminPort: 8788
+            )
+
+            let second = await restartedService.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"mimo-v4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]},{"type":"function_call","call_id":"call_generated_key_changed","name":"run_command","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_generated_key_changed","output":"file.txt"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"stream":false}
+                    """#,
+                    proxyKey: restartedConfig.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+
+            let secondBody = try await Self.data(from: second.body)
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
+            let snapshot = await probe.snapshot()
+            let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(followUpBody.contains(#""reasoning_content":"persisted mimo thinking""#), followUpBody)
         }
     }
 
@@ -8274,6 +8484,90 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testAdminReasoningCacheSummaryAndClearRoutesDoNotExposeReasoningContent() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let now = Helpers.now()
+        try harness.controller.store.upsertChatCompletionsReasoningCacheEntry(
+            cacheKey: "account-a\nactive-session",
+            accountKey: "account-a",
+            sessionKey: "active-session",
+            entry: ChatCompletionsReasoningCacheEntry(
+                byToolCallID: ["call_active": "route secret thinking"],
+                byToolCallSignature: [:],
+                byAssistantFingerprint: [:],
+                byToolAssistantFingerprint: [:],
+                latestReasoningContent: "route secret thinking",
+                latestToolCallReasoningContent: "route secret thinking",
+                expiresAt: now + 600,
+                touchedAt: now
+            ),
+            capacity: 8
+        )
+        try harness.controller.store.upsertChatCompletionsReasoningCacheEntry(
+            cacheKey: "account-b\nexpired-session",
+            accountKey: "account-b",
+            sessionKey: "expired-session",
+            entry: ChatCompletionsReasoningCacheEntry(
+                byToolCallID: ["call_expired": "expired route secret"],
+                byToolCallSignature: [:],
+                byAssistantFingerprint: [:],
+                byToolAssistantFingerprint: [:],
+                latestReasoningContent: "expired route secret",
+                latestToolCallReasoningContent: "expired route secret",
+                expiresAt: now - 10,
+                touchedAt: now - 120
+            ),
+            capacity: 8
+        )
+
+        let summaryResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "GET",
+                path: "/admin/reasoning-cache/summary",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let summaryBody = try await Self.data(from: summaryResponse.body)
+        XCTAssertEqual(summaryResponse.statusCode, 200, Self.string(from: summaryBody))
+        XCTAssertFalse(Self.string(from: summaryBody).contains("route secret thinking"))
+        let summary = try Helpers.readJSON(ReasoningCacheSummary.self, from: summaryBody)
+        XCTAssertEqual(summary.totalCount, 2)
+        XCTAssertEqual(summary.expiredCount, 1)
+
+        let clearExpiredResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/reasoning-cache/clear",
+                body: #"{"expiredOnly":true}"#,
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let clearExpiredBody = try await Self.data(from: clearExpiredResponse.body)
+        XCTAssertEqual(clearExpiredResponse.statusCode, 200, Self.string(from: clearExpiredBody))
+        let clearExpired = try Helpers.readJSON(ClearReasoningCacheResult.self, from: clearExpiredBody)
+        XCTAssertEqual(clearExpired.deletedCount, 1)
+        XCTAssertEqual(clearExpired.summary.totalCount, 1)
+
+        let clearAllResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/reasoning-cache/clear",
+                body: #"{"clearAll":true}"#,
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let clearAllBody = try await Self.data(from: clearAllResponse.body)
+        XCTAssertEqual(clearAllResponse.statusCode, 200, Self.string(from: clearAllBody))
+        let clearAll = try Helpers.readJSON(ClearReasoningCacheResult.self, from: clearAllBody)
+        XCTAssertEqual(clearAll.deletedCount, 1)
+        XCTAssertEqual(clearAll.summary.totalCount, 0)
+    }
+
     private static func makeHarness() async throws -> Harness {
         let dataDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -10057,7 +10351,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                         headers: Self.jsonHeaders(),
                         body: .init(
                             byteBuffer: ByteBuffer(
-                                string: #"{"error":{"message":"The `reasoning_content` in the thinking mode must be passed back to the API.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#
+                                string: #"{"error":{"code":"400","message":"Param Incorrect","param":"The reasoning_content in the thinking mode must be passed back to the API.","type":""}}"#
                             )
                         )
                     )
@@ -10077,7 +10371,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                         headers: Self.jsonHeaders(),
                         body: .init(
                             byteBuffer: ByteBuffer(
-                                string: #"{"error":{"message":"The `reasoning_content` in the thinking mode must be passed back to the API.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#
+                                string: #"{"error":{"code":"400","message":"Param Incorrect","param":"The reasoning_content in the thinking mode must be passed back to the API.","type":""}}"#
                             )
                         )
                     )
@@ -10712,6 +11006,699 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testOpenAIImagesAPIKeyRoutesForwardAllImageEndpoints() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesAPIKeyUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                )
+            ])
+
+            for endpoint in OpenAIImagesEndpoint.allCases {
+                let body = #"{"model":"gpt-image-2","prompt":"Draw a small cabin","response_format":"b64_json"}"#
+                let response = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: endpoint.rawValue,
+                        body: body,
+                        proxyKey: harness.config.proxyAPIKey
+                    ),
+                    kind: .publicAPI
+                )
+                let data = try await Self.data(from: response.body)
+                XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+                XCTAssertTrue(Self.string(from: data).contains("images-api-key"))
+            }
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), OpenAIImagesEndpoint.allCases.map(\.rawValue))
+            XCTAssertTrue(hits.allSatisfy { $0.authorization == "Bearer sk-test-daemon-account" })
+            XCTAssertTrue(hits.allSatisfy { $0.contentType.contains("application/json") })
+
+            let logs = try harness.controller.store.loadRequestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            XCTAssertEqual(logs.entries.filter { $0.endpoint.hasPrefix("/v1/images/") }.count, 3)
+            XCTAssertTrue(logs.entries.filter { $0.endpoint.hasPrefix("/v1/images/") }.allSatisfy(\.success))
+        }
+    }
+
+    func testAdminProxyTestRunSupportsImageGenerationsWithProxyAPIKey() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesAPIKeyUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                )
+            ])
+            let accounts = try await harness.controller.listAccounts()
+            let accountKey = try XCTUnwrap(accounts.first?.accountKey)
+            let payload = AdminProxyTestRunRequest(
+                endpoint: .imageGenerations,
+                model: "gpt-image-2",
+                payloadJSON: #"{"model":"gpt-image-2","prompt":"Draw a small cabin","n":1,"size":"1024x1024"}"#,
+                stream: false,
+                selectedAccountKey: accountKey,
+                proxyAPIKey: harness.config.proxyAPIKey
+            )
+            let encodedPayload = try Helpers.encodeJSON(payload, pretty: false)
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/proxy-test/run",
+                    body: String(decoding: encodedPayload, as: UTF8.self),
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+
+            XCTAssertEqual(response.statusCode, 200, text)
+            XCTAssertTrue(text.contains("images-api-key"), text)
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [OpenAIImagesEndpoint.generations.rawValue])
+            XCTAssertEqual(hits.first?.authorization, "Bearer sk-test-daemon-account")
+            XCTAssertTrue(hits.first?.body.contains(#""model":"gpt-image-2""#) == true)
+        }
+    }
+
+    func testOpenAIImagesAPIKeyMultipartPreservesContentTypeBoundary() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesAPIKeyUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                )
+            ])
+
+            let boundary = "ImageEditBoundary"
+            let multipart = """
+            --\(boundary)\r
+            Content-Disposition: form-data; name="model"\r
+            \r
+            gpt-image-2\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="prompt"\r
+            \r
+            Add a blue border\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="image"; filename="image.png"\r
+            Content-Type: image/png\r
+            \r
+            PNGDATA\r
+            --\(boundary)--\r
+
+            """
+            let response = await harness.service.handle(
+                DaemonHTTPService.Request(
+                    method: "POST",
+                    target: OpenAIImagesEndpoint.edits.rawValue,
+                    path: OpenAIImagesEndpoint.edits.rawValue,
+                    headers: [
+                        "x-api-key": harness.config.proxyAPIKey,
+                        "content-type": "multipart/form-data; boundary=\(boundary)",
+                    ],
+                    body: Data(multipart.utf8)
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+
+            let hits = await probe.snapshot()
+            let hit = try XCTUnwrap(hits.first)
+            XCTAssertEqual(hit.path, OpenAIImagesEndpoint.edits.rawValue)
+            XCTAssertEqual(hit.contentType, "multipart/form-data; boundary=\(boundary)")
+            XCTAssertTrue(hit.body.contains("PNGDATA"), hit.body)
+        }
+    }
+
+    func testOpenAIImagesOAuthGenerationUsesChatGPTWebImageConversation() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"codex-gpt-image-2","prompt":"Draw a silver robot","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+            let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let images = try XCTUnwrap(payload["data"] as? [[String: String]])
+            XCTAssertEqual(images.first?["b64_json"], Data("OAUTH-IMAGE".utf8).base64EncodedString())
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+                "/backend-api/files/file_image/download",
+                "/mock-download/file_image.png",
+            ])
+            let sessionHits = hits.filter { ["/", "/backend-api/sentinel/chat-requirements", "/backend-api/f/conversation/prepare", "/backend-api/f/conversation"].contains($0.path) }
+            XCTAssertEqual(Set(sessionHits.map(\.deviceID)).count, 1)
+            XCTAssertEqual(Set(sessionHits.map(\.sessionID)).count, 1)
+            let prepareBody = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation/prepare" })?.body)
+            XCTAssertTrue(prepareBody.contains(#""system_hints":["picture_v2"]"#), prepareBody)
+            XCTAssertTrue(prepareBody.contains(#""model":"codex-gpt-image-2""#), prepareBody)
+            let conversationBody = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation" })?.body)
+            XCTAssertTrue(conversationBody.contains(#""model":"codex-gpt-image-2""#), conversationBody)
+            XCTAssertFalse(hits.map(\.path).contains("/backend-api/codex/responses"))
+        }
+    }
+
+    func testOpenAIImagesOAuthGPTImage2UsesChatGPTWebImageConversation() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"gpt-image-2","prompt":"Draw a silver robot","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.filter { $0.path == "/backend-api/codex/responses" }.count, 0)
+            let prepareBody = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation/prepare" })?.body)
+            XCTAssertTrue(prepareBody.contains(#""model":"gpt-5-3""#), prepareBody)
+        }
+    }
+
+    func testOpenAIImagesOAuthTurnstileDXUsesAuthenticatedSourceAndDoesNotSendImageHeader() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUpstreamApplication(
+            probe: probe,
+            requirementsBody: { _ in
+                let dx = Self.chatGPTTurnstileDX(
+                    instructions: [
+                        [2, 30, "turnstile-token"],
+                        [2, 31, "turnstile-token"],
+                        [20, 30, 31, 3, 30],
+                    ],
+                    sourceP: ""
+                )
+                return #"{"token":"requirements-token","turnstile":{"required":true,"dx":"\#(dx)"}}"#
+            }
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"codex-gpt-image-2","prompt":"Draw a silver robot","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+
+            let hits = await probe.snapshot()
+            let prepareHit = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation/prepare" }))
+            let conversationHit = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation" }))
+            XCTAssertEqual(prepareHit.turnstileToken, "")
+            XCTAssertEqual(conversationHit.turnstileToken, "")
+        }
+    }
+
+    func testOpenAIImagesOAuthTurnstileDXFailureCanContinueToAPIKeyAccountWhenAutoRouting() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUnsupportedApplication(
+            probe: probe,
+            requirementsBody: { _ in #"{"token":"requirements-token","turnstile":{"required":true}}"# }
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images"),
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                ),
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"codex-gpt-image-2","prompt":"Draw fallback","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+            XCTAssertEqual(response.statusCode, 200, text)
+            XCTAssertTrue(text.contains("api-key-after-oauth"), text)
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+                "/v1/images/generations",
+            ])
+        }
+    }
+
+    func testOpenAIImagesOAuthTurnstileDXFailureReturnsUpstreamErrorWhenPinned() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUnsupportedApplication(
+            probe: probe,
+            requirementsBody: { _ in #"{"token":"requirements-token","turnstile":{"required":true,"dx":"not-base64"}}"# }
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+            let accounts = try await harness.controller.listAccounts()
+            let accountKey = try XCTUnwrap(accounts.first?.accountKey)
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"codex-gpt-image-2","prompt":"Draw fallback","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+            XCTAssertEqual(response.statusCode, 500, text)
+            XCTAssertTrue(text.contains("unsupported image_generation"), text)
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+            ])
+        }
+    }
+
+    func testOpenAIImagesOAuthBridgeUnsupportedDoesNotCallOfficialImagesAPIWhenPinned() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUnsupportedApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+            let accounts = try await harness.controller.listAccounts()
+            let accountKey = try XCTUnwrap(accounts.first?.accountKey)
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"gpt-image-2","prompt":"Draw fallback","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+            XCTAssertEqual(response.statusCode, 500, text)
+            XCTAssertTrue(text.contains("unsupported image_generation"), text)
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+            ])
+
+            let logs = try harness.controller.store.loadRequestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let entry = try XCTUnwrap(logs.entries.first(where: { $0.endpoint == OpenAIImagesEndpoint.generations.rawValue }))
+            XCTAssertFalse(entry.success)
+            XCTAssertTrue(entry.upstreamURL?.contains("/backend-api/f/conversation") == true, entry.upstreamURL ?? "missing upstream")
+            XCTAssertTrue(entry.errorSummary?.contains("unsupported image_generation") == true, entry.errorSummary ?? "missing error")
+        }
+    }
+
+    func testOpenAIImagesOAuthBridgeUnsupportedCanContinueToAPIKeyAccountWhenAutoRouting() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUnsupportedApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images"),
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                ),
+            ])
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: OpenAIImagesEndpoint.generations.rawValue,
+                    body: #"{"model":"gpt-image-2","prompt":"Draw fallback","response_format":"b64_json"}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+            XCTAssertEqual(response.statusCode, 200, text)
+            XCTAssertTrue(text.contains("api-key-after-oauth"), text)
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+                "/v1/images/generations",
+            ])
+            XCTAssertEqual(hits[4].authorization, "Bearer sk-test-daemon-account")
+        }
+    }
+
+    private static func makeImagesAPIKeyUpstreamApplication(
+        probe: ImagesProxyProbe
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        for endpoint in OpenAIImagesEndpoint.allCases {
+            router.post(RouterPath(String(endpoint.rawValue.dropFirst()))) { request, _ async throws -> Response in
+                await probe.record(
+                    path: request.uri.path,
+                    body: try await Self.string(from: request.body),
+                    authorization: request.headers[.authorization] ?? "",
+                    contentType: request.headers[.contentType] ?? ""
+                )
+                return Response(
+                    status: .ok,
+                    headers: Self.jsonHeaders(),
+                    body: .init(byteBuffer: ByteBuffer(string: #"{"created":1710000000,"data":[{"b64_json":"images-api-key"}]}"#))
+                )
+            }
+        }
+        return Application(router: router)
+    }
+
+    private static func makeImagesOAuthWebImageUpstreamApplication(
+        probe: ImagesProxyProbe,
+        requirementsBody: (@Sendable (String) -> String)? = nil
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        let turnstileHeaderName = HTTPField.Name("OpenAI-Sentinel-Turnstile-Token")!
+        let deviceHeaderName = HTTPField.Name("OAI-Device-Id")!
+        let sessionHeaderName = HTTPField.Name("OAI-Session-Id")!
+        self.registerOpenAIUsageRoutes(on: router)
+        router.get("") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: "",
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.htmlHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"<html data-build="build-from-html"><head><script src="/assets/c/test/_app.js"></script></head></html>"#))
+            )
+        }
+        router.post("backend-api/sentinel/chat-requirements") { request, _ async throws -> Response in
+            let body = try await Self.string(from: request.body)
+            await probe.record(
+                path: request.uri.path,
+                body: body,
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: requirementsBody?(body) ?? #"{"token":"requirements-token"}"#))
+            )
+        }
+        router.post("backend-api/f/conversation/prepare") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                turnstileToken: request.headers[turnstileHeaderName] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"conduit_token":"conduit-token"}"#))
+            )
+        }
+        router.post("backend-api/f/conversation") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                turnstileToken: request.headers[turnstileHeaderName] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            var headers = HTTPFields()
+            headers.append(.init(name: .contentType, value: "text/event-stream; charset=utf-8"))
+            return Response(
+                status: .ok,
+                headers: headers,
+                body: .init(
+                    byteBuffer: ByteBuffer(
+                        string: #"data: {"conversation_id":"conv_image","message":{"author":{"role":"tool"},"content":{"content_type":"multimodal_text","parts":[{"asset_pointer":"file-service://file_image"}]},"metadata":{"async_task_type":"image_gen"}}}"# + "\n\n"
+                            + "data: [DONE]\n\n"
+                    )
+                )
+            )
+        }
+        router.get("backend-api/files/file_image/download") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: "",
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"download_url":"/mock-download/file_image.png"}"#))
+            )
+        }
+        router.get("mock-download/file_image.png") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: "",
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            var headers = HTTPFields()
+            headers.append(.init(name: .contentType, value: "image/png"))
+            return Response(
+                status: .ok,
+                headers: headers,
+                body: .init(byteBuffer: ByteBuffer(string: "OAUTH-IMAGE"))
+            )
+        }
+        return Application(router: router)
+    }
+
+    private static func makeImagesOAuthWebImageUnsupportedApplication(
+        probe: ImagesProxyProbe,
+        requirementsBody: (@Sendable (String) -> String)? = nil
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        let deviceHeaderName = HTTPField.Name("OAI-Device-Id")!
+        let sessionHeaderName = HTTPField.Name("OAI-Session-Id")!
+        self.registerOpenAIUsageRoutes(on: router)
+        router.get("") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: "",
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.htmlHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"<html data-build="build-from-html"><head><script src="/assets/c/test/_app.js"></script></head></html>"#))
+            )
+        }
+        router.post("backend-api/sentinel/chat-requirements") { request, _ async throws -> Response in
+            let body = try await Self.string(from: request.body)
+            await probe.record(
+                path: request.uri.path,
+                body: body,
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: requirementsBody?(body) ?? #"{"token":"requirements-token"}"#))
+            )
+        }
+        router.post("backend-api/f/conversation/prepare") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"conduit_token":"conduit-token"}"#))
+            )
+        }
+        router.post("backend-api/f/conversation") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            return Response(
+                status: .notImplemented,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"detail":"unsupported image_generation"}"#))
+            )
+        }
+        router.post("v1/images/generations") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"created":1710000000,"data":[{"b64_json":"api-key-after-oauth"}]}"#))
+            )
+        }
+        return Application(router: router)
+    }
+
+    private static func registerOpenAIUsageRoutes(on router: Router<BasicRequestContext>) {
+        let usagePayload = Self.mockUsagePayload()
+        router.get("backend-api/wham/usage") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: usagePayload))
+            )
+        }
+        router.get("wham/usage") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: usagePayload))
+            )
+        }
+        router.get("api/codex/usage") { _, _ in
+            Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: usagePayload))
+            )
+        }
+    }
+
     private static func proxyHeaders(_ key: String) -> HTTPFields {
         var headers = HTTPFields()
         headers.append(.init(name: .init("x-api-key")!, value: key))
@@ -10723,6 +11710,35 @@ final class CodexProxyDaemonTests: XCTestCase {
         var headers = HTTPFields()
         headers.append(.init(name: .authorization, value: "Bearer \(token)"))
         return headers
+    }
+
+    private static func chatGPTRequirementsP(from body: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        let trimmed = (object["p"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func chatGPTTurnstileDX(instructions: [[Any]], sourceP: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: instructions)
+        let program = String(decoding: data, as: UTF8.self)
+        let encoded = self.xor(program, key: sourceP)
+        return Data(encoded.utf8).base64EncodedString()
+    }
+
+    private static func xor(_ text: String, key: String) -> String {
+        guard key.isEmpty == false else { return text }
+        let textScalars = Array(text.unicodeScalars)
+        let keyScalars = Array(key.unicodeScalars)
+        var scalars = String.UnicodeScalarView()
+        for (index, scalar) in textScalars.enumerated() {
+            let value = scalar.value ^ keyScalars[index % keyScalars.count].value
+            scalars.append(UnicodeScalar(value) ?? "\u{FFFD}")
+        }
+        return String(scalars)
     }
 
     private static func makePublicRequest(
@@ -10924,6 +11940,12 @@ final class CodexProxyDaemonTests: XCTestCase {
     private static func jsonHeaders() -> HTTPFields {
         var headers = HTTPFields()
         headers.append(.init(name: .contentType, value: "application/json; charset=utf-8"))
+        return headers
+    }
+
+    private static func htmlHeaders() -> HTTPFields {
+        var headers = HTTPFields()
+        headers.append(.init(name: .contentType, value: "text/html; charset=utf-8"))
         return headers
     }
 
@@ -12219,6 +13241,46 @@ final class CodexProxyDaemonTests: XCTestCase {
 
         func snapshot() -> (requestBodies: [String], authorizations: [String]) {
             (self.requestBodies, self.authorizations)
+        }
+    }
+
+    private actor ImagesProxyProbe {
+        struct Hit: Sendable, Equatable {
+            var path: String
+            var body: String
+            var authorization: String
+            var contentType: String
+            var turnstileToken: String
+            var deviceID: String
+            var sessionID: String
+        }
+
+        private var hits: [Hit] = []
+
+        func record(
+            path: String,
+            body: String,
+            authorization: String,
+            contentType: String,
+            turnstileToken: String = "",
+            deviceID: String = "",
+            sessionID: String = ""
+        ) {
+            self.hits.append(
+                Hit(
+                    path: path,
+                    body: body,
+                    authorization: authorization,
+                    contentType: contentType,
+                    turnstileToken: turnstileToken,
+                    deviceID: deviceID,
+                    sessionID: sessionID
+                )
+            )
+        }
+
+        func snapshot() -> [Hit] {
+            self.hits
         }
     }
 

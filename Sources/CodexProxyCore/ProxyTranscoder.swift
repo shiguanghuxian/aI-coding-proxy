@@ -120,6 +120,9 @@ public enum ProxyTranscoder {
         if let promptCacheKey = payload["prompt_cache_key"] {
             request["prompt_cache_key"] = promptCacheKey
         }
+        if let thinking = payload["thinking"] {
+            request["thinking"] = thinking
+        }
         return (request, downstreamStream, requestedModel)
     }
 
@@ -165,6 +168,7 @@ public enum ProxyTranscoder {
     ) -> [String: Any] {
         var messages: [[String: Any]] = []
         var lastAssistantMessageIndex: Int?
+        var pendingReasoningContent: String?
         let instructions = (normalizedRequest["instructions"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !instructions.isEmpty {
@@ -179,16 +183,31 @@ public enum ProxyTranscoder {
         ) {
             let type = item["type"] as? String ?? ""
             switch type {
+            case "reasoning":
+                if let reasoningContent = self.reasoningContent(fromOutputItem: item) {
+                    pendingReasoningContent = self.joinReasoningContent(
+                        pendingReasoningContent,
+                        reasoningContent
+                    )
+                }
             case "message":
                 let role = ((item["role"] as? String) ?? "user").lowercased()
                 let chatRole = self.chatCompletionRole(for: role)
-                let message: [String: Any] = [
+                var message: [String: Any] = [
                     "role": chatRole,
                     "content": self.chatCompletionMessageContentValue(
                         from: item["content"],
                         chatRole: chatRole
                     ),
                 ]
+                if chatRole == "assistant" {
+                    if let reasoningContent = self.trimmedString(item["reasoning_content"])
+                        ?? pendingReasoningContent
+                    {
+                        message["reasoning_content"] = reasoningContent
+                        pendingReasoningContent = nil
+                    }
+                }
                 messages.append(message)
                 lastAssistantMessageIndex = chatRole == "assistant" ? messages.indices.last : nil
             case "function_call_output":
@@ -212,20 +231,33 @@ public enum ProxyTranscoder {
                         "arguments": self.stringValue(item["arguments"]),
                     ],
                 ]
+                let reasoningContent = self.trimmedString(item["reasoning_content"])
+                    ?? pendingReasoningContent
                 if let assistantIndex = lastAssistantMessageIndex,
                    ((messages[assistantIndex]["role"] as? String) ?? "") == "assistant"
                 {
                     var toolCalls = messages[assistantIndex]["tool_calls"] as? [[String: Any]] ?? []
                     toolCalls.append(toolCall)
                     messages[assistantIndex]["tool_calls"] = toolCalls
+                    if messages[assistantIndex]["reasoning_content"] == nil,
+                       let reasoningContent
+                    {
+                        messages[assistantIndex]["reasoning_content"] = reasoningContent
+                    }
                 } else {
-                    let message: [String: Any] = [
+                    var message: [String: Any] = [
                         "role": "assistant",
                         "content": "",
                         "tool_calls": [toolCall],
                     ]
+                    if let reasoningContent {
+                        message["reasoning_content"] = reasoningContent
+                    }
                     messages.append(message)
                     lastAssistantMessageIndex = messages.indices.last
+                }
+                if reasoningContent != nil {
+                    pendingReasoningContent = nil
                 }
             default:
                 continue
@@ -256,6 +288,9 @@ public enum ProxyTranscoder {
         }
         if let toolChoice = self.chatCompletionToolChoice(from: normalizedRequest["tool_choice"]) {
             request["tool_choice"] = toolChoice
+        }
+        if let thinking = normalizedRequest["thinking"] {
+            request["thinking"] = thinking
         }
         return request
     }
@@ -302,16 +337,18 @@ public enum ProxyTranscoder {
         let text = self.chatCompletionMessageText(from: message["content"])
         let reasoningContent = self.trimmedString(message["reasoning_content"])
         let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
-        let visibleText = !text.isEmpty ? text : (toolCalls.isEmpty ? reasoningContent ?? "" : "")
         var output: [[String: Any]] = []
-        if !visibleText.isEmpty {
+        if let reasoningContent {
+            output.append(self.reasoningOutputItem(reasoningContent))
+        }
+        if !text.isEmpty {
             let messageItem: [String: Any] = [
                 "id": "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
                 "type": "message",
                 "role": "assistant",
                 "content": [[
                     "type": "output_text",
-                    "text": visibleText,
+                    "text": text,
                 ]],
             ]
             output.append(messageItem)
@@ -448,8 +485,8 @@ public enum ProxyTranscoder {
             state.reasoningContentBuffer.append(reasoningDelta)
             chunks.append(
                 self.sseData([
-                    "type": "response.output_text.delta",
-                    "item_id": state.textItemID,
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": state.reasoningItemID,
                     "output_index": 0,
                     "content_index": 0,
                     "delta": reasoningDelta,
@@ -538,6 +575,27 @@ public enum ProxyTranscoder {
                 ])
             )
         }
+        if mutableState.reasoningItemAdded {
+            chunks.append(
+                self.sseData([
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": mutableState.reasoningItemID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": mutableState.reasoningContentBuffer,
+                ])
+            )
+            chunks.append(
+                self.sseData([
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": self.reasoningOutputItem(
+                        mutableState.reasoningContentBuffer,
+                        id: mutableState.reasoningItemID
+                    ),
+                ])
+            )
+        }
 
         for index in mutableState.toolCalls.keys.sorted() {
             guard var tool = mutableState.toolCalls[index] else { continue }
@@ -596,6 +654,7 @@ public enum ProxyTranscoder {
         let usage = self.extractUsage(from: completedResponse["usage"])
         let output = completedResponse["output"] as? [[String: Any]] ?? []
         let assistantText = self.extractAssistantText(from: completedResponse)
+        let reasoningContent = self.extractReasoningContent(from: completedResponse)
         let toolCalls = output.compactMap { item -> [String: Any]? in
             guard (item["type"] as? String) == "function_call" else { return nil }
             let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -612,11 +671,14 @@ public enum ProxyTranscoder {
         let messageContent: Any = assistantText.isEmpty && !toolCalls.isEmpty ? NSNull() : assistantText
         let messageToolCalls: Any = toolCalls.isEmpty ? NSNull() : toolCalls
         let finishReason = toolCalls.isEmpty ? "stop" : "tool_calls"
-        let message: [String: Any] = [
+        var message: [String: Any] = [
             "role": "assistant",
             "content": messageContent,
             "tool_calls": messageToolCalls,
         ]
+        if let reasoningContent {
+            message["reasoning_content"] = reasoningContent
+        }
         var response: [String: Any] = [
             "id": responseID,
             "object": "chat.completion",
@@ -709,6 +771,16 @@ public enum ProxyTranscoder {
         return parts.joined()
     }
 
+    public static func extractReasoningContent(from completedResponse: [String: Any]) -> String? {
+        guard let output = completedResponse["output"] as? [[String: Any]] else { return nil }
+        let parts = output.compactMap { item -> String? in
+            guard (item["type"] as? String) == "reasoning" else { return nil }
+            return self.reasoningContent(fromOutputItem: item)
+        }
+        let joined = parts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
+
     public static func extractAssistantText(from events: [SSEEvent]) -> String {
         var parts: [String] = []
         for event in events {
@@ -798,6 +870,20 @@ public enum ProxyTranscoder {
                 "choices": [[
                     "index": 0,
                     "delta": ["content": delta],
+                    "finish_reason": NSNull(),
+                ]],
+            ]
+            return [self.sseData(chunk)]
+        case "response.reasoning_summary_text.delta":
+            let delta = json["delta"] as? String ?? ""
+            let chunk: [String: Any] = [
+                "id": streamState.responseID,
+                "object": "chat.completion.chunk",
+                "created": streamState.createdAt,
+                "model": requestedModel,
+                "choices": [[
+                    "index": 0,
+                    "delta": ["reasoning_content": delta],
                     "finish_reason": NSNull(),
                 ]],
             ]
@@ -969,11 +1055,15 @@ public enum ProxyTranscoder {
 
                 if item["role"] != nil, item["content"] != nil {
                     let role = (item["role"] as? String) ?? "user"
-                    return [
+                    var normalized: [String: Any] = [
                         "type": "message",
                         "role": role,
                         "content": self.normalizeMessageContent(item["content"], role: role),
                     ]
+                    if let reasoningContent = self.trimmedString(item["reasoning_content"]) {
+                        normalized["reasoning_content"] = reasoningContent
+                    }
+                    return normalized
                 }
 
                 return item
@@ -1131,6 +1221,60 @@ public enum ProxyTranscoder {
         return ""
     }
 
+    private static func reasoningOutputItem(_ text: String, id: String? = nil) -> [String: Any] {
+        [
+            "id": id ?? "reason_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
+            "type": "reasoning",
+            "content": [[
+                "type": "output_text",
+                "text": text,
+            ]],
+            "summary": [[
+                "type": "summary_text",
+                "text": text,
+            ]],
+        ]
+    }
+
+    private static func reasoningContent(fromOutputItem item: [String: Any]) -> String? {
+        var parts: [String] = []
+        if let direct = self.trimmedString(item["reasoning_content"]) {
+            parts.append(direct)
+        }
+        if let summary = item["summary"] as? [[String: Any]] {
+            parts.append(contentsOf: summary.compactMap { block in
+                let type = (block["type"] as? String)?.lowercased() ?? ""
+                guard type == "summary_text" || type == "text" else { return nil }
+                return self.trimmedString(block["text"])
+            })
+        }
+        if let content = item["content"] as? [[String: Any]] {
+            parts.append(contentsOf: content.compactMap { block in
+                let type = (block["type"] as? String)?.lowercased() ?? ""
+                guard ["output_text", "reasoning_text", "summary_text", "text"].contains(type) else {
+                    return nil
+                }
+                return self.trimmedString(block["text"])
+            })
+        }
+
+        var uniqueParts: [String] = []
+        for part in parts {
+            guard uniqueParts.contains(part) == false else { continue }
+            uniqueParts.append(part)
+        }
+        let joined = uniqueParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
+
+    private static func joinReasoningContent(_ lhs: String?, _ rhs: String?) -> String? {
+        let parts = [lhs, rhs].compactMap {
+            $0?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
     private static func chatCompletionTools(from tools: Any?) -> [[String: Any]]? {
         guard let tools = tools as? [[String: Any]] else { return nil }
         let normalized = tools.compactMap { tool -> [String: Any]? in
@@ -1219,14 +1363,7 @@ public enum ProxyTranscoder {
     ) -> [String: Any] {
         var output: [[String: Any]] = []
         if state.reasoningItemAdded {
-            output.append([
-                "id": "reason_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
-                "type": "reasoning",
-                "content": [[
-                    "type": "output_text",
-                    "text": state.reasoningContentBuffer,
-                ]],
-            ])
+            output.append(self.reasoningOutputItem(state.reasoningContentBuffer))
         }
         if !state.textBuffer.isEmpty || !state.reasoningItemAdded {
             let messageItem: [String: Any] = [

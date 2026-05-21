@@ -30,9 +30,12 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmStopDaemonHandler = () -> Bool
     typealias ConfirmClearAccountManagedProxyNodesHandler = () -> Bool
     typealias ConfirmStopAccountCooldownHandler = (AccountCooldownStopConfirmationContent) -> Bool
+    typealias ConfirmClearReasoningCacheHandler = (ReasoningCacheClearConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
     typealias ConfirmInstallUpdateHandler = (AppUpdatePackage) -> AppUpdatePromptDecision
+    typealias ImportAuthFileSelectionHandler = () -> [URL]?
+    typealias ImportAuthFileReader = (URL) throws -> String
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
     typealias RemoteAdminWindowFactory = (
         RemoteHostConfig,
@@ -102,6 +105,12 @@ final class DesktopAppModel: ObservableObject {
         var actionTitle: String
     }
 
+    struct ReasoningCacheClearConfirmationContent: Equatable {
+        var title: String
+        var informativeText: String
+        var actionTitle: String
+    }
+
     struct InterfaceModeSwitchConfirmationContent: Equatable {
         var title: String
         var informativeText: String
@@ -138,6 +147,19 @@ final class DesktopAppModel: ObservableObject {
         var isEditing: Bool {
             self.editingAccountID != nil
         }
+    }
+
+    enum AuthImportMode: String, CaseIterable, Identifiable {
+        case paste
+        case file
+
+        var id: String { self.rawValue }
+    }
+
+    struct AuthImportDraft: Identifiable, Equatable {
+        let id = UUID()
+        var mode: AuthImportMode = .paste
+        var pastedJSON = ""
     }
 
     struct AccountLabelDraft: Identifiable, Equatable {
@@ -399,12 +421,14 @@ final class DesktopAppModel: ObservableObject {
     @Published var remoteServiceLoadErrors: [String: String] = [:]
     @Published var oauthDraft: OAuthDraft?
     @Published var manualAPIKeyDraft: ManualAPIKeyDraft?
+    @Published var authImportDraft: AuthImportDraft?
     @Published var accountLabelDraft: AccountLabelDraft?
     @Published var accountOrderDraft: AccountOrderDraft?
     @Published var accountManagedProxyNodeDraft: AccountManagedProxyNodeDraft?
     @Published var accountModelRoutingDraft: AccountModelRoutingDraft?
     @Published var proxyAPIKeyDraft: ProxyAPIKeyDraft?
     @Published var manualAPIKeyIsSubmitting = false
+    @Published var authImportIsSubmitting = false
     @Published var accountLabelIsSubmitting = false
     @Published var accountOrderIsSubmitting = false
     @Published var accountManagedProxyNodeIsSubmitting = false
@@ -440,6 +464,11 @@ final class DesktopAppModel: ObservableObject {
     @Published var requestLogsIsExporting = false
     @Published var requestLogsBanners: [BannerState] = []
     @Published var requestLogsLastRefreshedAt: Date?
+    @Published var reasoningCacheSummary = ReasoningCacheSummary()
+    @Published var reasoningCacheIsRefreshing = false
+    @Published var reasoningCacheIsClearing = false
+    @Published var reasoningCacheSelectedAccountKey = ""
+    @Published var reasoningCacheOlderThanSeconds: Int64 = 604_800
     @Published var proxyAPIKeyUsageFilter = ProxyAPIKeyUsageFilter()
     @Published var proxyAPIKeyUsageReport = ProxyAPIKeyUsageReport(from: 0, to: 0)
     @Published var proxyAPIKeyUsageIsRefreshing = false
@@ -457,9 +486,12 @@ final class DesktopAppModel: ObservableObject {
     private let confirmStopDaemonHandler: ConfirmStopDaemonHandler?
     private let confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler?
     private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
+    let confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
     let confirmInstallUpdateHandler: ConfirmInstallUpdateHandler?
+    private let importAuthFileSelectionHandler: ImportAuthFileSelectionHandler?
+    private let importAuthFileReader: ImportAuthFileReader
     let appUpdateService: any AppUpdateServicing
     let appUpdateInstaller: any AppUpdateInstalling
     var appUpdateCurrentAppURLProvider: () -> URL?
@@ -534,9 +566,14 @@ final class DesktopAppModel: ObservableObject {
         confirmStopDaemonHandler: ConfirmStopDaemonHandler? = nil,
         confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler? = nil,
         confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler? = nil,
+        confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
         confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil,
-        confirmInstallUpdateHandler: ConfirmInstallUpdateHandler? = nil
+        confirmInstallUpdateHandler: ConfirmInstallUpdateHandler? = nil,
+        importAuthFileSelectionHandler: ImportAuthFileSelectionHandler? = nil,
+        importAuthFileReader: @escaping ImportAuthFileReader = { url in
+            try String(contentsOf: url, encoding: .utf8)
+        }
     ) {
         self.admin = admin
         self.daemon = daemon
@@ -558,9 +595,12 @@ final class DesktopAppModel: ObservableObject {
         self.confirmStopDaemonHandler = confirmStopDaemonHandler
         self.confirmClearAccountManagedProxyNodesHandler = confirmClearAccountManagedProxyNodesHandler
         self.confirmStopAccountCooldownHandler = confirmStopAccountCooldownHandler
+        self.confirmClearReasoningCacheHandler = confirmClearReasoningCacheHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.confirmInstallUpdateHandler = confirmInstallUpdateHandler
+        self.importAuthFileSelectionHandler = importAuthFileSelectionHandler
+        self.importAuthFileReader = importAuthFileReader
         self.preferences = preferencesStore.load()
         self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
         self.isKeepAwakeEnabled = keepAwakeController.isEnabled
@@ -3257,28 +3297,127 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
-    func importJSONFiles() async {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK else { return }
+    func presentAuthImportSheet() {
+        self.authImportDraft = AuthImportDraft()
+    }
 
-        self.isBusy = true
-        defer { self.isBusy = false }
+    func dismissAuthImportSheet() {
+        guard self.authImportIsSubmitting == false else { return }
+        self.authImportDraft = nil
+    }
+
+    func submitAuthImportDraft() async {
+        guard let draft = self.authImportDraft else { return }
+        switch draft.mode {
+        case .paste:
+            guard let content = self.validatedPastedAuthImportContent(draft.pastedJSON) else { return }
+            await self.importAuthJSONItems([
+                AuthJsonImportInput(source: "pasted-auth.json", content: content, label: nil),
+            ])
+        case .file:
+            await self.importJSONFiles()
+        }
+    }
+
+    func importJSONFiles() async {
+        guard let urls = self.selectAuthImportJSONFileURLs(), urls.isEmpty == false else { return }
+
         do {
-            let items = try panel.urls.map { url in
+            let items = try urls.map { url in
                 AuthJsonImportInput(
                     source: url.lastPathComponent,
-                    content: try String(contentsOf: url, encoding: .utf8),
+                    content: try self.importAuthFileReader(url),
                     label: nil
                 )
             }
-            _ = try await self.admin.importAuthJSONItems(items)
-            self.accounts = try await self.admin.getAccounts()
-            self.publishSuccess(.importJSON)
+            await self.importAuthJSONItems(items)
         } catch {
             self.present(error: error, context: .importJSON)
         }
+    }
+
+    private func importAuthJSONItems(_ items: [AuthJsonImportInput]) async {
+        self.isBusy = true
+        self.authImportIsSubmitting = true
+        defer { self.isBusy = false }
+        defer { self.authImportIsSubmitting = false }
+        do {
+            let result = try await self.admin.importAuthJSONItems(items)
+            self.accounts = try await self.admin.getAccounts()
+            self.authImportDraft = nil
+            self.publishAuthImportResult(result)
+        } catch {
+            self.present(error: error, context: .importJSON)
+        }
+    }
+
+    private func selectAuthImportJSONFileURLs() -> [URL]? {
+        if let importAuthFileSelectionHandler {
+            return importAuthFileSelectionHandler()
+        }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK else { return nil }
+        return panel.urls
+    }
+
+    private func validatedPastedAuthImportContent(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            self.publishBanner(
+                .warning,
+                title: self.text(.errorImportFailed),
+                detail: self.text(.helperAuthImportPasteRequired)
+            )
+            return nil
+        }
+        do {
+            let value = try JSONSerialization.jsonObject(with: Data(trimmed.utf8))
+            guard value is [String: Any] || value is [[String: Any]] else {
+                self.publishBanner(
+                    .warning,
+                    title: self.text(.errorImportFailed),
+                    detail: self.text(.helperAuthImportJSONInvalid)
+                )
+                return nil
+            }
+            return trimmed
+        } catch {
+            self.publishBanner(
+                .warning,
+                title: self.text(.errorImportFailed),
+                detail: self.text(.helperAuthImportJSONInvalid)
+            )
+            return nil
+        }
+    }
+
+    private func publishAuthImportResult(_ result: ImportAccountsResult) {
+        let detail = self.authImportResultDetail(result)
+        if result.failures.isEmpty {
+            self.publishSuccess(.importJSON, detail: detail)
+        } else {
+            self.publishBanner(
+                .warning,
+                title: self.text(.warningAuthImportPartialFailure),
+                detail: detail
+            )
+        }
+    }
+
+    func authImportResultDetail(_ result: ImportAccountsResult) -> String {
+        var detail = self.localized(
+            zh: "新增 \(result.importedCount) 个，更新 \(result.updatedCount) 个，失败 \(result.failures.count) 个。",
+            en: "Imported \(result.importedCount), updated \(result.updatedCount), failed \(result.failures.count)."
+        )
+        if let firstFailure = result.failures.first {
+            detail += " " + self.localized(
+                zh: "首个失败：\(firstFailure.source) - \(firstFailure.error)",
+                en: "First failure: \(firstFailure.source) - \(firstFailure.error)"
+            )
+        }
+        return detail
     }
 
     private func preparedManualAPIKeySavePayload(

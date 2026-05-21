@@ -279,6 +279,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelRequestPreview
     case labelRawResponse
     case labelStreamTranscript
+    case labelGeneratedImages
+    case labelImagePreview
+    case labelImageURL
     case labelLatency
     case labelHTTPStatus
     case labelResponseText
@@ -302,6 +305,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelLastRefreshed
     case labelOutboundNode
     case labelModelRouting
+    case labelQuickActionLoginGroup
+    case labelQuickActionImportGroup
+    case labelQuickActionMaintenanceGroup
     case sectionRuntime
     case sectionTraffic
     case sectionLatestActivity
@@ -330,6 +336,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionOutboundProxy
     case sectionBehavior
     case sectionService
+    case sectionCleanup
+    case sectionReasoningCache
     case sectionSavedHosts
     case sectionServiceDiagnostics
     case sectionRequestLogFilters
@@ -345,7 +353,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionImportCurrent
     case actionImportLocalAccountsToRemote
     case actionImportJSON
+    case actionPasteAuthJSON
+    case actionChooseAuthJSONFiles
     case actionExportBackup
+    case actionMoreQuickActions
     case actionManualAddAccount
     case actionRefreshAccountList
     case actionRefreshingAccountList
@@ -415,6 +426,12 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionAccountOrderMoveToPosition
     case actionClearAccountManagedProxyNodes
     case actionClearFilters
+    case actionRefreshReasoningCache
+    case actionClearExpiredReasoningCache
+    case actionClearReasoningCacheByAccount
+    case actionClearReasoningCacheOlderThan
+    case actionClearAllReasoningCache
+    case actionClearReasoningCacheConfirm
     case actionTestProxy
     case actionOpenHelp
     case actionSendTest
@@ -437,6 +454,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case placeholderNoAccounts
     case placeholderSearchAccounts
     case placeholderSearchAccountOrder
+    case placeholderAuthImportPaste
     case placeholderNoMatchingAccounts
     case placeholderNoMatchingAccountOrder
     case placeholderAccountOrderPosition
@@ -474,11 +492,17 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperQuickActionImportCurrent
     case helperQuickActionImportLocalAccountsToRemote
     case helperQuickActionImportJSON
+    case helperAuthImportPaste
+    case helperAuthImportFile
+    case helperAuthImportPasteRequired
+    case helperAuthImportJSONInvalid
     case helperQuickActionManualAdd
     case helperQuickActionExportBackup
     case helperQuickActionTestProxy
+    case helperMoreQuickActions
     case helperRefreshAccountList
     case helperQuickActionRefreshUsage
+    case helperAccountCardLastError
     case helperSelectionPolicy
     case helperAccountOrderSearch
     case helperManualAPIKeyAccount
@@ -495,6 +519,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorManualAccountGoogleGeminiPresetRequired
     case errorManualAccountGoogleGeminiAPIKeyOnly
     case helperServiceDiagnostics
+    case helperCleanup
+    case helperReasoningCache
+    case helperReasoningCacheAccountIsolation
+    case helperReasoningCacheSelectAccount
+    case helperReasoningCacheNoEntries
     case helperAnthropicConnection
     case helperGeminiConnection
     case helperOutboundProxyGlobalModeDisabled
@@ -599,6 +628,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case optionDescending
     case optionChatCompletions
     case optionResponses
+    case optionImageGenerations
     case optionUpstreamAdapterChatCompletions
     case optionUpstreamAdapterResponses
     case optionAnthropicMessages
@@ -671,6 +701,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorProxyAPIKeyFailed
     case errorProxyAPIKeyUsageFailed
     case errorKeepAwakeFailed
+    case errorReasoningCacheFailed
+    case errorReasoningCacheClearFailed
+    case warningAuthImportPartialFailure
     case successDaemonStarted
     case successDaemonStopped
     case successAuthImported
@@ -716,6 +749,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successCopiedAccountLabel
     case successCopiedRowCSV
     case successRequestLogsExported
+    case successReasoningCacheCleared
     case successHostSaved
     case successAccountEnabled
     case successAccountDisabled
@@ -730,11 +764,24 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successProxyAPIKeyPrimaryChanged
     case successKeepAwakeEnabled
     case successKeepAwakeDisabled
+    case labelReasoningCacheTotal
+    case labelReasoningCacheExpired
+    case labelReasoningCacheOldest
+    case labelReasoningCacheNewest
+    case labelReasoningCacheAccount
+    case labelReasoningCacheOlderThan
+    case confirmClearReasoningCacheExpiredTitle
+    case confirmClearReasoningCacheExpiredMessage
+    case confirmClearReasoningCacheAccountTitle
+    case confirmClearReasoningCacheOlderThanTitle
+    case confirmClearReasoningCacheAllTitle
+    case confirmClearReasoningCacheAllMessage
 }
 
 public enum OperationContext: String, Sendable {
     case loadAll
     case loadRequestLogs
+    case loadReasoningCache
     case startDaemon
     case stopDaemon
     case importCurrentAuth
@@ -775,6 +822,7 @@ public enum OperationContext: String, Sendable {
     case disableAccount
     case removeAccount
     case reorderAccounts
+    case clearReasoningCache
     case runProxyTest
     case loadProxyTestModels
     case generic
@@ -1134,6 +1182,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAuthorizationRemoved)
         case .reorderAccounts:
             return self.text(.successAccountOrderUpdated)
+        case .clearReasoningCache:
+            return self.text(.successReasoningCacheCleared)
         case .startOAuth:
             return self.text(.successOAuthStarted)
         case .completeOAuth:
@@ -1168,6 +1218,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successHostSaved)
         case .loadRequestLogs:
             return self.text(.statusReady)
+        case .loadReasoningCache:
+            return self.text(.statusReady)
         case .runProxyTest:
             return self.text(.successProxyTestCompleted)
         case .loadProxyTestModels:
@@ -1190,6 +1242,9 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .loadRequestLogs || lower.contains("request log") || lower.contains("stats/request") {
             return self.text(.errorRequestLogsFailed)
         }
+        if context == .loadReasoningCache {
+            return self.text(.errorReasoningCacheFailed)
+        }
         if context == .deployRemote || lower.contains("systemctl") {
             return self.text(.errorRemoteDeployFailed)
         }
@@ -1207,6 +1262,9 @@ public struct LocalizationStore: Sendable, Equatable {
         }
         if context == .saveSettings || context == .saveRemoteHost || context == .deleteRemoteHost || lower.contains("config") || lower.contains("settings") {
             return self.text(.errorConfigurationFailed)
+        }
+        if context == .clearReasoningCache {
+            return self.text(.errorReasoningCacheClearFailed)
         }
         if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .refreshAccountList || context == .reorderAccounts {
             return self.text(.errorAccountManagementFailed)
@@ -1963,6 +2021,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRequestPreview: "Request Preview",
             .labelRawResponse: "Raw Response",
             .labelStreamTranscript: "Stream Transcript",
+            .labelGeneratedImages: "Generated Images",
+            .labelImagePreview: "Image Preview",
+            .labelImageURL: "Image URL",
             .labelLatency: "Latency",
             .labelHTTPStatus: "HTTP Status",
             .labelResponseText: "Response Text",
@@ -2022,6 +2083,15 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelLastRefreshed: "Last Refreshed",
             .labelOutboundNode: "Outbound Node",
             .labelModelRouting: "Model Routing",
+            .labelQuickActionLoginGroup: "Login",
+            .labelQuickActionImportGroup: "Add / Import",
+            .labelQuickActionMaintenanceGroup: "Maintenance",
+            .labelReasoningCacheTotal: "Total Entries",
+            .labelReasoningCacheExpired: "Expired",
+            .labelReasoningCacheOldest: "Oldest Used",
+            .labelReasoningCacheNewest: "Latest Used",
+            .labelReasoningCacheAccount: "Account",
+            .labelReasoningCacheOlderThan: "Older Than",
             .sectionRuntime: "Runtime",
             .sectionTraffic: "Traffic",
             .sectionLatestActivity: "Latest Activity",
@@ -2050,6 +2120,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionOutboundProxy: "Outbound Proxy",
             .sectionBehavior: "Behavior",
             .sectionService: "Service",
+            .sectionCleanup: "Cleanup",
+            .sectionReasoningCache: "Reasoning Backfill Cache",
             .sectionSavedHosts: "Saved Hosts",
             .sectionServiceDiagnostics: "Service Diagnostics",
             .sectionRequestLogFilters: "Log Filters",
@@ -2064,8 +2136,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionOAuthLogin: "OAuth Login",
             .actionImportCurrent: "Import Current",
             .actionImportLocalAccountsToRemote: "Import Local Accounts to Remote",
-            .actionImportJSON: "Import JSON",
+            .actionImportJSON: "Import Auth",
+            .actionPasteAuthJSON: "Paste JSON",
+            .actionChooseAuthJSONFiles: "Choose JSON Files",
             .actionExportBackup: "Export Backup",
+            .actionMoreQuickActions: "More",
             .actionManualAddAccount: "Manual Add",
             .actionRefreshAccountList: "Refresh List",
             .actionRefreshingAccountList: "Refreshing",
@@ -2135,6 +2210,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountOrderMoveToPosition: "Move to Position",
             .actionClearAccountManagedProxyNodes: "Clear Outbound Nodes",
             .actionClearFilters: "Clear Filters",
+            .actionRefreshReasoningCache: "Refresh Cache",
+            .actionClearExpiredReasoningCache: "Clear Expired",
+            .actionClearReasoningCacheByAccount: "Clear by Account",
+            .actionClearReasoningCacheOlderThan: "Clear Older Than",
+            .actionClearAllReasoningCache: "Clear All",
+            .actionClearReasoningCacheConfirm: "Clear Cache",
             .actionTestProxy: "Test Proxy",
             .actionOpenHelp: "Help",
             .actionSendTest: "Send Test",
@@ -2157,6 +2238,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoAccounts: "No accounts imported yet.",
             .placeholderSearchAccounts: "Search label, email, or account ID",
             .placeholderSearchAccountOrder: "Search accounts to locate them in the full order",
+            .placeholderAuthImportPaste: "Paste logged-in auth JSON, an array of auth JSON objects, or a backup JSON package.",
             .placeholderNoMatchingAccounts: "No accounts match the current filters.",
             .placeholderNoMatchingAccountOrder: "No matching accounts in this order list.",
             .placeholderAccountOrderPosition: "Position",
@@ -2193,12 +2275,18 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionOAuth: "Open the browser sign-in flow and import the account after authorization.",
             .helperQuickActionImportCurrent: "Read the current local auth and add it to the account pool.",
             .helperQuickActionImportLocalAccountsToRemote: "Sync the current desktop app's local account pool to this remote host and refresh matching remote authorizations.",
-            .helperQuickActionImportJSON: "Batch import accounts from a backup JSON file.",
+            .helperQuickActionImportJSON: "Import logged-in auth JSON or an account backup JSON file.",
+            .helperAuthImportPaste: "Supports a single logged-in Codex/OpenAI auth object, an array of auth objects, or an exported account backup.",
+            .helperAuthImportFile: "Choose one or more .json files. Logged-in auth JSON and existing account backups are both supported.",
+            .helperAuthImportPasteRequired: "Paste JSON content before importing.",
+            .helperAuthImportJSONInvalid: "The pasted content is not valid JSON auth data.",
             .helperQuickActionManualAdd: "Save a compatible upstream base URL and API key as a separate account.",
             .helperQuickActionExportBackup: "Export all saved accounts into a backup file.",
             .helperQuickActionTestProxy: "Open the test console to verify the current proxy path without leaving the app.",
+            .helperMoreQuickActions: "Export backups, test the proxy, or refresh usage.",
             .helperRefreshAccountList: "Reload the latest account pool data without checking usage or calling upstream APIs.",
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
+            .helperAccountCardLastError: "Click to view the full error message.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
             .helperAccountOrderSearch: "Search only narrows what you see here. Move actions update the full account pool order.",
             .helperManualAPIKeyAccount: "Add a compatible API key account with its own upstream base URL and API key. OAuth accounts still use browser authorization.",
@@ -2215,6 +2303,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorManualAccountGoogleGeminiPresetRequired: "Detected Google's official Gemini OpenAI-compatible root. Switch Provider to `Google Gemini Compatible` instead of `Generic OpenAI Compatible`.",
             .errorManualAccountGoogleGeminiAPIKeyOnly: "Google Gemini Compatible currently supports Gemini API keys only. Google / Gemini sign-in cannot be imported into this compatibility preset. Use a Gemini API key from Google AI Studio instead, or go to Accounts and use `Google / Gemini Login` for the native Google account flow.",
             .helperServiceDiagnostics: "Review LaunchAgent registration, runtime state, local log paths, and the latest startup failure here.",
+            .helperCleanup: "Clear local maintenance data without touching account JSON, API keys, or request log exports.",
+            .helperReasoningCache: "Encrypted cache used only to pass upstream reasoning_content back to Chat Completions providers after app restarts. Cached reasoning text is never shown here.",
+            .helperReasoningCacheAccountIsolation: "reasoning_content cache is isolated per account and is never backfilled across accounts. Disabling or deleting an account also clears that account's cache to avoid reusing one API key, tenant, or provider's reasoning with another account.",
+            .helperReasoningCacheSelectAccount: "Select an account that has reasoning backfill cache entries.",
+            .helperReasoningCacheNoEntries: "There are no reasoning backfill cache entries to clean up.",
             .helperAnthropicConnection: "Point Claude Code to the root address. The same Anthropic-routed local API key can also be used by Codex or another OpenAI-compatible client against the OpenAI-compatible base URL when you want requests to stay on the Anthropic account pool.",
             .helperGeminiConnection: "Point Gemini CLI to the proxy root through `GOOGLE_GEMINI_BASE_URL`, and reuse the same local API key through `GEMINI_API_KEY`. Gemini CLI requests now execute only through accounts imported from `Google / Gemini Login`. `Google Gemini Compatible` remains available for API-key compatibility routes, but it is no longer used as the Gemini CLI backend path.",
             .helperOutboundProxyGlobalModeDisabled: "If your local proxy app is already running in global mode, keep Proxy Mode set to `Disabled` here to avoid adding an extra proxy hop.",
@@ -2319,6 +2412,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionDescending: "Descending",
             .optionChatCompletions: "Chat",
             .optionResponses: "Responses",
+            .optionImageGenerations: "Images",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
             .optionAnthropicMessages: "Anthropic",
@@ -2391,11 +2485,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorProxyAPIKeyFailed: "API key update failed",
             .errorProxyAPIKeyUsageFailed: "API key usage failed to load",
             .errorKeepAwakeFailed: "Keep awake failed",
+            .errorReasoningCacheFailed: "Reasoning cache failed to load",
+            .errorReasoningCacheClearFailed: "Reasoning cache cleanup failed",
             .successDaemonStarted: "Daemon started",
             .successDaemonStopped: "Daemon stopped",
             .successAuthImported: "Current auth imported",
             .successLocalAccountsImportedToRemote: "Local accounts imported to remote",
-            .successJSONImported: "JSON accounts imported",
+            .warningAuthImportPartialFailure: "Import completed with failures",
+            .successJSONImported: "Auth imported",
             .successBackupExported: "Backup exported",
             .successManualAPIKeyAccountAdded: "API key account added",
             .successManualAPIKeyAccountUpdated: "API key account updated",
@@ -2436,6 +2533,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successCopiedAccountLabel: "Account label copied",
             .successCopiedRowCSV: "CSV row copied",
             .successRequestLogsExported: "Request logs exported",
+            .successReasoningCacheCleared: "Reasoning cache cleared",
             .successHostSaved: "Remote host saved",
             .successAccountEnabled: "Account enabled",
             .successAccountDisabled: "Account disabled",
@@ -2450,6 +2548,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .successProxyAPIKeyPrimaryChanged: "Primary API key changed",
             .successKeepAwakeEnabled: "Keep awake enabled",
             .successKeepAwakeDisabled: "Keep awake disabled",
+            .confirmClearReasoningCacheExpiredTitle: "Clear expired reasoning cache?",
+            .confirmClearReasoningCacheExpiredMessage: "Expired reasoning backfill entries will be removed. Active cache entries remain available for restart recovery.",
+            .confirmClearReasoningCacheAccountTitle: "Clear this account's reasoning cache?",
+            .confirmClearReasoningCacheOlderThanTitle: "Clear older reasoning cache?",
+            .confirmClearReasoningCacheAllTitle: "Clear all reasoning cache?",
+            .confirmClearReasoningCacheAllMessage: "All encrypted reasoning backfill cache entries will be removed. This does not delete accounts, API keys, or request logs.",
         ],
         .zhHans: [
             .brandName: "AI Coding Proxy",
@@ -2574,6 +2678,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRequestPreview: "请求预览",
             .labelRawResponse: "原始响应",
             .labelStreamTranscript: "流式日志",
+            .labelGeneratedImages: "生成图片",
+            .labelImagePreview: "图片预览",
+            .labelImageURL: "图片 URL",
             .labelLatency: "耗时",
             .labelHTTPStatus: "HTTP 状态",
             .labelResponseText: "响应文本",
@@ -2633,6 +2740,15 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelLastRefreshed: "最近刷新",
             .labelOutboundNode: "出站节点",
             .labelModelRouting: "模型转换",
+            .labelQuickActionLoginGroup: "登录",
+            .labelQuickActionImportGroup: "新增 / 导入",
+            .labelQuickActionMaintenanceGroup: "维护",
+            .labelReasoningCacheTotal: "缓存条数",
+            .labelReasoningCacheExpired: "已过期",
+            .labelReasoningCacheOldest: "最早使用",
+            .labelReasoningCacheNewest: "最近使用",
+            .labelReasoningCacheAccount: "账号",
+            .labelReasoningCacheOlderThan: "早于",
             .sectionRuntime: "运行概览",
             .sectionTraffic: "流量统计",
             .sectionLatestActivity: "最近活动",
@@ -2661,6 +2777,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionOutboundProxy: "出站代理",
             .sectionBehavior: "行为",
             .sectionService: "服务",
+            .sectionCleanup: "清理",
+            .sectionReasoningCache: "Reasoning 回传缓存",
             .sectionSavedHosts: "已保存主机",
             .sectionServiceDiagnostics: "服务诊断",
             .sectionRequestLogFilters: "日志筛选",
@@ -2675,8 +2793,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionOAuthLogin: "OAuth 登录",
             .actionImportCurrent: "导入当前",
             .actionImportLocalAccountsToRemote: "导入本地账号到远端",
-            .actionImportJSON: "导入 JSON",
+            .actionImportJSON: "导入授权信息",
+            .actionPasteAuthJSON: "粘贴 JSON",
+            .actionChooseAuthJSONFiles: "选择 JSON 文件",
             .actionExportBackup: "导出备份",
+            .actionMoreQuickActions: "更多",
             .actionManualAddAccount: "手动添加",
             .actionRefreshAccountList: "刷新列表",
             .actionRefreshingAccountList: "刷新中",
@@ -2746,6 +2867,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountOrderMoveToPosition: "移动到序号",
             .actionClearAccountManagedProxyNodes: "清空出站节点",
             .actionClearFilters: "清空筛选",
+            .actionRefreshReasoningCache: "刷新缓存",
+            .actionClearExpiredReasoningCache: "清理过期",
+            .actionClearReasoningCacheByAccount: "按账号清理",
+            .actionClearReasoningCacheOlderThan: "清理早于",
+            .actionClearAllReasoningCache: "全部清理",
+            .actionClearReasoningCacheConfirm: "确认清理",
             .actionTestProxy: "测试代理",
             .actionOpenHelp: "帮助",
             .actionSendTest: "发送测试",
@@ -2768,6 +2895,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoAccounts: "还没有导入任何账号。",
             .placeholderSearchAccounts: "搜索名称、邮箱或账号 ID",
             .placeholderSearchAccountOrder: "搜索账号，在完整顺序中快速定位",
+            .placeholderAuthImportPaste: "粘贴已登录授权 JSON、授权对象数组，或账号备份 JSON。",
             .placeholderNoMatchingAccounts: "当前筛选条件下没有匹配的账号。",
             .placeholderNoMatchingAccountOrder: "当前顺序列表中没有匹配账号。",
             .placeholderAccountOrderPosition: "序号",
@@ -2804,12 +2932,18 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionOAuth: "打开浏览器完成登录授权，成功后立即导入账号。",
             .helperQuickActionImportCurrent: "读取当前本地授权，并把它加入账号池。",
             .helperQuickActionImportLocalAccountsToRemote: "把当前桌面端本地账号池同步到这台远端主机，并刷新远端相同账号的授权信息。",
-            .helperQuickActionImportJSON: "从备份 JSON 文件中批量导入账号。",
+            .helperQuickActionImportJSON: "导入已登录授权 JSON，或从账号备份 JSON 文件恢复账号。",
+            .helperAuthImportPaste: "支持单个 Codex/OpenAI 已登录授权对象、授权对象数组，或导出的账号备份包。",
+            .helperAuthImportFile: "选择一个或多个 .json 文件；已登录授权 JSON 和现有账号备份都可以导入。",
+            .helperAuthImportPasteRequired: "请先粘贴 JSON 内容再导入。",
+            .helperAuthImportJSONInvalid: "粘贴的内容不是有效的授权 JSON。",
             .helperQuickActionManualAdd: "手动保存兼容上游根地址和 API Key，作为独立账号接入。",
             .helperQuickActionExportBackup: "把当前保存的全部账号导出成备份文件。",
             .helperQuickActionTestProxy: "直接打开测试控制台，在应用内验证当前代理链路是否正常。",
+            .helperMoreQuickActions: "导出备份、测试代理或刷新用量。",
             .helperRefreshAccountList: "重新加载最新的账号池数据，不检查用量，也不调用上游接口。",
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
+            .helperAccountCardLastError: "点击查看完整错误信息。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
             .helperAccountOrderSearch: "搜索只缩小这里显示的账号范围。移动操作会更新完整账号池顺序。",
             .helperManualAPIKeyAccount: "手动添加兼容 API Key 账号，并为该账号单独保存上游根地址。OAuth 账号仍只支持浏览器授权登录。",
@@ -2826,6 +2960,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorManualAccountGoogleGeminiPresetRequired: "检测到 Google Gemini OpenAI-compatible 根地址，请将 Provider 切换为 `Google Gemini Compatible`，不要使用 `Generic OpenAI Compatible`。",
             .errorManualAccountGoogleGeminiAPIKeyOnly: "Google Gemini Compatible 目前只支持 Gemini API key。Google / Gemini 登录态不能作为这个兼容 preset 的账号导入。请改用 Google AI Studio 生成的 Gemini API key，或者到账号页使用新的 `Google / Gemini Login` 原生登录。",
             .helperServiceDiagnostics: "在这里查看 LaunchAgent 注册情况、运行状态、本地日志路径和最近一次启动失败原因。",
+            .helperCleanup: "清理本机维护数据，不会删除账号 JSON、API Key 或请求日志导出结构。",
+            .helperReasoningCache: "这份加密缓存只用于软件重启后继续把 upstream reasoning_content 回传给 Chat Completions 厂商。这里不会展示缓存里的 reasoning 正文。",
+            .helperReasoningCacheAccountIsolation: "reasoning_content 缓存按账号隔离，不会跨账号回填。禁用或删除账号会同步清理该账号缓存，避免把一个 API Key、租户或供应商的思考过程复用到其它账号。",
+            .helperReasoningCacheSelectAccount: "请选择一个有 reasoning 回传缓存的账号。",
+            .helperReasoningCacheNoEntries: "当前没有可清理的 reasoning 回传缓存。",
             .helperAnthropicConnection: "Claude Code 只需要使用根地址接入；如果你希望 Codex 或其它 OpenAI-compatible 客户端也固定走 Anthropic 账号池，也可以在 OpenAI 兼容 Base URL 上复用这把 Anthropic 路由的本地 API Key。",
             .helperGeminiConnection: "Gemini CLI 通过 `GOOGLE_GEMINI_BASE_URL` 指向代理根地址，并通过 `GEMINI_API_KEY` 复用同一份本地 API Key。Gemini CLI 请求现在只会通过账号页 `Google / Gemini Login` 导入的账号执行。`Google Gemini Compatible` 仍可用于 API key 兼容路由，但不再作为 Gemini CLI 的后端路径。",
             .helperOutboundProxyGlobalModeDisabled: "如果你本机运行的代理软件已经开启全局代理，这里的代理模式应选择 `关闭`，避免请求再次经过一层代理。",
@@ -2930,6 +3069,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionDescending: "降序",
             .optionChatCompletions: "Chat",
             .optionResponses: "Responses",
+            .optionImageGenerations: "图片生成",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
             .optionAnthropicMessages: "Anthropic",
@@ -3002,11 +3142,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorProxyAPIKeyFailed: "API Key 更新失败",
             .errorProxyAPIKeyUsageFailed: "API Key 用量加载失败",
             .errorKeepAwakeFailed: "常亮开启失败",
+            .errorReasoningCacheFailed: "Reasoning 缓存加载失败",
+            .errorReasoningCacheClearFailed: "Reasoning 缓存清理失败",
             .successDaemonStarted: "服务已启动",
             .successDaemonStopped: "服务已停止",
             .successAuthImported: "当前授权已导入",
             .successLocalAccountsImportedToRemote: "本地账号已导入到远端",
-            .successJSONImported: "JSON 账号已导入",
+            .warningAuthImportPartialFailure: "导入完成，但有部分失败",
+            .successJSONImported: "授权信息已导入",
             .successBackupExported: "备份已导出",
             .successManualAPIKeyAccountAdded: "API Key 账号已添加",
             .successManualAPIKeyAccountUpdated: "API Key 账号已更新",
@@ -3047,6 +3190,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successCopiedAccountLabel: "账号标签已复制",
             .successCopiedRowCSV: "CSV 行已复制",
             .successRequestLogsExported: "请求日志已导出",
+            .successReasoningCacheCleared: "Reasoning 缓存已清理",
             .successHostSaved: "远程主机已保存",
             .successAccountEnabled: "账号已启用",
             .successAccountDisabled: "账号已停用",
@@ -3061,6 +3205,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .successProxyAPIKeyPrimaryChanged: "默认 API Key 已切换",
             .successKeepAwakeEnabled: "已开启屏幕常亮",
             .successKeepAwakeDisabled: "已关闭屏幕常亮",
+            .confirmClearReasoningCacheExpiredTitle: "清理过期 reasoning 缓存？",
+            .confirmClearReasoningCacheExpiredMessage: "将删除已经过期的 reasoning 回传缓存，仍在有效期内的缓存会保留用于重启恢复。",
+            .confirmClearReasoningCacheAccountTitle: "清理该账号的 reasoning 缓存？",
+            .confirmClearReasoningCacheOlderThanTitle: "清理较早的 reasoning 缓存？",
+            .confirmClearReasoningCacheAllTitle: "清理全部 reasoning 缓存？",
+            .confirmClearReasoningCacheAllMessage: "将删除所有加密 reasoning 回传缓存。不会删除账号、API Key 或请求日志。",
         ],
     ]
 }
