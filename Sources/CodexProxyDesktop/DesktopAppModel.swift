@@ -36,6 +36,10 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmInstallUpdateHandler = (AppUpdatePackage) -> AppUpdatePromptDecision
     typealias ImportAuthFileSelectionHandler = () -> [URL]?
     typealias ImportAuthFileReader = (URL) throws -> String
+    typealias ProxyTestImageSavePanelHandler = @MainActor (ProxyTestImageSavePanelRequest) -> URL?
+    typealias ProxyTestImageDownloadHandler = @Sendable (URL) async throws -> ProxyTestDownloadedImage
+    typealias ProxyTestImageFileWriter = (Data, URL) throws -> Void
+    typealias ProxyTestImageFilenameTokenProvider = () -> String
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
     typealias RemoteAdminWindowFactory = (
         RemoteHostConfig,
@@ -151,6 +155,7 @@ final class DesktopAppModel: ObservableObject {
 
     enum AuthImportMode: String, CaseIterable, Identifiable {
         case paste
+        case chatGPTWebSession
         case file
 
         var id: String { self.rawValue }
@@ -160,6 +165,7 @@ final class DesktopAppModel: ObservableObject {
         let id = UUID()
         var mode: AuthImportMode = .paste
         var pastedJSON = ""
+        var chatGPTWebSessionJSON = ""
     }
 
     struct AccountLabelDraft: Identifiable, Equatable {
@@ -492,6 +498,10 @@ final class DesktopAppModel: ObservableObject {
     let confirmInstallUpdateHandler: ConfirmInstallUpdateHandler?
     private let importAuthFileSelectionHandler: ImportAuthFileSelectionHandler?
     private let importAuthFileReader: ImportAuthFileReader
+    let proxyTestImageSavePanelHandler: ProxyTestImageSavePanelHandler
+    let proxyTestImageDownloadHandler: ProxyTestImageDownloadHandler
+    let proxyTestImageFileWriter: ProxyTestImageFileWriter
+    let proxyTestImageFilenameTokenProvider: ProxyTestImageFilenameTokenProvider
     let appUpdateService: any AppUpdateServicing
     let appUpdateInstaller: any AppUpdateInstalling
     var appUpdateCurrentAppURLProvider: () -> URL?
@@ -573,7 +583,13 @@ final class DesktopAppModel: ObservableObject {
         importAuthFileSelectionHandler: ImportAuthFileSelectionHandler? = nil,
         importAuthFileReader: @escaping ImportAuthFileReader = { url in
             try String(contentsOf: url, encoding: .utf8)
-        }
+        },
+        proxyTestImageSavePanelHandler: @escaping ProxyTestImageSavePanelHandler = DesktopAppModel.defaultProxyTestImageSavePanel,
+        proxyTestImageDownloadHandler: @escaping ProxyTestImageDownloadHandler = DesktopAppModel.defaultProxyTestImageDownload,
+        proxyTestImageFileWriter: @escaping ProxyTestImageFileWriter = { data, url in
+            try data.write(to: url, options: .atomic)
+        },
+        proxyTestImageFilenameTokenProvider: @escaping ProxyTestImageFilenameTokenProvider = DesktopAppModel.defaultProxyTestImageFilenameToken
     ) {
         self.admin = admin
         self.daemon = daemon
@@ -601,6 +617,10 @@ final class DesktopAppModel: ObservableObject {
         self.confirmInstallUpdateHandler = confirmInstallUpdateHandler
         self.importAuthFileSelectionHandler = importAuthFileSelectionHandler
         self.importAuthFileReader = importAuthFileReader
+        self.proxyTestImageSavePanelHandler = proxyTestImageSavePanelHandler
+        self.proxyTestImageDownloadHandler = proxyTestImageDownloadHandler
+        self.proxyTestImageFileWriter = proxyTestImageFileWriter
+        self.proxyTestImageFilenameTokenProvider = proxyTestImageFilenameTokenProvider
         self.preferences = preferencesStore.load()
         self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
         self.isKeepAwakeEnabled = keepAwakeController.isEnabled
@@ -3314,6 +3334,9 @@ final class DesktopAppModel: ObservableObject {
             await self.importAuthJSONItems([
                 AuthJsonImportInput(source: "pasted-auth.json", content: content, label: nil),
             ])
+        case .chatGPTWebSession:
+            guard let items = self.validatedChatGPTWebSessionImportItems(draft.chatGPTWebSessionJSON) else { return }
+            await self.importAuthJSONItems(items)
         case .file:
             await self.importJSONFiles()
         }
@@ -3388,6 +3411,35 @@ final class DesktopAppModel: ObservableObject {
                 .warning,
                 title: self.text(.errorImportFailed),
                 detail: self.text(.helperAuthImportJSONInvalid)
+            )
+            return nil
+        }
+    }
+
+    private func validatedChatGPTWebSessionImportItems(_ raw: String) -> [AuthJsonImportInput]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            self.publishBanner(
+                .warning,
+                title: self.text(.errorImportFailed),
+                detail: self.text(.helperAuthImportChatGPTSessionRequired)
+            )
+            return nil
+        }
+
+        do {
+            let conversions = try ChatGPTWebSessionCPAConverter().convertPastedSessions(trimmed)
+            return conversions.enumerated().map { index, conversion in
+                let source = conversions.count == 1
+                    ? "chatgpt-web-session-cpa.json"
+                    : "chatgpt-web-session-\(index + 1)-cpa.json"
+                return AuthJsonImportInput(source: source, content: conversion.cpaJSON, label: nil)
+            }
+        } catch {
+            self.publishBanner(
+                .warning,
+                title: self.text(.errorImportFailed),
+                detail: self.text(.helperAuthImportChatGPTSessionInvalid)
             )
             return nil
         }

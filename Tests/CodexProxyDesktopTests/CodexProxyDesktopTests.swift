@@ -536,6 +536,43 @@ private final class ReasoningCacheMaintenanceProbe: @unchecked Sendable {
     }
 }
 
+private final class ProxyTestImageSaveProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPanelRequests: [ProxyTestImageSavePanelRequest] = []
+    private var storedDownloads: [URL] = []
+    private var storedWrites: [(Data, URL)] = []
+
+    func recordPanel(_ request: ProxyTestImageSavePanelRequest) {
+        self.lock.withLock {
+            self.storedPanelRequests.append(request)
+        }
+    }
+
+    func recordDownload(_ url: URL) {
+        self.lock.withLock {
+            self.storedDownloads.append(url)
+        }
+    }
+
+    func recordWrite(data: Data, url: URL) {
+        self.lock.withLock {
+            self.storedWrites.append((data, url))
+        }
+    }
+
+    func panelRequests() -> [ProxyTestImageSavePanelRequest] {
+        self.lock.withLock { self.storedPanelRequests }
+    }
+
+    func downloads() -> [URL] {
+        self.lock.withLock { self.storedDownloads }
+    }
+
+    func writes() -> [(Data, URL)] {
+        self.lock.withLock { self.storedWrites }
+    }
+}
+
 final class CodexProxyDesktopTests: XCTestCase {
     @MainActor
     func testDesktopMainWindowFindsTaggedMainWindow() {
@@ -7295,6 +7332,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelGeneratedImages), "Generated Images")
         XCTAssertEqual(model.text(.labelImagePreview), "Image Preview")
         XCTAssertEqual(model.text(.labelImageURL), "Image URL")
+        XCTAssertEqual(model.text(.actionSaveImageAs), "Save As")
+        XCTAssertEqual(model.text(.successProxyTestImageSaved), "Image saved")
+        XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "Image save failed")
         XCTAssertEqual(
             model.text(.helperQuickActionTestProxy),
             "Open the test console to verify the current proxy path without leaving the app."
@@ -7319,6 +7359,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelGeneratedImages), "生成图片")
         XCTAssertEqual(model.text(.labelImagePreview), "图片预览")
         XCTAssertEqual(model.text(.labelImageURL), "图片 URL")
+        XCTAssertEqual(model.text(.actionSaveImageAs), "另存为")
+        XCTAssertEqual(model.text(.successProxyTestImageSaved), "图片已保存")
+        XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "图片保存失败")
         XCTAssertEqual(
             model.text(.helperQuickActionTestProxy),
             "直接打开测试控制台，在应用内验证当前代理链路是否正常。"
@@ -7518,6 +7561,91 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testChatGPTWebSessionImportConvertsToCPAAndUsesExistingImportFlow() async throws {
+        let probe = RemoteAdminLocalImportProbe()
+        let importedAccount = Self.makeAccount(id: "chatgpt-session-imported", label: "ChatGPT Web", accountID: "account-web-session")
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                probe.accounts()
+            },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                probe.setAccounts([importedAccount])
+                return ImportAccountsResult(totalCount: items.count, importedCount: items.count, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        var draft = DesktopAppModel.AuthImportDraft()
+        draft.mode = .chatGPTWebSession
+        draft.chatGPTWebSessionJSON = #"""
+        {
+          "user": {
+            "id": "user-web-session",
+            "email": "web-session@example.com"
+          },
+          "account": {
+            "id": "account-web-session",
+            "planType": "plus"
+          },
+          "accessToken": "access-web-session",
+          "sessionToken": "session-web-session",
+          "expires": "2099-08-06T14:29:36.155Z"
+        }
+        """#
+        model.authImportDraft = draft
+
+        await model.submitAuthImportDraft()
+
+        let calls = probe.importCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].count, 1)
+        XCTAssertEqual(calls[0][0].source, "chatgpt-web-session-cpa.json")
+        let cpa = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[0][0].content.utf8)) as? [String: Any])
+        XCTAssertEqual(cpa["type"] as? String, "codex")
+        XCTAssertEqual(cpa["access_token"] as? String, "access-web-session")
+        XCTAssertEqual(cpa["session_token"] as? String, "session-web-session")
+        XCTAssertEqual(cpa["refresh_token"] as? String, "")
+        XCTAssertEqual(cpa["account_id"] as? String, "account-web-session")
+        XCTAssertEqual(cpa["email"] as? String, "web-session@example.com")
+        XCTAssertEqual(cpa["chatgpt_plan_type"] as? String, "plus")
+        XCTAssertEqual(cpa["id_token_synthetic"] as? Bool, true)
+        XCTAssertEqual(model.accounts.map(\.id), [importedAccount.id])
+        XCTAssertNil(model.authImportDraft)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+    }
+
+    @MainActor
+    func testChatGPTWebSessionImportRejectsBlankAndInvalidSessionWithoutCallingAdmin() async {
+        let probe = RemoteAdminLocalImportProbe()
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            importAuthJSONItemsHandler: { items in
+                probe.recordImport(items)
+                return ImportAccountsResult(totalCount: 1, importedCount: 1, updatedCount: 0, failures: [])
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+
+        var blank = DesktopAppModel.AuthImportDraft()
+        blank.mode = .chatGPTWebSession
+        model.authImportDraft = blank
+        await model.submitAuthImportDraft()
+        XCTAssertTrue(probe.importCalls().isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .warning)
+        XCTAssertEqual(model.banners.first?.detail, model.text(.helperAuthImportChatGPTSessionRequired))
+
+        model.banners.removeAll()
+        var invalid = DesktopAppModel.AuthImportDraft()
+        invalid.mode = .chatGPTWebSession
+        invalid.chatGPTWebSessionJSON = #"{"user":{"email":"missing-token@example.com"}}"#
+        model.authImportDraft = invalid
+        await model.submitAuthImportDraft()
+        XCTAssertTrue(probe.importCalls().isEmpty)
+        XCTAssertEqual(model.banners.first?.tone, .warning)
+        XCTAssertEqual(model.banners.first?.detail, model.text(.helperAuthImportChatGPTSessionInvalid))
+    }
+
+    @MainActor
     func testAuthImportFileModeUsesInjectedFileSelectionAndReader() async {
         let probe = RemoteAdminLocalImportProbe()
         let importedAccount = Self.makeAccount(id: "file-imported-auth", label: "File Import", accountID: "account-file")
@@ -7615,15 +7743,32 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(accountsSource.contains("self.model.presentAuthImportSheet()"))
         XCTAssertTrue(sheetSource.contains("Spacer(minLength: 0)"))
         XCTAssertTrue(sheetSource.contains("TextEditor(text: self.pastedJSONBinding)"))
+        XCTAssertTrue(sheetSource.contains("TextEditor(text: self.chatGPTWebSessionJSONBinding)"))
         XCTAssertTrue(sheetSource.contains("self.model.text(.actionPasteAuthJSON)"))
+        XCTAssertTrue(sheetSource.contains("self.model.text(.actionPasteChatGPTWebSession)"))
         XCTAssertTrue(sheetSource.contains("self.model.text(.actionChooseAuthJSONFiles)"))
+        XCTAssertTrue(sheetSource.contains("self.model.text(.helperAuthImportChatGPTSession)"))
         XCTAssertFalse(sheetSource.contains("minHeight: 460"))
         XCTAssertFalse(sheetSource.contains("idealHeight: 560"))
         XCTAssertFalse(sheetSource.contains("minHeight: 170"))
         XCTAssertTrue(preferencesSource.contains(".actionImportJSON: \"导入授权信息\""))
         XCTAssertTrue(preferencesSource.contains(".actionImportJSON: \"Import Auth\""))
+        XCTAssertTrue(preferencesSource.contains(".actionPasteChatGPTWebSession: \"ChatGPT Web Session\""))
+        XCTAssertTrue(preferencesSource.contains("CPA 授权 JSON"))
+        XCTAssertTrue(preferencesSource.contains("CPA auth JSON"))
         XCTAssertTrue(preferencesSource.contains("已登录授权 JSON"))
         XCTAssertTrue(preferencesSource.contains("logged-in auth JSON"))
+
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.text(.helperAuthImportChatGPTSessionRequired), "Paste ChatGPT Web session JSON before importing.")
+        XCTAssertEqual(model.text(.helperAuthImportChatGPTSessionInvalid), "The pasted content is not a recognizable ChatGPT Web session JSON.")
+        XCTAssertTrue(model.text(.placeholderAuthImportChatGPTSession).contains("chatgpt.com/api/auth/session"))
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.text(.helperAuthImportChatGPTSessionRequired), "请先粘贴 ChatGPT Web session JSON 再导入。")
+        XCTAssertEqual(model.text(.helperAuthImportChatGPTSessionInvalid), "粘贴的内容不是可识别的 ChatGPT Web session JSON。")
+        XCTAssertTrue(model.text(.placeholderAuthImportChatGPTSession).contains("chatgpt.com/api/auth/session"))
     }
 
     @MainActor
@@ -14070,6 +14215,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("ProxyTestImageResultsPanel"))
         XCTAssertTrue(source.contains("labelGeneratedImages"))
         XCTAssertTrue(source.contains("labelImageURL"))
+        XCTAssertTrue(source.contains("actionSaveImageAs"))
+        XCTAssertTrue(source.contains("saveOutput"))
+        XCTAssertTrue(source.contains("copyButton"))
     }
 
     func testProxyPublicAPIClientModelsUsesBaseURLAsAPIPrefix() async throws {
@@ -14186,6 +14334,130 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(result?.imageOutputs.last?.url, "https://example.com/generated.png")
         XCTAssertEqual(result?.assistantText, "https://example.com/generated.png")
         XCTAssertTrue(result?.rawResponseJSON.contains("b64_json") == true)
+    }
+
+    @MainActor
+    func testProxyTestImageSaveWritesBase64ImageBytes() async {
+        let probe = ProxyTestImageSaveProbe()
+        let expectedFilename = "proxy-test-image-20260522-141530-123-A1B2C3D4.png"
+        let destination = URL(fileURLWithPath: "/tmp/\(expectedFilename)")
+        let model = DesktopAppModel(
+            proxyTestImageSavePanelHandler: { request in
+                probe.recordPanel(request)
+                return destination
+            },
+            proxyTestImageDownloadHandler: { _ in
+                throw ProxyError.message("unexpected download")
+            },
+            proxyTestImageFileWriter: { data, url in
+                probe.recordWrite(data: data, url: url)
+            },
+            proxyTestImageFilenameTokenProvider: { "20260522-141530-123-A1B2C3D4" }
+        )
+        model.toastAutoDismissDuration = .seconds(30)
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+
+        await model.saveProxyTestImage(ProxyTestImageOutput(imageData: imageData), index: 0)
+
+        XCTAssertEqual(probe.downloads(), [])
+        XCTAssertEqual(probe.panelRequests().first?.defaultFilename, expectedFilename)
+        XCTAssertEqual(probe.panelRequests().first?.fileExtension, "png")
+        XCTAssertEqual(probe.writes().first?.0, imageData)
+        XCTAssertEqual(probe.writes().first?.1, destination)
+        XCTAssertEqual(model.proxyTestBanners.first?.title, model.text(.successProxyTestImageSaved))
+        XCTAssertEqual(model.proxyTestBanners.first?.detail, expectedFilename)
+    }
+
+    @MainActor
+    func testProxyTestImageSaveDownloadsURLOnlyImageBeforeSaving() async throws {
+        let probe = ProxyTestImageSaveProbe()
+        let imageURL = try XCTUnwrap(URL(string: "https://example.com/generated.jpg"))
+        let expectedFilename = "proxy-test-image-20260522-141531-456-B2C3D4E5.jpg"
+        let destination = URL(fileURLWithPath: "/tmp/\(expectedFilename)")
+        let imageData = Data([0xFF, 0xD8, 0xFF, 0xEE])
+        let model = DesktopAppModel(
+            proxyTestImageSavePanelHandler: { request in
+                probe.recordPanel(request)
+                return destination
+            },
+            proxyTestImageDownloadHandler: { url in
+                probe.recordDownload(url)
+                return ProxyTestDownloadedImage(data: imageData, contentType: "image/jpeg")
+            },
+            proxyTestImageFileWriter: { data, url in
+                probe.recordWrite(data: data, url: url)
+            },
+            proxyTestImageFilenameTokenProvider: { "20260522-141531-456-B2C3D4E5" }
+        )
+
+        await model.saveProxyTestImage(ProxyTestImageOutput(url: imageURL.absoluteString), index: 1)
+
+        XCTAssertEqual(probe.downloads(), [imageURL])
+        XCTAssertEqual(probe.panelRequests().first?.defaultFilename, expectedFilename)
+        XCTAssertEqual(probe.panelRequests().first?.fileExtension, "jpg")
+        XCTAssertEqual(probe.writes().first?.0, imageData)
+        XCTAssertEqual(probe.writes().first?.1, destination)
+        XCTAssertEqual(model.proxyTestBanners.first?.title, model.text(.successProxyTestImageSaved))
+    }
+
+    @MainActor
+    func testProxyTestImageSaveCancelDoesNotWriteOrPublishBanner() async {
+        let probe = ProxyTestImageSaveProbe()
+        let imageData = Data([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+        let model = DesktopAppModel(
+            proxyTestImageSavePanelHandler: { request in
+                probe.recordPanel(request)
+                return nil
+            },
+            proxyTestImageDownloadHandler: { _ in
+                throw ProxyError.message("unexpected download")
+            },
+            proxyTestImageFileWriter: { data, url in
+                probe.recordWrite(data: data, url: url)
+            },
+            proxyTestImageFilenameTokenProvider: { "20260522-141532-789-C3D4E5F6" }
+        )
+
+        await model.saveProxyTestImage(ProxyTestImageOutput(imageData: imageData), index: 0)
+
+        XCTAssertEqual(probe.panelRequests().first?.defaultFilename, "proxy-test-image-20260522-141532-789-C3D4E5F6.gif")
+        XCTAssertEqual(probe.writes().count, 0)
+        XCTAssertTrue(model.proxyTestBanners.isEmpty)
+    }
+
+    @MainActor
+    func testProxyTestImageDefaultFilenameTokenUsesTimestampAndRandomSuffix() {
+        let token = DesktopAppModel.defaultProxyTestImageFilenameToken()
+        let pattern = #"^\d{8}-\d{6}-\d{3}-[0-9A-F]{8}$"#
+
+        XCTAssertNotNil(token.range(of: pattern, options: .regularExpression), token)
+    }
+
+    @MainActor
+    func testProxyTestImageSaveDownloadFailurePublishesErrorBanner() async throws {
+        let probe = ProxyTestImageSaveProbe()
+        let imageURL = try XCTUnwrap(URL(string: "https://example.com/generated.png"))
+        let model = DesktopAppModel(
+            proxyTestImageSavePanelHandler: { request in
+                probe.recordPanel(request)
+                return URL(fileURLWithPath: "/tmp/unused.png")
+            },
+            proxyTestImageDownloadHandler: { url in
+                probe.recordDownload(url)
+                throw ProxyError.message("download unavailable")
+            },
+            proxyTestImageFileWriter: { data, url in
+                probe.recordWrite(data: data, url: url)
+            }
+        )
+
+        await model.saveProxyTestImage(ProxyTestImageOutput(url: imageURL.absoluteString), index: 0)
+
+        XCTAssertEqual(probe.downloads(), [imageURL])
+        XCTAssertEqual(probe.panelRequests().count, 0)
+        XCTAssertEqual(probe.writes().count, 0)
+        XCTAssertEqual(model.proxyTestBanners.first?.title, model.text(.errorProxyTestImageSaveFailed))
+        XCTAssertTrue(model.proxyTestBanners.first?.detail?.contains("download unavailable") == true)
     }
 
     @MainActor

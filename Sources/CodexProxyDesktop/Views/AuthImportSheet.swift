@@ -38,6 +38,17 @@ struct AuthImportSheet: View {
         )
     }
 
+    private var chatGPTWebSessionJSONBinding: Binding<String> {
+        Binding(
+            get: { self.draftBinding.wrappedValue.chatGPTWebSessionJSON },
+            set: { newValue in
+                var draft = self.draftBinding.wrappedValue
+                draft.chatGPTWebSessionJSON = newValue
+                self.draftBinding.wrappedValue = draft
+            }
+        )
+    }
+
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
         let draft = self.draftBinding.wrappedValue
@@ -85,6 +96,7 @@ struct AuthImportSheet: View {
     private var modePicker: some View {
         Picker("", selection: self.modeBinding) {
             Text(self.model.text(.actionPasteAuthJSON)).tag(DesktopAppModel.AuthImportMode.paste)
+            Text(self.model.text(.actionPasteChatGPTWebSession)).tag(DesktopAppModel.AuthImportMode.chatGPTWebSession)
             Text(self.model.text(.actionChooseAuthJSONFiles)).tag(DesktopAppModel.AuthImportMode.file)
         }
         .pickerStyle(.segmented)
@@ -99,6 +111,8 @@ struct AuthImportSheet: View {
         switch draft.mode {
         case .paste:
             self.pastePane(draft: draft, palette: palette)
+        case .chatGPTWebSession:
+            self.chatGPTWebSessionPane(draft: draft, palette: palette)
         case .file:
             self.filePane(palette: palette)
         }
@@ -135,6 +149,43 @@ struct AuthImportSheet: View {
             )
 
             Text(self.model.text(.helperAuthImportPaste))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(palette.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func chatGPTWebSessionPane(
+        draft: DesktopAppModel.AuthImportDraft,
+        palette: AppearancePalette
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: self.chatGPTWebSessionJSONBinding)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 260)
+
+                if draft.chatGPTWebSessionJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(self.model.text(.placeholderAuthImportChatGPTSession))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.textMuted)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 16)
+                        .allowsHitTesting(false)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.86 : 0.90))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(palette.border, lineWidth: 1)
+            )
+
+            Text(self.model.text(.helperAuthImportChatGPTSession))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(palette.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -185,7 +236,7 @@ struct AuthImportSheet: View {
 
             Spacer(minLength: 0)
 
-            Button(draft.mode == .paste ? self.model.text(.actionImportJSON) : self.model.text(.actionChooseAuthJSONFiles)) {
+            Button(draft.mode == .file ? self.model.text(.actionChooseAuthJSONFiles) : self.model.text(.actionImportJSON)) {
                 Task { await self.model.submitAuthImportDraft() }
             }
             .buttonStyle(AppActionButtonStyle(kind: .primary))

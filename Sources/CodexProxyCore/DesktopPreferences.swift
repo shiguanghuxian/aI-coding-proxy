@@ -282,6 +282,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelGeneratedImages
     case labelImagePreview
     case labelImageURL
+    case actionSaveImageAs
     case labelLatency
     case labelHTTPStatus
     case labelResponseText
@@ -354,6 +355,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionImportLocalAccountsToRemote
     case actionImportJSON
     case actionPasteAuthJSON
+    case actionPasteChatGPTWebSession
     case actionChooseAuthJSONFiles
     case actionExportBackup
     case actionMoreQuickActions
@@ -455,6 +457,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case placeholderSearchAccounts
     case placeholderSearchAccountOrder
     case placeholderAuthImportPaste
+    case placeholderAuthImportChatGPTSession
     case placeholderNoMatchingAccounts
     case placeholderNoMatchingAccountOrder
     case placeholderAccountOrderPosition
@@ -493,9 +496,12 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperQuickActionImportLocalAccountsToRemote
     case helperQuickActionImportJSON
     case helperAuthImportPaste
+    case helperAuthImportChatGPTSession
     case helperAuthImportFile
     case helperAuthImportPasteRequired
     case helperAuthImportJSONInvalid
+    case helperAuthImportChatGPTSessionRequired
+    case helperAuthImportChatGPTSessionInvalid
     case helperQuickActionManualAdd
     case helperQuickActionExportBackup
     case helperQuickActionTestProxy
@@ -698,6 +704,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorRequestLogsFailed
     case errorRequestLogsExportFailed
     case errorProxyTestFailed
+    case errorProxyTestImageSaveFailed
     case errorProxyAPIKeyFailed
     case errorProxyAPIKeyUsageFailed
     case errorKeepAwakeFailed
@@ -756,6 +763,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAuthorizationRemoved
     case successAccountOrderUpdated
     case successProxyTestCompleted
+    case successProxyTestImageSaved
     case successProxyModelsLoaded
     case successProxyAPIKeyAdded
     case successProxyAPIKeyUpdated
@@ -2024,6 +2032,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelGeneratedImages: "Generated Images",
             .labelImagePreview: "Image Preview",
             .labelImageURL: "Image URL",
+            .actionSaveImageAs: "Save As",
             .labelLatency: "Latency",
             .labelHTTPStatus: "HTTP Status",
             .labelResponseText: "Response Text",
@@ -2138,6 +2147,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionImportLocalAccountsToRemote: "Import Local Accounts to Remote",
             .actionImportJSON: "Import Auth",
             .actionPasteAuthJSON: "Paste JSON",
+            .actionPasteChatGPTWebSession: "ChatGPT Web Session",
             .actionChooseAuthJSONFiles: "Choose JSON Files",
             .actionExportBackup: "Export Backup",
             .actionMoreQuickActions: "More",
@@ -2239,6 +2249,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderSearchAccounts: "Search label, email, or account ID",
             .placeholderSearchAccountOrder: "Search accounts to locate them in the full order",
             .placeholderAuthImportPaste: "Paste logged-in auth JSON, an array of auth JSON objects, or a backup JSON package.",
+            .placeholderAuthImportChatGPTSession: "Paste the JSON returned by https://chatgpt.com/api/auth/session, including accessToken, sessionToken, user, account, and expires.",
             .placeholderNoMatchingAccounts: "No accounts match the current filters.",
             .placeholderNoMatchingAccountOrder: "No matching accounts in this order list.",
             .placeholderAccountOrderPosition: "Position",
@@ -2277,9 +2288,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionImportLocalAccountsToRemote: "Sync the current desktop app's local account pool to this remote host and refresh matching remote authorizations.",
             .helperQuickActionImportJSON: "Import logged-in auth JSON or an account backup JSON file.",
             .helperAuthImportPaste: "Supports a single logged-in Codex/OpenAI auth object, an array of auth objects, or an exported account backup.",
+            .helperAuthImportChatGPTSession: "Automatically converts ChatGPT Web session JSON to CPA auth JSON, then imports it through the existing auth import flow. Most Web sessions do not include refresh_token, so you may need to re-import after the access token expires.",
             .helperAuthImportFile: "Choose one or more .json files. Logged-in auth JSON and existing account backups are both supported.",
             .helperAuthImportPasteRequired: "Paste JSON content before importing.",
             .helperAuthImportJSONInvalid: "The pasted content is not valid JSON auth data.",
+            .helperAuthImportChatGPTSessionRequired: "Paste ChatGPT Web session JSON before importing.",
+            .helperAuthImportChatGPTSessionInvalid: "The pasted content is not a recognizable ChatGPT Web session JSON.",
             .helperQuickActionManualAdd: "Save a compatible upstream base URL and API key as a separate account.",
             .helperQuickActionExportBackup: "Export all saved accounts into a backup file.",
             .helperQuickActionTestProxy: "Open the test console to verify the current proxy path without leaving the app.",
@@ -2482,6 +2496,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorRequestLogsFailed: "Request logs failed to load",
             .errorRequestLogsExportFailed: "Request log export failed",
             .errorProxyTestFailed: "Proxy test failed",
+            .errorProxyTestImageSaveFailed: "Image save failed",
             .errorProxyAPIKeyFailed: "API key update failed",
             .errorProxyAPIKeyUsageFailed: "API key usage failed to load",
             .errorKeepAwakeFailed: "Keep awake failed",
@@ -2540,6 +2555,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAuthorizationRemoved: "Authorization removed",
             .successAccountOrderUpdated: "Account order updated",
             .successProxyTestCompleted: "Proxy test completed",
+            .successProxyTestImageSaved: "Image saved",
             .successProxyModelsLoaded: "Proxy model list loaded",
             .successProxyAPIKeyAdded: "API key added",
             .successProxyAPIKeyUpdated: "API key updated",
@@ -2681,6 +2697,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelGeneratedImages: "生成图片",
             .labelImagePreview: "图片预览",
             .labelImageURL: "图片 URL",
+            .actionSaveImageAs: "另存为",
             .labelLatency: "耗时",
             .labelHTTPStatus: "HTTP 状态",
             .labelResponseText: "响应文本",
@@ -2795,6 +2812,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionImportLocalAccountsToRemote: "导入本地账号到远端",
             .actionImportJSON: "导入授权信息",
             .actionPasteAuthJSON: "粘贴 JSON",
+            .actionPasteChatGPTWebSession: "ChatGPT Web Session",
             .actionChooseAuthJSONFiles: "选择 JSON 文件",
             .actionExportBackup: "导出备份",
             .actionMoreQuickActions: "更多",
@@ -2896,6 +2914,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderSearchAccounts: "搜索名称、邮箱或账号 ID",
             .placeholderSearchAccountOrder: "搜索账号，在完整顺序中快速定位",
             .placeholderAuthImportPaste: "粘贴已登录授权 JSON、授权对象数组，或账号备份 JSON。",
+            .placeholderAuthImportChatGPTSession: "粘贴 https://chatgpt.com/api/auth/session 返回的 JSON，通常包含 accessToken、sessionToken、user、account 和 expires。",
             .placeholderNoMatchingAccounts: "当前筛选条件下没有匹配的账号。",
             .placeholderNoMatchingAccountOrder: "当前顺序列表中没有匹配账号。",
             .placeholderAccountOrderPosition: "序号",
@@ -2934,9 +2953,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionImportLocalAccountsToRemote: "把当前桌面端本地账号池同步到这台远端主机，并刷新远端相同账号的授权信息。",
             .helperQuickActionImportJSON: "导入已登录授权 JSON，或从账号备份 JSON 文件恢复账号。",
             .helperAuthImportPaste: "支持单个 Codex/OpenAI 已登录授权对象、授权对象数组，或导出的账号备份包。",
+            .helperAuthImportChatGPTSession: "会自动把 ChatGPT Web session JSON 转换为 CPA 授权 JSON，然后复用现有导入链路写入账号池。大多数 Web session 没有 refresh_token，access token 过期后可能需要重新导入。",
             .helperAuthImportFile: "选择一个或多个 .json 文件；已登录授权 JSON 和现有账号备份都可以导入。",
             .helperAuthImportPasteRequired: "请先粘贴 JSON 内容再导入。",
             .helperAuthImportJSONInvalid: "粘贴的内容不是有效的授权 JSON。",
+            .helperAuthImportChatGPTSessionRequired: "请先粘贴 ChatGPT Web session JSON 再导入。",
+            .helperAuthImportChatGPTSessionInvalid: "粘贴的内容不是可识别的 ChatGPT Web session JSON。",
             .helperQuickActionManualAdd: "手动保存兼容上游根地址和 API Key，作为独立账号接入。",
             .helperQuickActionExportBackup: "把当前保存的全部账号导出成备份文件。",
             .helperQuickActionTestProxy: "直接打开测试控制台，在应用内验证当前代理链路是否正常。",
@@ -3139,6 +3161,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorRequestLogsFailed: "请求日志加载失败",
             .errorRequestLogsExportFailed: "请求日志导出失败",
             .errorProxyTestFailed: "代理测试失败",
+            .errorProxyTestImageSaveFailed: "图片保存失败",
             .errorProxyAPIKeyFailed: "API Key 更新失败",
             .errorProxyAPIKeyUsageFailed: "API Key 用量加载失败",
             .errorKeepAwakeFailed: "常亮开启失败",
@@ -3197,6 +3220,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAuthorizationRemoved: "本地授权已移除",
             .successAccountOrderUpdated: "账号顺序已更新",
             .successProxyTestCompleted: "代理测试已完成",
+            .successProxyTestImageSaved: "图片已保存",
             .successProxyModelsLoaded: "模型列表已加载",
             .successProxyAPIKeyAdded: "API Key 已添加",
             .successProxyAPIKeyUpdated: "API Key 已更新",

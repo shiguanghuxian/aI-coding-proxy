@@ -4875,6 +4875,83 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
+    func testChatGPTWebSessionConvertsToImportableCPAAuthJSON() async throws {
+        let upstream = Self.makeChatGPTUsageApplication(usagePlanType: "plus")
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let session = #"""
+            {
+              "user": {
+                "id": "user-web-session",
+                "email": "web-session@example.com"
+              },
+              "account": {
+                "id": "account-web-session",
+                "planType": "plus"
+              },
+              "accessToken": "access-web-session",
+              "sessionToken": "session-web-session",
+              "expires": "2099-08-06T14:29:36.155Z"
+            }
+            """#
+            let conversions = try ChatGPTWebSessionCPAConverter()
+                .convertPastedSessions(session, now: Date(timeIntervalSince1970: 1_700_000_000))
+            XCTAssertEqual(conversions.count, 1)
+
+            let cpa = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(conversions[0].cpaJSON.utf8)) as? [String: Any])
+            XCTAssertEqual(cpa["type"] as? String, "codex")
+            XCTAssertEqual(cpa["access_token"] as? String, "access-web-session")
+            XCTAssertEqual(cpa["session_token"] as? String, "session-web-session")
+            XCTAssertEqual(cpa["refresh_token"] as? String, "")
+            XCTAssertEqual(cpa["account_id"] as? String, "account-web-session")
+            XCTAssertEqual(cpa["email"] as? String, "web-session@example.com")
+            XCTAssertEqual(cpa["chatgpt_plan_type"] as? String, "plus")
+            XCTAssertEqual(cpa["id_token_synthetic"] as? Bool, true)
+
+            let idToken = try XCTUnwrap(cpa["id_token"] as? String)
+            let idTokenParts = idToken.split(separator: ".")
+            XCTAssertEqual(idTokenParts.count, 3)
+            let payloadData = try XCTUnwrap(Data(base64Encoded: String(idTokenParts[1])
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+                .padding(toLength: ((idTokenParts[1].count + 3) / 4) * 4, withPad: "=", startingAt: 0)))
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: payloadData) as? [String: Any])
+            let auth = try XCTUnwrap(payload["https://api.openai.com/auth"] as? [String: Any])
+            XCTAssertEqual(payload["email"] as? String, "web-session@example.com")
+            XCTAssertEqual(auth["chatgpt_account_id"] as? String, "account-web-session")
+            XCTAssertEqual(auth["chatgpt_plan_type"] as? String, "plus")
+
+            let service = try Self.makeAccountService(dataDirectory: directory)
+            var config = AppConfig()
+            config.chatGPTBaseURL = "http://localhost:\(client.port ?? 0)"
+            let result = try await service.importAuthJSONAccounts(
+                items: [.init(source: "chatgpt-web-session-cpa.json", content: conversions[0].cpaJSON)],
+                config: config
+            )
+
+            XCTAssertEqual(result.importedCount, 1)
+            XCTAssertTrue(result.failures.isEmpty)
+            let accounts = try await service.listAccounts()
+            let account = try XCTUnwrap(accounts.first)
+            XCTAssertEqual(account.authMode, .chatGPT)
+            XCTAssertEqual(account.accountID, "account-web-session")
+            XCTAssertEqual(account.email, "web-session@example.com")
+            XCTAssertEqual(account.label, "web-session@example.com")
+            XCTAssertEqual(account.effectivePlanType, "plus")
+        }
+    }
+
+    func testChatGPTWebSessionConverterRejectsUnrecognizableSessionJSON() throws {
+        XCTAssertThrowsError(
+            try ChatGPTWebSessionCPAConverter().convertPastedSessions(#"{"user":{"email":"missing-token@example.com"}}"#)
+        ) { error in
+            XCTAssertEqual(error as? ChatGPTWebSessionCPAConversionError, .noSessionObjects)
+        }
+    }
+
     func testExportAndReimportBackupPreservesDisabledState() async throws {
         let sourceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let targetDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

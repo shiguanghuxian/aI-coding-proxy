@@ -329,9 +329,12 @@ struct ProxyTestConsoleView: View {
                         previewTitle: self.model.text(.labelImagePreview),
                         urlTitle: self.model.text(.labelImageURL),
                         copyTitle: self.model.text(.commonCopy),
+                        saveTitle: self.model.text(.actionSaveImageAs),
                         outputs: result.imageOutputs
                     ) { url in
                         self.model.copyToPasteboard(url, context: .copyEndpoint)
+                    } saveOutput: { output, index in
+                        Task { await self.model.saveProxyTestImage(output, index: index) }
                     }
                 }
 
@@ -716,8 +719,10 @@ private struct ProxyTestImageResultsPanel: View {
     let previewTitle: String
     let urlTitle: String
     let copyTitle: String
+    let saveTitle: String
     let outputs: [ProxyTestImageOutput]
     let copyURL: (String) -> Void
+    let saveOutput: (ProxyTestImageOutput, Int) -> Void
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
@@ -729,20 +734,24 @@ private struct ProxyTestImageResultsPanel: View {
                 .foregroundStyle(palette.textMuted)
 
             VStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(self.outputs.enumerated()), id: \.offset) { _, output in
-                    self.outputCard(output, palette: palette)
+                ForEach(Array(self.outputs.enumerated()), id: \.offset) { index, output in
+                    self.outputCard(output, index: index, palette: palette)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func outputCard(_ output: ProxyTestImageOutput, palette: AppearancePalette) -> some View {
+    private func outputCard(_ output: ProxyTestImageOutput, index: Int, palette: AppearancePalette) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if let image = self.image(from: output.imageData) {
-                Text(self.previewTitle)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(palette.textSecondary)
+                HStack(spacing: 10) {
+                    Text(self.previewTitle)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(palette.textSecondary)
+                    Spacer(minLength: 12)
+                    self.saveButton(output, index: index, palette: palette)
+                }
 
                 Image(nsImage: image)
                     .resizable()
@@ -772,17 +781,22 @@ private struct ProxyTestImageResultsPanel: View {
                     HStack(spacing: 10) {
                         self.urlText(url, palette: palette)
                         Spacer(minLength: 12)
-                        self.copyButton(url, palette: palette)
+                        self.urlActionButtons(output, index: index, url: url, palette: palette)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
                         self.urlText(url, palette: palette)
                         HStack {
                             Spacer()
-                            self.copyButton(url, palette: palette)
+                            self.urlActionButtons(output, index: index, url: url, palette: palette)
                         }
                     }
                 }
+            }
+
+            if output.imageData == nil, output.url == nil {
+                self.saveButton(output, index: index, palette: palette)
+                    .disabled(true)
             }
         }
         .padding(14)
@@ -815,6 +829,21 @@ private struct ProxyTestImageResultsPanel: View {
             self.copyURL(url)
         }
         .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+    }
+
+    private func saveButton(_ output: ProxyTestImageOutput, index: Int, palette: AppearancePalette) -> some View {
+        Button(self.saveTitle) {
+            self.saveOutput(output, index)
+        }
+        .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+        .disabled(output.imageData == nil && (output.url?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
+    }
+
+    private func urlActionButtons(_ output: ProxyTestImageOutput, index: Int, url: String, palette: AppearancePalette) -> some View {
+        HStack(spacing: 8) {
+            self.saveButton(output, index: index, palette: palette)
+            self.copyButton(url, palette: palette)
+        }
     }
 
     private func image(from data: Data?) -> NSImage? {
