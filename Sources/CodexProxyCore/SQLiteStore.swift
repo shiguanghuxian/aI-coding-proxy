@@ -89,6 +89,39 @@ public final class SQLiteStore: @unchecked Sendable {
         try self.writeSetting(key: "app_config", value: String(decoding: data, as: UTF8.self))
     }
 
+    private func migrateProxyAPIKeyAllowedAccountKeyIfNeeded(
+        from oldAccountKey: String,
+        to newAccountKey: String
+    ) throws {
+        let oldAccountKey = oldAccountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newAccountKey = newAccountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard oldAccountKey.isEmpty == false, newAccountKey.isEmpty == false, oldAccountKey != newAccountKey else {
+            return
+        }
+        guard let json = try self.readSetting(key: "app_config"), let data = json.data(using: .utf8) else {
+            return
+        }
+
+        var config = try Helpers.readJSON(AppConfig.self, from: data)
+        var didChange = false
+        config.proxyAPIKeys = config.proxyAPIKeys.map { record in
+            var copy = record
+            let migratedKeys = copy.allowedAccountKeys.map { accountKey in
+                accountKey == oldAccountKey ? newAccountKey : accountKey
+            }
+            let normalizedKeys = ProxyAPIKeyRecord.normalizedAllowedAccountKeys(migratedKeys)
+            if normalizedKeys != copy.allowedAccountKeys {
+                copy.allowedAccountKeys = normalizedKeys
+                didChange = true
+            }
+            return copy
+        }
+
+        if didChange {
+            try self.saveConfig(config)
+        }
+    }
+
     public func upsertAccount(_ record: AccountRecord) throws -> Bool {
         let key = try self.secretStore.masterKey()
         let encrypted = try CryptoBox.seal(Data(record.authJSON.utf8), using: key)
@@ -233,64 +266,72 @@ public final class SQLiteStore: @unchecked Sendable {
     }
 
     public func updateManualAPIKeyAccount(id: String, record: AccountRecord) throws {
-        guard try self.querySingle(
-            "SELECT id FROM accounts WHERE id = ?;",
-            bindings: [.text(id)]
-        ) != nil else {
-            throw ProxyError.message("未找到要更新的账号")
-        }
+        try self.withDatabaseTransaction {
+            guard let existingRow = try self.querySingle(
+                "SELECT principal_id, account_id FROM accounts WHERE id = ?;",
+                bindings: [.text(id)]
+            ) else {
+                throw ProxyError.message("未找到要更新的账号")
+            }
+            let previousAccountKey = "\(existingRow.text("principal_id"))|\(existingRow.text("account_id"))"
 
-        if let existing = try self.lookupExistingAccountMetadata(accountKey: record.accountKey),
-           existing.id != id
-        {
-            throw ProxyError.message("已存在相同的 API Key 账号")
-        }
+            if let existing = try self.lookupExistingAccountMetadata(accountKey: record.accountKey),
+               existing.id != id
+            {
+                throw ProxyError.message("已存在相同的 API Key 账号")
+            }
 
-        let key = try self.secretStore.masterKey()
-        let encrypted = try CryptoBox.seal(Data(record.authJSON.utf8), using: key)
-        let usageData = try record.usage.map { try Helpers.encodeJSON($0) }
-        let modelRoutingJSON = try record.modelRouting.map {
-            String(decoding: try Helpers.encodeJSON($0), as: UTF8.self)
-        }
+            let key = try self.secretStore.masterKey()
+            let encrypted = try CryptoBox.seal(Data(record.authJSON.utf8), using: key)
+            let usageData = try record.usage.map { try Helpers.encodeJSON($0) }
+            let modelRoutingJSON = try record.modelRouting.map {
+                String(decoding: try Helpers.encodeJSON($0), as: UTF8.self)
+            }
 
-        try self.execute(
-            """
-            UPDATE accounts
-            SET label = ?, principal_id = ?, email = ?, account_id = ?, plan_type = ?, auth_blob = ?, updated_at = ?,
-                enabled = ?, selection_order = ?, consecutive_failure_count = ?, cooldown_until = ?, usage_json = ?,
-                usage_error = ?, auth_refresh_blocked = ?, auth_refresh_error = ?, auth_mode = ?, provider_preset = ?,
-                upstream_base_url = ?, usage_windows_visible = ?, managed_proxy_node_name = ?, model_routing_json = ?,
-                automatic_cooldown_disabled = ?
-            WHERE id = ?;
-            """,
-            bindings: [
-                .text(record.label),
-                .text(record.principalID),
-                .text(record.email),
-                .text(record.accountID),
-                .text(record.planType),
-                .blob(encrypted),
-                .int(record.updatedAt),
-                .int(record.enabled ? 1 : 0),
-                .int(record.selectionOrder),
-                .int(record.consecutiveFailureCount),
-                .int(record.cooldownUntil),
-                .blob(usageData),
-                .text(record.usageError),
-                .int(record.authRefreshBlocked ? 1 : 0),
-                .text(record.authRefreshError),
-                .text(record.authMode.rawValue),
-                .text(record.providerPreset.rawValue),
-                .text(record.upstreamBaseURL),
-                .int(record.usageWindowsVisible ? 1 : 0),
-                .text(record.managedProxyNodeName),
-                .text(modelRoutingJSON),
-                .int(record.automaticCooldownDisabled ? 1 : 0),
-                .text(id),
-            ]
-        )
-        guard sqlite3_changes(self.db) > 0 else {
-            throw ProxyError.message("未找到要更新的账号")
+            try self.execute(
+                """
+                UPDATE accounts
+                SET label = ?, principal_id = ?, email = ?, account_id = ?, plan_type = ?, auth_blob = ?, updated_at = ?,
+                    enabled = ?, selection_order = ?, consecutive_failure_count = ?, cooldown_until = ?, usage_json = ?,
+                    usage_error = ?, auth_refresh_blocked = ?, auth_refresh_error = ?, auth_mode = ?, provider_preset = ?,
+                    upstream_base_url = ?, usage_windows_visible = ?, managed_proxy_node_name = ?, model_routing_json = ?,
+                    automatic_cooldown_disabled = ?
+                WHERE id = ?;
+                """,
+                bindings: [
+                    .text(record.label),
+                    .text(record.principalID),
+                    .text(record.email),
+                    .text(record.accountID),
+                    .text(record.planType),
+                    .blob(encrypted),
+                    .int(record.updatedAt),
+                    .int(record.enabled ? 1 : 0),
+                    .int(record.selectionOrder),
+                    .int(record.consecutiveFailureCount),
+                    .int(record.cooldownUntil),
+                    .blob(usageData),
+                    .text(record.usageError),
+                    .int(record.authRefreshBlocked ? 1 : 0),
+                    .text(record.authRefreshError),
+                    .text(record.authMode.rawValue),
+                    .text(record.providerPreset.rawValue),
+                    .text(record.upstreamBaseURL),
+                    .int(record.usageWindowsVisible ? 1 : 0),
+                    .text(record.managedProxyNodeName),
+                    .text(modelRoutingJSON),
+                    .int(record.automaticCooldownDisabled ? 1 : 0),
+                    .text(id),
+                ]
+            )
+            guard sqlite3_changes(self.db) > 0 else {
+                throw ProxyError.message("未找到要更新的账号")
+            }
+
+            try self.migrateProxyAPIKeyAllowedAccountKeyIfNeeded(
+                from: previousAccountKey,
+                to: record.accountKey
+            )
         }
     }
 

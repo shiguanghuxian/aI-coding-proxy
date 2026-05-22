@@ -536,6 +536,57 @@ private final class ReasoningCacheMaintenanceProbe: @unchecked Sendable {
     }
 }
 
+private final class AccountBatchRemoveProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedAccounts: [AccountSummary]
+    private var storedRequests: [BatchDeleteAccountsRequest] = []
+    private var storedConfirmations: [DesktopAppModel.BatchRemoveAccountsConfirmationContent] = []
+    private var shouldConfirm: Bool
+
+    init(accounts: [AccountSummary], shouldConfirm: Bool = true) {
+        self.storedAccounts = accounts
+        self.shouldConfirm = shouldConfirm
+    }
+
+    func accounts() -> [AccountSummary] {
+        self.lock.withLock { self.storedAccounts }
+    }
+
+    func remove(_ request: BatchDeleteAccountsRequest) -> BatchDeleteAccountsResult {
+        self.lock.withLock {
+            self.storedRequests.append(request)
+            let existingByID = Dictionary(uniqueKeysWithValues: self.storedAccounts.map { ($0.id, $0) })
+            var deleted: [DeleteAccountResult] = []
+            var failures: [BatchDeleteAccountFailure] = []
+            for id in request.accountIDs {
+                if let account = existingByID[id] {
+                    deleted.append(DeleteAccountResult(id: account.id, accountKey: account.accountKey, label: account.label))
+                } else {
+                    failures.append(BatchDeleteAccountFailure(id: id, error: "missing"))
+                }
+            }
+            let deletedIDs = Set(deleted.map(\.id))
+            self.storedAccounts.removeAll { deletedIDs.contains($0.id) }
+            return BatchDeleteAccountsResult(deleted: deleted, failures: failures)
+        }
+    }
+
+    func confirm(_ content: DesktopAppModel.BatchRemoveAccountsConfirmationContent) -> Bool {
+        self.lock.withLock {
+            self.storedConfirmations.append(content)
+            return self.shouldConfirm
+        }
+    }
+
+    func requests() -> [BatchDeleteAccountsRequest] {
+        self.lock.withLock { self.storedRequests }
+    }
+
+    func confirmations() -> [DesktopAppModel.BatchRemoveAccountsConfirmationContent] {
+        self.lock.withLock { self.storedConfirmations }
+    }
+}
+
 private final class ProxyTestImageSaveProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var storedPanelRequests: [ProxyTestImageSavePanelRequest] = []
@@ -7333,8 +7384,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelImagePreview), "Image Preview")
         XCTAssertEqual(model.text(.labelImageURL), "Image URL")
         XCTAssertEqual(model.text(.actionSaveImageAs), "Save As")
-        XCTAssertEqual(model.text(.successProxyTestImageSaved), "Image saved")
-        XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "Image save failed")
+        XCTAssertEqual(model.text(.successProxyTestImageSaved), "Image Saved")
+        XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "Image Save Failed")
         XCTAssertEqual(
             model.text(.helperQuickActionTestProxy),
             "Open the test console to verify the current proxy path without leaving the app."
@@ -10524,6 +10575,89 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(menuSource.contains("self.model.text(.actionStopAccountCooldown)"))
         XCTAssertTrue(menuSource.contains("self.model.toggleAccountEnabled(self.account)"))
         XCTAssertTrue(menuSource.contains("self.model.removeAccount(self.account)"))
+    }
+
+    @MainActor
+    func testAccountBatchRemoveSelectVisibleOnlyUsesFilteredAccounts() {
+        let model = DesktopAppModel()
+        let first = Self.makeAccount(id: "account-1", label: "First", accountID: "acct-1")
+        let second = Self.makeAccount(id: "account-2", label: "Second", accountID: "acct-2")
+        model.accounts = [first, second]
+        model.accountPoolFilters = AccountPoolFilterState(searchQuery: "First")
+
+        model.enterAccountBatchRemoveMode()
+        model.selectVisibleAccountsForBatchRemove()
+
+        XCTAssertTrue(model.isAccountBatchRemoveModeEnabled)
+        XCTAssertEqual(model.selectedBatchRemoveAccountIDs, Set([first.id]))
+        XCTAssertFalse(model.isSelectedForBatchRemove(second))
+    }
+
+    @MainActor
+    func testRemoveSelectedBatchAccountsConfirmsCallsAdminRefreshesAndPublishesSuccess() async {
+        let first = Self.makeAccount(id: "account-1", label: "First", accountID: "acct-1")
+        let second = Self.makeAccount(id: "account-2", label: "Second", accountID: "acct-2")
+        let probe = AccountBatchRemoveProbe(accounts: [first, second])
+        let admin = AdminAPIClient(
+            accountsHandler: { probe.accounts() },
+            batchRemoveAccountsHandler: { request in probe.remove(request) }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmBatchRemoveAccountsHandler: { content in probe.confirm(content) }
+        )
+        model.accounts = [first, second]
+        model.enterAccountBatchRemoveMode()
+        model.toggleBatchRemoveSelection(for: first)
+        model.toggleBatchRemoveSelection(for: second)
+
+        await model.removeSelectedBatchAccounts()
+
+        XCTAssertEqual(probe.requests().map(\.accountIDs), [[first.id, second.id]])
+        XCTAssertEqual(probe.confirmations().count, 1)
+        XCTAssertTrue(probe.confirmations()[0].informativeText.contains(first.label))
+        XCTAssertTrue(model.accounts.isEmpty)
+        XCTAssertFalse(model.isAccountBatchRemoveModeEnabled)
+        XCTAssertTrue(model.selectedBatchRemoveAccountIDs.isEmpty)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successBatchRemoveAccounts))
+    }
+
+    @MainActor
+    func testRemoveSelectedBatchAccountsCancellationDoesNotCallAdmin() async {
+        let account = Self.makeAccount(id: "account-1", label: "First", accountID: "acct-1")
+        let probe = AccountBatchRemoveProbe(accounts: [account], shouldConfirm: false)
+        let admin = AdminAPIClient(
+            accountsHandler: { probe.accounts() },
+            batchRemoveAccountsHandler: { request in probe.remove(request) }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmBatchRemoveAccountsHandler: { content in probe.confirm(content) }
+        )
+        model.accounts = [account]
+        model.enterAccountBatchRemoveMode()
+        model.toggleBatchRemoveSelection(for: account)
+
+        await model.removeSelectedBatchAccounts()
+
+        XCTAssertEqual(probe.confirmations().count, 1)
+        XCTAssertTrue(probe.requests().isEmpty)
+        XCTAssertEqual(model.accounts.map(\.id), [account.id])
+        XCTAssertTrue(model.isAccountBatchRemoveModeEnabled)
+    }
+
+    func testAccountBatchRemoveUIAndSettingsGeminiOAuthFieldsAreDeclared() throws {
+        let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
+
+        XCTAssertTrue(accountsSource.contains("account-pool-batch-remove-button"))
+        XCTAssertTrue(accountsSource.contains("AccountBatchRemoveBar"))
+        XCTAssertTrue(accountsSource.contains("AccountBatchSelectionMark"))
+        XCTAssertTrue(accountsSource.contains("self.model.selectVisibleAccountsForBatchRemove()"))
+        XCTAssertTrue(accountsSource.contains("self.model.removeSelectedBatchAccounts()"))
+        XCTAssertTrue(settingsSource.contains(".sectionGeminiOAuth"))
+        XCTAssertTrue(settingsSource.contains("$model.settings.geminiOAuth.clientID"))
+        XCTAssertTrue(settingsSource.contains("$model.settings.geminiOAuth.clientSecret"))
     }
 
     @MainActor
@@ -14339,7 +14473,7 @@ final class CodexProxyDesktopTests: XCTestCase {
     @MainActor
     func testProxyTestImageSaveWritesBase64ImageBytes() async {
         let probe = ProxyTestImageSaveProbe()
-        let expectedFilename = "proxy-test-image-20260522-141530-123-A1B2C3D4.png"
+        let expectedFilename = "proxy-test-image-1-20260522-141530-123-A1B2C3D4.png"
         let destination = URL(fileURLWithPath: "/tmp/\(expectedFilename)")
         let model = DesktopAppModel(
             proxyTestImageSavePanelHandler: { request in
@@ -14372,7 +14506,7 @@ final class CodexProxyDesktopTests: XCTestCase {
     func testProxyTestImageSaveDownloadsURLOnlyImageBeforeSaving() async throws {
         let probe = ProxyTestImageSaveProbe()
         let imageURL = try XCTUnwrap(URL(string: "https://example.com/generated.jpg"))
-        let expectedFilename = "proxy-test-image-20260522-141531-456-B2C3D4E5.jpg"
+        let expectedFilename = "proxy-test-image-2-20260522-141531-456-B2C3D4E5.jpg"
         let destination = URL(fileURLWithPath: "/tmp/\(expectedFilename)")
         let imageData = Data([0xFF, 0xD8, 0xFF, 0xEE])
         let model = DesktopAppModel(
@@ -14420,7 +14554,7 @@ final class CodexProxyDesktopTests: XCTestCase {
 
         await model.saveProxyTestImage(ProxyTestImageOutput(imageData: imageData), index: 0)
 
-        XCTAssertEqual(probe.panelRequests().first?.defaultFilename, "proxy-test-image-20260522-141532-789-C3D4E5F6.gif")
+        XCTAssertEqual(probe.panelRequests().first?.defaultFilename, "proxy-test-image-1-20260522-141532-789-C3D4E5F6.gif")
         XCTAssertEqual(probe.writes().count, 0)
         XCTAssertTrue(model.proxyTestBanners.isEmpty)
     }

@@ -35,9 +35,9 @@ public enum GeminiAuthService {
 
     public static func prepareOAuthLogin(
         callbackPort: Int,
-        config _: AppConfig
+        config: AppConfig
     ) throws -> (PendingOAuthLogin, PreparedOAuthLogin) {
-        let credentials = try self.oauthCredentials()
+        let credentials = try self.oauthCredentials(config: config)
         let state = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let codeVerifier = [
             UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
@@ -130,7 +130,7 @@ public enum GeminiAuthService {
             throw ProxyError.message("Google / Gemini callback 缺少 code")
         }
 
-        let credentials = try self.oauthCredentials()
+        let credentials = try self.oauthCredentials(config: config)
         let tokenURL = self.firstNonEmpty([tokenURLOverride, Self.defaultTokenURL]) ?? Self.defaultTokenURL
         let codeAssistBaseURL = self.firstNonEmpty([codeAssistBaseURLOverride, Self.defaultCodeAssistEndpoint])
             ?? Self.defaultCodeAssistEndpoint
@@ -241,7 +241,7 @@ public enum GeminiAuthService {
             throw ProxyError.message("Google / Gemini 授权缺少 refresh_token，请重新登录")
         }
 
-        let credentials = try self.oauthCredentials()
+        let credentials = try self.oauthCredentials(config: config)
         let tokenURL = self.extractTokenURL(from: payload) ?? Self.defaultTokenURL
         let response = try await HTTPClientFactory.request(
             config: config,
@@ -1019,17 +1019,23 @@ public enum GeminiAuthService {
         var clientSecret: String
     }
 
-    private static func oauthCredentials() throws -> OAuthCredentials {
-        let clientID = self.defaultOAuthClientID
+    private static func oauthCredentials(config: AppConfig) throws -> OAuthCredentials {
+        let clientID = self.firstNonEmpty([
+            config.geminiOAuth.clientID,
+            self.defaultOAuthClientID,
+        ]) ?? ""
         guard !clientID.isEmpty else {
             throw ProxyError.message(
-                "Google / Gemini OAuth 缺少 client id，请设置 \(self.oauthClientIDEnvironmentVariable) 环境变量"
+                "Google / Gemini OAuth 缺少 client id，请在设置 > 常规 > Google / Gemini OAuth 中填写 Client ID，或设置 \(self.oauthClientIDEnvironmentVariable) 环境变量。"
             )
         }
-        let clientSecret = self.defaultOAuthClientSecret
+        let clientSecret = self.firstNonEmpty([
+            config.geminiOAuth.clientSecret,
+            self.defaultOAuthClientSecret,
+        ]) ?? ""
         guard !clientSecret.isEmpty else {
             throw ProxyError.message(
-                "Google / Gemini OAuth 缺少 client secret，请设置 \(self.oauthClientSecretEnvironmentVariable) 环境变量"
+                "Google / Gemini OAuth 缺少 client secret，请在设置 > 常规 > Google / Gemini OAuth 中填写 Client Secret，或设置 \(self.oauthClientSecretEnvironmentVariable) 环境变量。"
             )
         }
         return OAuthCredentials(clientID: clientID, clientSecret: clientSecret)

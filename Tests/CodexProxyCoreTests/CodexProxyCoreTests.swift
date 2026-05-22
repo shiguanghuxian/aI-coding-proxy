@@ -63,8 +63,26 @@ final class CodexProxyCoreTests: XCTestCase {
             XCTAssertThrowsError(
                 try GeminiAuthService.prepareOAuthLogin(callbackPort: 1455, config: AppConfig())
             ) { error in
-                XCTAssertTrue(String(describing: error).contains(GeminiAuthService.oauthClientIDEnvironmentVariable))
+                XCTAssertTrue(String(describing: error).contains("设置 > 常规 > Google / Gemini OAuth"))
             }
+        }
+    }
+
+    func testPrepareGeminiOAuthLoginUsesSettingsCredentialsBeforeEnvironment() async throws {
+        try await Self.withEnvironment([
+            GeminiAuthService.oauthClientIDEnvironmentVariable: "env-client-id",
+            GeminiAuthService.oauthClientSecretEnvironmentVariable: "env-client-secret",
+        ]) {
+            let config = AppConfig(
+                geminiOAuth: GeminiOAuthConfig(
+                    clientID: "settings-client-id",
+                    clientSecret: "settings-client-secret"
+                )
+            )
+            let prepared = try GeminiAuthService.prepareOAuthLogin(callbackPort: 1455, config: config).1
+            let components = try XCTUnwrap(URLComponents(string: prepared.authURL))
+            let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            XCTAssertEqual(query["client_id"], "settings-client-id")
         }
     }
 
@@ -7172,6 +7190,22 @@ final class CodexProxyCoreTests: XCTestCase {
         record.consecutiveFailureCount = 3
         record.cooldownUntil = Helpers.now() + 3_600
         XCTAssertFalse(try store.upsertAccount(record))
+        var config = AppConfig(
+            proxyAPIKey: "sk-local-restricted",
+            proxyAPIKeys: [
+                ProxyAPIKeyRecord(
+                    id: "restricted-local-key",
+                    label: "Restricted Local Key",
+                    key: "sk-local-restricted",
+                    dataSource: .openAI,
+                    allowedAccountKeys: [record.accountKey],
+                    enabled: true,
+                    createdAt: 1
+                ),
+            ],
+            primaryProxyAPIKeyID: "restricted-local-key"
+        )
+        try store.saveConfig(config)
 
         try store.recordTrace(
             ProxyRequestTrace(
@@ -7225,6 +7259,9 @@ final class CodexProxyCoreTests: XCTestCase {
         let logs = try store.loadAllRequestLogs(query: RequestLogQuery())
         XCTAssertEqual(logs.count, 1)
         XCTAssertEqual(logs[0].accountKey, record.accountKey)
+
+        config = try store.loadConfig()
+        XCTAssertEqual(config.proxyAPIKeys.first?.allowedAccountKeys, [updated.accountKey])
     }
 
     func testUpdateManualAPIKeyAccountChangingBaseURLWithSameAPIKeyReplacesIdentity() async throws {
@@ -9813,7 +9850,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertFalse(encodedText.contains("geminiModelMappings"))
     }
 
-    func testAppConfigIgnoresLegacyGeminiOAuthSettingsAndDropsThemOnEncode() throws {
+    func testAppConfigDecodesLegacyGeminiOAuthSettingsAndDropsUnsupportedFieldsOnEncode() throws {
         let json = """
         {
           "proxy_api_key": "sk-local-test",
@@ -9833,9 +9870,12 @@ final class CodexProxyCoreTests: XCTestCase {
         let encodedText = String(decoding: try Helpers.encodeJSON(decoded), as: UTF8.self)
 
         XCTAssertEqual(decoded.proxyAPIKey, "sk-local-test")
-        XCTAssertFalse(encodedText.contains("gemini_oauth"))
-        XCTAssertFalse(encodedText.contains("geminiOAuth"))
-        XCTAssertFalse(encodedText.contains("client_secret"))
+        XCTAssertEqual(decoded.geminiOAuth.clientID, "gemini-client-id")
+        XCTAssertEqual(decoded.geminiOAuth.clientSecret, "gemini-client-secret")
+        XCTAssertTrue(encodedText.contains("gemini_oauth"))
+        XCTAssertTrue(encodedText.contains("client_id"))
+        XCTAssertTrue(encodedText.contains("client_secret"))
+        XCTAssertFalse(encodedText.contains("user_project_id"))
     }
 
     func testAppConfigNormalizesPrimaryProxyAPIKeySelection() {

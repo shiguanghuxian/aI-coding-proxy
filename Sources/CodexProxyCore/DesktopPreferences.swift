@@ -254,6 +254,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelChatGPTBaseURL
     case labelDaemonBinaryOverride
     case labelStatsRetentionDays
+    case labelGeminiOAuthClientID
+    case labelGeminiOAuthClientSecret
     case labelLanguage
     case labelTheme
     case labelDisplay
@@ -334,6 +336,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionLogs
     case sectionAppearance
     case sectionGeneral
+    case sectionGeminiOAuth
     case sectionOutboundProxy
     case sectionBehavior
     case sectionService
@@ -419,6 +422,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionEnableAccount
     case actionDisableAccount
     case actionRemoveAuthorization
+    case actionBatchRemoveAccounts
+    case actionSelectVisibleAccounts
+    case actionClearBatchSelection
+    case actionRemoveSelectedAccounts
+    case actionDoneBatchRemoveAccounts
     case actionManageAccountOrder
     case actionSaveAccountOrder
     case actionAccountOrderMoveToTop
@@ -507,6 +515,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperQuickActionTestProxy
     case helperMoreQuickActions
     case helperRefreshAccountList
+    case helperBatchRemoveAccounts
     case helperQuickActionRefreshUsage
     case helperAccountCardLastError
     case helperSelectionPolicy
@@ -530,6 +539,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperReasoningCacheAccountIsolation
     case helperReasoningCacheSelectAccount
     case helperReasoningCacheNoEntries
+    case helperGeminiOAuthSettings
     case helperAnthropicConnection
     case helperGeminiConnection
     case helperOutboundProxyGlobalModeDisabled
@@ -593,6 +603,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case confirmStopAccountCooldownAction
     case confirmRemoveAuthorizationTitle
     case confirmRemoveAuthorizationMessage
+    case confirmBatchRemoveAccountsTitle
+    case confirmBatchRemoveAccountsAction
     case confirmImportLocalAccountsToRemoteTitle
     case confirmImportLocalAccountsToRemoteAction
     case confirmDeleteRemoteHostTitle
@@ -761,6 +773,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAccountEnabled
     case successAccountDisabled
     case successAuthorizationRemoved
+    case successBatchRemoveAccounts
+    case warningBatchRemoveAccountsPartial
     case successAccountOrderUpdated
     case successProxyTestCompleted
     case successProxyTestImageSaved
@@ -2060,6 +2074,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelChatGPTBaseURL: "ChatGPT Base URL",
             .labelDaemonBinaryOverride: "Daemon Binary Override",
             .labelStatsRetentionDays: "Stats Retention Days",
+            .labelGeminiOAuthClientID: "Client ID",
+            .labelGeminiOAuthClientSecret: "Client Secret",
             .labelLanguage: "Language",
             .labelTheme: "Theme",
             .labelDisplay: "Display",
@@ -2126,6 +2142,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionLogs: "Logs",
             .sectionAppearance: "Appearance",
             .sectionGeneral: "General",
+            .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOutboundProxy: "Outbound Proxy",
             .sectionBehavior: "Behavior",
             .sectionService: "Service",
@@ -2211,6 +2228,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionEnableAccount: "Enable",
             .actionDisableAccount: "Disable",
             .actionRemoveAuthorization: "Remove Authorization",
+            .actionBatchRemoveAccounts: "Batch Remove",
+            .actionSelectVisibleAccounts: "Select Visible",
+            .actionClearBatchSelection: "Clear Selection",
+            .actionRemoveSelectedAccounts: "Remove Selected",
+            .actionDoneBatchRemoveAccounts: "Done",
             .actionManageAccountOrder: "Adjust Usage Order",
             .actionSaveAccountOrder: "Save Order",
             .actionAccountOrderMoveToTop: "Move to Top",
@@ -2299,6 +2321,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionTestProxy: "Open the test console to verify the current proxy path without leaving the app.",
             .helperMoreQuickActions: "Export backups, test the proxy, or refresh usage.",
             .helperRefreshAccountList: "Reload the latest account pool data without checking usage or calling upstream APIs.",
+            .helperBatchRemoveAccounts: "Select multiple accounts and remove their saved local authorizations after confirmation.",
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
             .helperAccountCardLastError: "Click to view the full error message.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
@@ -2322,6 +2345,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheAccountIsolation: "reasoning_content cache is isolated per account and is never backfilled across accounts. Disabling or deleting an account also clears that account's cache to avoid reusing one API key, tenant, or provider's reasoning with another account.",
             .helperReasoningCacheSelectAccount: "Select an account that has reasoning backfill cache entries.",
             .helperReasoningCacheNoEntries: "There are no reasoning backfill cache entries to clean up.",
+            .helperGeminiOAuthSettings: "Configure the Google OAuth client used by Google / Gemini Login. Environment variables remain available as a fallback.",
             .helperAnthropicConnection: "Point Claude Code to the root address. The same Anthropic-routed local API key can also be used by Codex or another OpenAI-compatible client against the OpenAI-compatible base URL when you want requests to stay on the Anthropic account pool.",
             .helperGeminiConnection: "Point Gemini CLI to the proxy root through `GOOGLE_GEMINI_BASE_URL`, and reuse the same local API key through `GEMINI_API_KEY`. Gemini CLI requests now execute only through accounts imported from `Google / Gemini Login`. `Google Gemini Compatible` remains available for API-key compatibility routes, but it is no longer used as the Gemini CLI backend path.",
             .helperOutboundProxyGlobalModeDisabled: "If your local proxy app is already running in global mode, keep Proxy Mode set to `Disabled` here to avoid adding an extra proxy hop.",
@@ -2385,6 +2409,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmStopAccountCooldownAction: "Stop Cooldown",
             .confirmRemoveAuthorizationTitle: "Remove this local authorization?",
             .confirmRemoveAuthorizationMessage: "This only removes the saved authorization from AI Coding Proxy's local account pool. It does not clear your current `~/.codex/auth.json` login state.",
+            .confirmBatchRemoveAccountsTitle: "Remove selected accounts?",
+            .confirmBatchRemoveAccountsAction: "Remove Selected",
             .confirmImportLocalAccountsToRemoteTitle: "Import local desktop accounts to this remote host?",
             .confirmImportLocalAccountsToRemoteAction: "Import to Remote",
             .confirmDeleteRemoteHostTitle: "Delete this saved remote host?",
@@ -2496,7 +2522,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorRequestLogsFailed: "Request logs failed to load",
             .errorRequestLogsExportFailed: "Request log export failed",
             .errorProxyTestFailed: "Proxy test failed",
-            .errorProxyTestImageSaveFailed: "Image save failed",
+            .errorProxyTestImageSaveFailed: "Image Save Failed",
             .errorProxyAPIKeyFailed: "API key update failed",
             .errorProxyAPIKeyUsageFailed: "API key usage failed to load",
             .errorKeepAwakeFailed: "Keep awake failed",
@@ -2553,9 +2579,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountEnabled: "Account enabled",
             .successAccountDisabled: "Account disabled",
             .successAuthorizationRemoved: "Authorization removed",
+            .successBatchRemoveAccounts: "Accounts removed",
+            .warningBatchRemoveAccountsPartial: "Some accounts could not be removed",
             .successAccountOrderUpdated: "Account order updated",
             .successProxyTestCompleted: "Proxy test completed",
-            .successProxyTestImageSaved: "Image saved",
+            .successProxyTestImageSaved: "Image Saved",
             .successProxyModelsLoaded: "Proxy model list loaded",
             .successProxyAPIKeyAdded: "API key added",
             .successProxyAPIKeyUpdated: "API key updated",
@@ -2725,6 +2753,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelChatGPTBaseURL: "ChatGPT Base URL",
             .labelDaemonBinaryOverride: "守护进程路径覆盖",
             .labelStatsRetentionDays: "统计保留天数",
+            .labelGeminiOAuthClientID: "Client ID",
+            .labelGeminiOAuthClientSecret: "Client Secret",
             .labelLanguage: "语言",
             .labelTheme: "主题",
             .labelDisplay: "显示",
@@ -2791,6 +2821,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionLogs: "日志",
             .sectionAppearance: "外观",
             .sectionGeneral: "通用",
+            .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOutboundProxy: "出站代理",
             .sectionBehavior: "行为",
             .sectionService: "服务",
@@ -2876,6 +2907,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionEnableAccount: "启用",
             .actionDisableAccount: "停用",
             .actionRemoveAuthorization: "移除授权",
+            .actionBatchRemoveAccounts: "批量移除",
+            .actionSelectVisibleAccounts: "选择当前可见",
+            .actionClearBatchSelection: "清空选择",
+            .actionRemoveSelectedAccounts: "移除所选",
+            .actionDoneBatchRemoveAccounts: "完成",
             .actionManageAccountOrder: "调整使用顺序",
             .actionSaveAccountOrder: "保存顺序",
             .actionAccountOrderMoveToTop: "置顶",
@@ -2964,6 +3000,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperQuickActionTestProxy: "直接打开测试控制台，在应用内验证当前代理链路是否正常。",
             .helperMoreQuickActions: "导出备份、测试代理或刷新用量。",
             .helperRefreshAccountList: "重新加载最新的账号池数据，不检查用量，也不调用上游接口。",
+            .helperBatchRemoveAccounts: "勾选多个账号后统一移除本地保存的授权记录，执行前会再次确认。",
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
             .helperAccountCardLastError: "点击查看完整错误信息。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
@@ -2987,6 +3024,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheAccountIsolation: "reasoning_content 缓存按账号隔离，不会跨账号回填。禁用或删除账号会同步清理该账号缓存，避免把一个 API Key、租户或供应商的思考过程复用到其它账号。",
             .helperReasoningCacheSelectAccount: "请选择一个有 reasoning 回传缓存的账号。",
             .helperReasoningCacheNoEntries: "当前没有可清理的 reasoning 回传缓存。",
+            .helperGeminiOAuthSettings: "配置 Google / Gemini 登录使用的 Google OAuth 客户端；环境变量仍会作为兼容 fallback。",
             .helperAnthropicConnection: "Claude Code 只需要使用根地址接入；如果你希望 Codex 或其它 OpenAI-compatible 客户端也固定走 Anthropic 账号池，也可以在 OpenAI 兼容 Base URL 上复用这把 Anthropic 路由的本地 API Key。",
             .helperGeminiConnection: "Gemini CLI 通过 `GOOGLE_GEMINI_BASE_URL` 指向代理根地址，并通过 `GEMINI_API_KEY` 复用同一份本地 API Key。Gemini CLI 请求现在只会通过账号页 `Google / Gemini Login` 导入的账号执行。`Google Gemini Compatible` 仍可用于 API key 兼容路由，但不再作为 Gemini CLI 的后端路径。",
             .helperOutboundProxyGlobalModeDisabled: "如果你本机运行的代理软件已经开启全局代理，这里的代理模式应选择 `关闭`，避免请求再次经过一层代理。",
@@ -3050,6 +3088,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmStopAccountCooldownAction: "停止冷却",
             .confirmRemoveAuthorizationTitle: "确认移除这条本地授权？",
             .confirmRemoveAuthorizationMessage: "这只会删除 AI Coding Proxy 账号池里保存的本地授权记录，不会清除当前 `~/.codex/auth.json` 登录态。",
+            .confirmBatchRemoveAccountsTitle: "确认移除所选账号？",
+            .confirmBatchRemoveAccountsAction: "移除所选",
             .confirmImportLocalAccountsToRemoteTitle: "确认把本地账号导入到这台远端主机？",
             .confirmImportLocalAccountsToRemoteAction: "导入到远端",
             .confirmDeleteRemoteHostTitle: "确认删除这条远程主机配置？",
@@ -3218,6 +3258,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountEnabled: "账号已启用",
             .successAccountDisabled: "账号已停用",
             .successAuthorizationRemoved: "本地授权已移除",
+            .successBatchRemoveAccounts: "账号已移除",
+            .warningBatchRemoveAccountsPartial: "部分账号移除失败",
             .successAccountOrderUpdated: "账号顺序已更新",
             .successProxyTestCompleted: "代理测试已完成",
             .successProxyTestImageSaved: "图片已保存",

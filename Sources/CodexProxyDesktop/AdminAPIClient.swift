@@ -98,6 +98,7 @@ final class AdminAPIClient {
     typealias ClearAccountManagedProxyNodesHandler = @Sendable () async throws -> ClearAccountManagedProxyNodesResult
     typealias UpdateAccountModelRoutingHandler = @Sendable (String, UpdateAccountModelRoutingRequest) async throws -> AccountSummary
     typealias UpdateAccountOrderHandler = @Sendable (UpdateAccountOrderRequest) async throws -> [AccountSummary]
+    typealias BatchRemoveAccountsHandler = @Sendable (BatchDeleteAccountsRequest) async throws -> BatchDeleteAccountsResult
     typealias ProxyTestRunNonStreamHandler = @Sendable (AdminProxyTestRunRequest) async throws -> SimpleHTTPResponse
     typealias ProxyTestRunStreamHandler = @Sendable (AdminProxyTestRunRequest) async throws -> StreamingHTTPResponse
     typealias ManagedProxyLogsHandler = @Sendable () async throws -> String
@@ -140,6 +141,7 @@ final class AdminAPIClient {
     private let clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler?
     private let updateAccountModelRoutingHandler: UpdateAccountModelRoutingHandler?
     private let updateAccountOrderHandler: UpdateAccountOrderHandler?
+    private let batchRemoveAccountsHandler: BatchRemoveAccountsHandler?
     private let proxyTestRunNonStreamHandler: ProxyTestRunNonStreamHandler?
     private let proxyTestRunStreamHandler: ProxyTestRunStreamHandler?
     private let managedProxyLogsHandler: ManagedProxyLogsHandler?
@@ -189,6 +191,7 @@ final class AdminAPIClient {
         clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler? = nil,
         updateAccountModelRoutingHandler: UpdateAccountModelRoutingHandler? = nil,
         updateAccountOrderHandler: UpdateAccountOrderHandler? = nil,
+        batchRemoveAccountsHandler: BatchRemoveAccountsHandler? = nil,
         proxyTestRunNonStreamHandler: ProxyTestRunNonStreamHandler? = nil,
         proxyTestRunStreamHandler: ProxyTestRunStreamHandler? = nil,
         managedProxyLogsHandler: ManagedProxyLogsHandler? = nil
@@ -231,6 +234,7 @@ final class AdminAPIClient {
         self.clearAccountManagedProxyNodesHandler = clearAccountManagedProxyNodesHandler
         self.updateAccountModelRoutingHandler = updateAccountModelRoutingHandler
         self.updateAccountOrderHandler = updateAccountOrderHandler
+        self.batchRemoveAccountsHandler = batchRemoveAccountsHandler
         self.proxyTestRunNonStreamHandler = proxyTestRunNonStreamHandler
         self.proxyTestRunStreamHandler = proxyTestRunStreamHandler
         self.managedProxyLogsHandler = managedProxyLogsHandler
@@ -471,6 +475,20 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().removeAccount(id: id)
+    }
+
+    func removeAccounts(_ payload: BatchDeleteAccountsRequest) async throws -> BatchDeleteAccountsResult {
+        if let batchRemoveAccountsHandler {
+            return try await batchRemoveAccountsHandler(payload)
+        }
+        if let result: BatchDeleteAccountsResult = try await self.httpRequest(
+            "/accounts/batch/remove",
+            method: "POST",
+            body: payload
+        ) {
+            return result
+        }
+        return try await self.controller().removeAccounts(payload)
     }
 
     func getSettings() async throws -> AppConfig {

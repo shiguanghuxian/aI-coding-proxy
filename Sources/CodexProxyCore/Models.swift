@@ -353,6 +353,43 @@ public struct ProxyAPIKeyRecord: Codable, Sendable, Equatable, Identifiable, Has
     }
 }
 
+public struct GeminiOAuthConfig: Codable, Sendable, Equatable {
+    public var clientID: String
+    public var clientSecret: String
+
+    public init(clientID: String = "", clientSecret: String = "") {
+        self.clientID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.clientSecret = clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case clientID = "clientId"
+        case clientIDLegacy = "clientID"
+        case clientIDSnake = "client_id"
+        case clientSecret
+        case clientSecretSnake = "client_secret"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            clientID: try container.decodeIfPresent(String.self, forKey: .clientID)
+                ?? container.decodeIfPresent(String.self, forKey: .clientIDLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .clientIDSnake)
+                ?? "",
+            clientSecret: try container.decodeIfPresent(String.self, forKey: .clientSecret)
+                ?? container.decodeIfPresent(String.self, forKey: .clientSecretSnake)
+                ?? ""
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.clientID, forKey: .clientID)
+        try container.encode(self.clientSecret, forKey: .clientSecret)
+    }
+}
+
 public struct AuthenticatedProxyKeyContext: Sendable, Equatable {
     public var apiKeyHash: String
     public var proxyKeyID: String
@@ -395,6 +432,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
     public var daemonBinaryOverride: String
     public var anthropicDefaultTargetModel: String
     public var anthropicModelMappings: [AnthropicModelMapping]
+    public var geminiOAuth: GeminiOAuthConfig
 
     public init(
         publicHost: String = "127.0.0.1",
@@ -414,7 +452,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         chatGPTBaseURL: String = "https://chatgpt.com",
         daemonBinaryOverride: String = "",
         anthropicDefaultTargetModel: String = AppConfig.defaultAnthropicTargetModel,
-        anthropicModelMappings: [AnthropicModelMapping] = []
+        anthropicModelMappings: [AnthropicModelMapping] = [],
+        geminiOAuth: GeminiOAuthConfig = .init()
     ) {
         self.publicHost = publicHost
         self.publicPort = publicPort
@@ -434,6 +473,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.daemonBinaryOverride = daemonBinaryOverride
         self.anthropicDefaultTargetModel = anthropicDefaultTargetModel
         self.anthropicModelMappings = anthropicModelMappings
+        self.geminiOAuth = geminiOAuth
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -455,6 +495,9 @@ public struct AppConfig: Codable, Sendable, Equatable {
         case daemonBinaryOverride
         case anthropicDefaultTargetModel
         case anthropicModelMappings
+        case geminiOAuth
+        case geminiOauth
+        case geminiOAuthSnake = "gemini_oauth"
     }
 
     public init(from decoder: Decoder) throws {
@@ -480,8 +523,35 @@ public struct AppConfig: Codable, Sendable, Equatable {
             chatGPTBaseURL: try container.decodeIfPresent(String.self, forKey: .chatGPTBaseURL) ?? "https://chatgpt.com",
             daemonBinaryOverride: try container.decodeIfPresent(String.self, forKey: .daemonBinaryOverride) ?? "",
             anthropicDefaultTargetModel: try container.decodeIfPresent(String.self, forKey: .anthropicDefaultTargetModel) ?? Self.defaultAnthropicTargetModel,
-            anthropicModelMappings: try container.decodeIfPresent([AnthropicModelMapping].self, forKey: .anthropicModelMappings) ?? []
+            anthropicModelMappings: try container.decodeIfPresent([AnthropicModelMapping].self, forKey: .anthropicModelMappings) ?? [],
+            geminiOAuth: try container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOAuth)
+                ?? container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOauth)
+                ?? container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOAuthSnake)
+                ?? .init()
         )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.publicHost, forKey: .publicHost)
+        try container.encode(self.publicPort, forKey: .publicPort)
+        try container.encode(self.adminPort, forKey: .adminPort)
+        try container.encode(self.autoStart, forKey: .autoStart)
+        try container.encode(self.outboundProxyMode, forKey: .outboundProxyMode)
+        try container.encode(self.outboundProxy, forKey: .outboundProxy)
+        try container.encode(self.managedProxySummary, forKey: .managedProxySummary)
+        try container.encode(self.proxyAPIKey, forKey: .proxyAPIKey)
+        try container.encode(self.proxyAPIKeys, forKey: .proxyAPIKeys)
+        try container.encodeIfPresent(self.primaryProxyAPIKeyID, forKey: .primaryProxyAPIKeyID)
+        try container.encode(self.adminToken, forKey: .adminToken)
+        try container.encode(self.statsRetentionDays, forKey: .statsRetentionDays)
+        try container.encode(self.remoteHosts, forKey: .remoteHosts)
+        try container.encode(self.windowCloseBehavior, forKey: .windowCloseBehavior)
+        try container.encode(self.chatGPTBaseURL, forKey: .chatGPTBaseURL)
+        try container.encode(self.daemonBinaryOverride, forKey: .daemonBinaryOverride)
+        try container.encode(self.anthropicDefaultTargetModel, forKey: .anthropicDefaultTargetModel)
+        try container.encode(self.anthropicModelMappings, forKey: .anthropicModelMappings)
+        try container.encode(self.geminiOAuth, forKey: .geminiOauth)
     }
 
     public func normalizedModelRoutingConfig() -> AppConfig {
@@ -518,7 +588,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
             anthropicModelMappings: Self.normalizedAnthropicModelMappings(
                 self.anthropicModelMappings,
                 defaultTargetModel: normalizedDefaultTargetModel
-            )
+            ),
+            geminiOAuth: self.geminiOAuth
         )
     }
 
@@ -3279,6 +3350,53 @@ public struct DeleteAccountResult: Codable, Sendable, Equatable {
         self.id = id
         self.accountKey = accountKey
         self.label = label
+    }
+}
+
+public struct BatchDeleteAccountsRequest: Codable, Sendable, Equatable {
+    public var accountIDs: [String]
+
+    public init(accountIDs: [String] = []) {
+        self.accountIDs = accountIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case accountIDs
+        case accountIds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            accountIDs: try container.decodeIfPresent([String].self, forKey: .accountIDs)
+                ?? container.decodeIfPresent([String].self, forKey: .accountIds)
+                ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.accountIDs, forKey: .accountIDs)
+    }
+}
+
+public struct BatchDeleteAccountFailure: Codable, Sendable, Equatable {
+    public var id: String
+    public var error: String
+
+    public init(id: String, error: String) {
+        self.id = id
+        self.error = error
+    }
+}
+
+public struct BatchDeleteAccountsResult: Codable, Sendable, Equatable {
+    public var deleted: [DeleteAccountResult]
+    public var failures: [BatchDeleteAccountFailure]
+
+    public init(deleted: [DeleteAccountResult] = [], failures: [BatchDeleteAccountFailure] = []) {
+        self.deleted = deleted
+        self.failures = failures
     }
 }
 

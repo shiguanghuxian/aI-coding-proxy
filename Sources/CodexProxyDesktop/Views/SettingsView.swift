@@ -415,11 +415,13 @@ private struct SettingsGeneralPanel: View {
                     HStack(alignment: .top, spacing: 14) {
                         self.generalPanel
                         self.behaviorPanel
+                        self.geminiOAuthPanel
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
                         self.generalPanel
                         self.behaviorPanel
+                        self.geminiOAuthPanel
                     }
                 }
             }
@@ -504,6 +506,25 @@ private struct SettingsGeneralPanel: View {
                     )
                 )
                 .toggleStyle(.switch)
+            }
+        }
+    }
+
+    private var geminiOAuthPanel: some View {
+        SettingsInsetPanel(
+            title: self.model.text(.sectionGeminiOAuth),
+            subtitle: self.model.text(.helperGeminiOAuthSettings)
+        ) {
+            FormFieldPanel(title: self.model.text(.labelGeminiOAuthClientID)) {
+                TextField(self.model.text(.labelGeminiOAuthClientID), text: self.$model.settings.geminiOAuth.clientID)
+                    .textFieldStyle(.plain)
+                    .dashboardFieldChrome()
+            }
+
+            FormFieldPanel(title: self.model.text(.labelGeminiOAuthClientSecret)) {
+                SecureField(self.model.text(.labelGeminiOAuthClientSecret), text: self.$model.settings.geminiOAuth.clientSecret)
+                    .textFieldStyle(.plain)
+                    .dashboardFieldChrome()
             }
         }
     }

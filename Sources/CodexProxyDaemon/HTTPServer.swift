@@ -654,6 +654,11 @@ final class DaemonHTTPService: @unchecked Sendable {
             return try self.codableResponse(try await self.controller.clearAccountManagedProxyNodes())
         }
 
+        if request.method == "POST", components.count == 4, components[0] == "admin", components[1] == "accounts", components[2] == "batch", components[3] == "remove" {
+            let payload = try self.decode(BatchDeleteAccountsRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.removeAccounts(payload))
+        }
+
         if request.method == "PATCH", components.count == 4, components[0] == "admin", components[1] == "accounts", components[3] == "enabled" {
             let id = components[2].removingPercentEncoding ?? components[2]
             let payload = try self.decode(UpdateAccountEnabledRequest.self, from: request.body)

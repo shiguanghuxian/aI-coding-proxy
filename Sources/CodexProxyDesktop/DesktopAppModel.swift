@@ -30,6 +30,7 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmStopDaemonHandler = () -> Bool
     typealias ConfirmClearAccountManagedProxyNodesHandler = () -> Bool
     typealias ConfirmStopAccountCooldownHandler = (AccountCooldownStopConfirmationContent) -> Bool
+    typealias ConfirmBatchRemoveAccountsHandler = (BatchRemoveAccountsConfirmationContent) -> Bool
     typealias ConfirmClearReasoningCacheHandler = (ReasoningCacheClearConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
@@ -104,6 +105,12 @@ final class DesktopAppModel: ObservableObject {
     }
 
     struct AccountCooldownStopConfirmationContent: Equatable {
+        var title: String
+        var informativeText: String
+        var actionTitle: String
+    }
+
+    struct BatchRemoveAccountsConfirmationContent: Equatable {
         var title: String
         var informativeText: String
         var actionTitle: String
@@ -362,10 +369,14 @@ final class DesktopAppModel: ObservableObject {
     @Published var accounts: [AccountSummary] = [] {
         didSet {
             self.clearAccountPoolSelectionIfNeeded()
+            self.pruneBatchRemoveAccountSelection()
         }
     }
     @Published var selectedAccountPoolAccountID: String?
     @Published var isAccountPoolDetailDrawerPresented = false
+    @Published var isAccountBatchRemoveModeEnabled = false
+    @Published var selectedBatchRemoveAccountIDs = Set<String>()
+    @Published var isBatchRemovingAccounts = false
     @Published var accountPoolFilters = AccountPoolFilterState() {
         didSet {
             self.clearAccountPoolSelectionIfNeeded()
@@ -492,6 +503,7 @@ final class DesktopAppModel: ObservableObject {
     private let confirmStopDaemonHandler: ConfirmStopDaemonHandler?
     private let confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler?
     private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
+    private let confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler?
     let confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
@@ -576,6 +588,7 @@ final class DesktopAppModel: ObservableObject {
         confirmStopDaemonHandler: ConfirmStopDaemonHandler? = nil,
         confirmClearAccountManagedProxyNodesHandler: ConfirmClearAccountManagedProxyNodesHandler? = nil,
         confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler? = nil,
+        confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler? = nil,
         confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
         confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil,
@@ -611,6 +624,7 @@ final class DesktopAppModel: ObservableObject {
         self.confirmStopDaemonHandler = confirmStopDaemonHandler
         self.confirmClearAccountManagedProxyNodesHandler = confirmClearAccountManagedProxyNodesHandler
         self.confirmStopAccountCooldownHandler = confirmStopAccountCooldownHandler
+        self.confirmBatchRemoveAccountsHandler = confirmBatchRemoveAccountsHandler
         self.confirmClearReasoningCacheHandler = confirmClearReasoningCacheHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
@@ -733,6 +747,22 @@ final class DesktopAppModel: ObservableObject {
 
     var accountPoolHasActiveFilters: Bool {
         self.accountPoolFilters.isFiltering
+    }
+
+    var selectedBatchRemoveAccounts: [AccountSummary] {
+        let selectedIDs = self.selectedBatchRemoveAccountIDs
+        return self.accounts.filter { selectedIDs.contains($0.id) }
+    }
+
+    var batchRemoveSelectedCountText: String {
+        self.localized(
+            zh: "已选择 \(self.selectedBatchRemoveAccountIDs.count) 个账号",
+            en: "\(self.selectedBatchRemoveAccountIDs.count) selected"
+        )
+    }
+
+    var canRemoveSelectedBatchAccounts: Bool {
+        self.selectedBatchRemoveAccountIDs.isEmpty == false && self.isBatchRemovingAccounts == false
     }
 
     var accountManagedProxyNodeOverrideCount: Int {
@@ -1505,6 +1535,53 @@ final class DesktopAppModel: ObservableObject {
 
     func resetAccountPoolFilters() {
         self.accountPoolFilters = AccountPoolFilterState()
+    }
+
+    func enterAccountBatchRemoveMode() {
+        self.isAccountBatchRemoveModeEnabled = true
+    }
+
+    func exitAccountBatchRemoveMode() {
+        self.isAccountBatchRemoveModeEnabled = false
+        self.selectedBatchRemoveAccountIDs.removeAll()
+    }
+
+    func toggleAccountBatchRemoveMode() {
+        if self.isAccountBatchRemoveModeEnabled {
+            self.exitAccountBatchRemoveMode()
+        } else {
+            self.enterAccountBatchRemoveMode()
+        }
+    }
+
+    func isSelectedForBatchRemove(_ account: AccountSummary) -> Bool {
+        self.selectedBatchRemoveAccountIDs.contains(account.id)
+    }
+
+    func toggleBatchRemoveSelection(for account: AccountSummary) {
+        if self.selectedBatchRemoveAccountIDs.contains(account.id) {
+            self.selectedBatchRemoveAccountIDs.remove(account.id)
+        } else {
+            self.selectedBatchRemoveAccountIDs.insert(account.id)
+        }
+    }
+
+    func selectVisibleAccountsForBatchRemove() {
+        for account in self.visibleAccountPoolAccounts {
+            self.selectedBatchRemoveAccountIDs.insert(account.id)
+        }
+    }
+
+    func clearBatchRemoveSelection() {
+        self.selectedBatchRemoveAccountIDs.removeAll()
+    }
+
+    private func pruneBatchRemoveAccountSelection() {
+        let existingIDs = Set(self.accounts.map(\.id))
+        self.selectedBatchRemoveAccountIDs = Set(self.selectedBatchRemoveAccountIDs.filter { existingIDs.contains($0) })
+        if self.accounts.isEmpty {
+            self.isAccountBatchRemoveModeEnabled = false
+        }
     }
 
     func isRefreshingUsage(for accountID: String) -> Bool {
@@ -3860,6 +3937,54 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
+    func removeSelectedBatchAccounts() async {
+        let accounts = self.selectedBatchRemoveAccounts
+        guard accounts.isEmpty == false else {
+            self.publishBanner(
+                .warning,
+                title: self.text(.errorAccountManagementFailed),
+                detail: self.localized(zh: "请先选择要移除的账号。", en: "Select at least one account to remove first.")
+            )
+            return
+        }
+        guard self.confirmBatchRemoveAccounts(accounts) else { return }
+
+        self.isBatchRemovingAccounts = true
+        defer { self.isBatchRemovingAccounts = false }
+        do {
+            let result = try await self.admin.removeAccounts(
+                BatchDeleteAccountsRequest(accountIDs: accounts.map(\.id))
+            )
+            try await self.reloadAccountState()
+            let deletedIDs = Set(result.deleted.map(\.id))
+            self.selectedBatchRemoveAccountIDs.subtract(deletedIDs)
+            if result.failures.isEmpty {
+                self.exitAccountBatchRemoveMode()
+                self.publishBanner(
+                    .success,
+                    title: self.text(.successBatchRemoveAccounts),
+                    detail: self.localized(
+                        zh: "已移除 \(result.deleted.count) 个账号。",
+                        en: "Removed \(result.deleted.count) accounts."
+                    )
+                )
+            } else {
+                self.isAccountBatchRemoveModeEnabled = true
+                let firstFailure = result.failures.first
+                self.publishBanner(
+                    .warning,
+                    title: self.text(.warningBatchRemoveAccountsPartial),
+                    detail: self.localized(
+                        zh: "已移除 \(result.deleted.count) 个，失败 \(result.failures.count) 个。\(firstFailure.map { "首个失败：\($0.id) - \($0.error)" } ?? "")",
+                        en: "Removed \(result.deleted.count), failed \(result.failures.count). \(firstFailure.map { "First failure: \($0.id) - \($0.error)" } ?? "")"
+                    )
+                )
+            }
+        } catch {
+            self.present(error: error, context: .removeAccount)
+        }
+    }
+
     func submitAccountOrderUpdate() async {
         guard let draft = self.accountOrderDraft else { return }
 
@@ -4657,6 +4782,22 @@ final class DesktopAppModel: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    func batchRemoveAccountsConfirmationContent(for accounts: [AccountSummary]) -> BatchRemoveAccountsConfirmationContent {
+        let previewLabels = accounts.prefix(5).map(\.label).joined(separator: "\n")
+        let moreCount = max(0, accounts.count - 5)
+        let moreText = moreCount > 0
+            ? self.localized(zh: "\n等 \(accounts.count) 个账号", en: "\nand \(moreCount) more")
+            : ""
+        return BatchRemoveAccountsConfirmationContent(
+            title: self.text(.confirmBatchRemoveAccountsTitle),
+            informativeText: self.localized(
+                zh: "即将从账号池移除以下账号：\n\n\(previewLabels)\(moreText)\n\n这个操作只删除本地保存的授权记录，不会清除外部服务上的账号。",
+                en: "The following accounts will be removed from the account pool:\n\n\(previewLabels)\(moreText)\n\nThis only removes locally saved authorizations and does not delete external provider accounts."
+            ),
+            actionTitle: self.text(.confirmBatchRemoveAccountsAction)
+        )
+    }
+
     func stopDaemonConfirmationContent() -> StopDaemonConfirmationContent {
         StopDaemonConfirmationContent(
             title: self.text(.confirmStopDaemonTitle),
@@ -4735,6 +4876,21 @@ final class DesktopAppModel: ObservableObject {
         let content = self.stopAccountCooldownConfirmationContent(for: account)
         if let confirmStopAccountCooldownHandler {
             return confirmStopAccountCooldownHandler(content)
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = content.title
+        alert.informativeText = content.informativeText
+        alert.addButton(withTitle: content.actionTitle)
+        alert.addButton(withTitle: self.text(.commonCancel))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmBatchRemoveAccounts(_ accounts: [AccountSummary]) -> Bool {
+        let content = self.batchRemoveAccountsConfirmationContent(for: accounts)
+        if let confirmBatchRemoveAccountsHandler {
+            return confirmBatchRemoveAccountsHandler(content)
         }
 
         let alert = NSAlert()

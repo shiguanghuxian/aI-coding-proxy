@@ -78,6 +78,10 @@ struct AccountsView: View {
                     } else {
                         AccountPoolToolbar(model: self.model)
 
+                        if self.model.isAccountBatchRemoveModeEnabled {
+                            AccountBatchRemoveBar(model: self.model)
+                        }
+
                         if self.model.visibleAccountPoolAccounts.isEmpty {
                             EmptyStatePanel(
                                 title: self.model.text(.placeholderNoMatchingAccounts),
@@ -150,7 +154,13 @@ struct AccountsView: View {
         case .cards:
             LazyVGrid(columns: self.accountColumns, alignment: .leading, spacing: 12) {
                 ForEach(self.model.visibleAccountPoolAccounts) { account in
-                    AccountCard(account: account, model: self.model, width: self.accountCardWidth)
+                    AccountCard(
+                        account: account,
+                        model: self.model,
+                        width: self.accountCardWidth,
+                        isBatchRemovalMode: self.model.isAccountBatchRemoveModeEnabled,
+                        isBatchSelected: self.model.isSelectedForBatchRemove(account)
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -831,6 +841,7 @@ private struct AccountPoolToolbar: View {
     private var toolbarActionButtonsRow: some View {
         HStack(spacing: 10) {
             self.refreshAccountListButton
+            self.batchRemoveButton
             self.manageOrderButton
             self.clearOutboundNodesButton
             self.clearFiltersButton
@@ -863,6 +874,18 @@ private struct AccountPoolToolbar: View {
         }
         .buttonStyle(AppActionButtonStyle(kind: .secondary))
         .disabled(self.model.accounts.count <= 1)
+    }
+
+    private var batchRemoveButton: some View {
+        Button {
+            self.model.toggleAccountBatchRemoveMode()
+        } label: {
+            Label(self.model.text(.actionBatchRemoveAccounts), systemImage: "checklist")
+        }
+        .buttonStyle(AppActionButtonStyle(kind: self.model.isAccountBatchRemoveModeEnabled ? .primary : .secondary))
+        .disabled(self.model.accounts.isEmpty || self.model.isBatchRemovingAccounts)
+        .help(self.model.text(.helperBatchRemoveAccounts))
+        .accessibilityIdentifier("account-pool-batch-remove-button")
     }
 
     private var refreshAccountListButton: some View {
@@ -983,6 +1006,91 @@ private struct AccountPoolFilterMenu<Option: Hashable>: View {
     }
 }
 
+private struct AccountBatchRemoveBar: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 10) {
+                self.summary(palette: palette)
+                Spacer(minLength: 0)
+                self.actions
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                self.summary(palette: palette)
+                self.actions
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(palette.warningSoft.opacity(self.colorScheme == .dark ? 0.28 : 0.56))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(palette.warning.opacity(0.20), lineWidth: 1)
+        )
+        .accessibilityIdentifier("account-pool-batch-remove-bar")
+    }
+
+    private func summary(palette: AppearancePalette) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.warning)
+            Text(self.model.batchRemoveSelectedCountText)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(palette.textPrimary)
+            Text(self.model.accountPoolFilterSummaryText)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(palette.textSecondary)
+        }
+        .lineLimit(1)
+    }
+
+    private var actions: some View {
+        QuickActionWrapLayout(horizontalSpacing: 8, verticalSpacing: 8) {
+            Button(self.model.text(.actionSelectVisibleAccounts)) {
+                self.model.selectVisibleAccountsForBatchRemove()
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+            .disabled(self.model.visibleAccountPoolAccounts.isEmpty || self.model.isBatchRemovingAccounts)
+
+            Button(self.model.text(.actionClearBatchSelection)) {
+                self.model.clearBatchRemoveSelection()
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+            .disabled(self.model.selectedBatchRemoveAccountIDs.isEmpty || self.model.isBatchRemovingAccounts)
+
+            Button(self.model.text(.actionDoneBatchRemoveAccounts)) {
+                self.model.exitAccountBatchRemoveMode()
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+            .disabled(self.model.isBatchRemovingAccounts)
+
+            Button(role: .destructive) {
+                Task { await self.model.removeSelectedBatchAccounts() }
+            } label: {
+                HStack(spacing: 6) {
+                    if self.model.isBatchRemovingAccounts {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(self.model.text(.actionRemoveSelectedAccounts))
+                }
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .danger))
+            .disabled(!self.model.canRemoveSelectedBatchAccounts)
+        }
+    }
+}
+
 private struct AccountPoolResultChip: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1082,6 +1190,22 @@ private struct AccountPoolDisplayModePicker: View {
     }
 }
 
+private struct AccountBatchSelectionMark: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let isSelected: Bool
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        Image(systemName: self.isSelected ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(self.isSelected ? palette.warning : palette.textMuted)
+            .frame(width: 22, height: 22)
+            .contentShape(Rectangle())
+    }
+}
+
 private struct AccountPoolListPane: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1096,6 +1220,8 @@ private struct AccountPoolListPane: View {
                     account: account,
                     model: self.model,
                     isSelected: self.model.selectedAccountPoolAccountID == account.id,
+                    isBatchRemovalMode: self.model.isAccountBatchRemoveModeEnabled,
+                    isBatchSelected: self.model.isSelectedForBatchRemove(account),
                     usesAlternateBackground: index.isMultiple(of: 2) == false
                 )
             }
@@ -1130,6 +1256,8 @@ private struct AccountPoolListRow: View {
     let account: AccountSummary
     @ObservedObject var model: DesktopAppModel
     let isSelected: Bool
+    let isBatchRemovalMode: Bool
+    let isBatchSelected: Bool
     let usesAlternateBackground: Bool
 
     var body: some View {
@@ -1142,10 +1270,18 @@ private struct AccountPoolListRow: View {
         let rowBorder = self.isSelected ? palette.accent.opacity(0.32) : palette.border
 
         Button {
-            self.model.presentAccountPoolDetailDrawer(for: self.account)
+            if self.isBatchRemovalMode {
+                self.model.toggleBatchRemoveSelection(for: self.account)
+            } else {
+                self.model.presentAccountPoolDetailDrawer(for: self.account)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .center, spacing: 10) {
+                    if self.isBatchRemovalMode {
+                        AccountBatchSelectionMark(isSelected: self.isBatchSelected)
+                    }
+
                     ZStack {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(self.account.isCurrent ? palette.successSoft : palette.panelMuted)
@@ -2700,6 +2836,8 @@ private struct AccountCard: View {
     let account: AccountSummary
     @ObservedObject var model: DesktopAppModel
     let width: CGFloat
+    let isBatchRemovalMode: Bool
+    let isBatchSelected: Bool
 
     @State private var isLastErrorPopoverPresented = false
 
@@ -2708,6 +2846,17 @@ private struct AccountCard: View {
 
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 13) {
+                if self.isBatchRemovalMode {
+                    Button {
+                        self.model.toggleBatchRemoveSelection(for: self.account)
+                    } label: {
+                        AccountBatchSelectionMark(isSelected: self.isBatchSelected)
+                    }
+                    .buttonStyle(.plain)
+                    .interactiveCursor()
+                    .accessibilityIdentifier("account-card-batch-select-\(self.account.id)")
+                }
+
                 ZStack {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(self.account.isCurrent ? palette.successSoft : palette.accentSoft)

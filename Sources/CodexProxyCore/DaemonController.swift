@@ -912,6 +912,34 @@ public final class DaemonController: @unchecked Sendable {
         return result
     }
 
+    public func removeAccounts(_ request: BatchDeleteAccountsRequest) async throws -> BatchDeleteAccountsResult {
+        var seen = Set<String>()
+        let accountIDs = request.accountIDs.compactMap { rawID -> String? in
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard id.isEmpty == false, seen.insert(id).inserted else { return nil }
+            return id
+        }
+
+        var deleted: [DeleteAccountResult] = []
+        var failures: [BatchDeleteAccountFailure] = []
+        for id in accountIDs {
+            do {
+                let result = try await self.accountService.removeAccount(id: id)
+                await self.runtimeState.clearActiveIfMatches(accountKey: result.accountKey)
+                await self.stickySessionBindings.clear(accountKey: result.accountKey)
+                self.chatCompletionsReasoningCache.clear(accountKey: result.accountKey)
+                deleted.append(result)
+            } catch {
+                failures.append(BatchDeleteAccountFailure(id: id, error: error.localizedDescription))
+            }
+        }
+
+        if deleted.isEmpty == false {
+            try await self.reconcileManagedProxyAccountNodeListeners()
+        }
+        return BatchDeleteAccountsResult(deleted: deleted, failures: failures)
+    }
+
     public func statsSummary() async throws -> AdminStatsSummary {
         try self.store.loadStatsSummary()
     }
@@ -1670,7 +1698,8 @@ public final class DaemonController: @unchecked Sendable {
                 selectedAccountKey: selectedAccountKey,
                 dataSource: proxyKey.dataSource,
                 allowedAccountKeys: proxyKey.allowedAccountKeys,
-                allowedProviderFamilies: [.openAI]
+                allowedProviderFamilies: [.openAI],
+                ignoreUsageLimitBlocks: true
             ),
             using: promptCacheContext
         )
@@ -5127,7 +5156,8 @@ public final class DaemonController: @unchecked Sendable {
         selectedAccountKey: String? = nil,
         dataSource: ProxyDataSource,
         allowedAccountKeys: [String] = [],
-        allowedProviderFamilies: Set<AccountProviderFamily>? = nil
+        allowedProviderFamilies: Set<AccountProviderFamily>? = nil,
+        ignoreUsageLimitBlocks: Bool = false
     ) async throws -> [ProxyCandidate] {
         let now = Helpers.now()
         let records = try self.store.listAccountRecords()
@@ -5143,7 +5173,8 @@ public final class DaemonController: @unchecked Sendable {
                     records: records,
                     now: now,
                     dataSource: dataSource,
-                    allowedProviderFamilies: allowedProviderFamilies
+                    allowedProviderFamilies: allowedProviderFamilies,
+                    ignoreUsageLimitBlocks: ignoreUsageLimitBlocks
                 ),
             ]
         }
@@ -5163,7 +5194,7 @@ public final class DaemonController: @unchecked Sendable {
                     return nil
                 }
             }
-            guard UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else { return nil }
+            guard ignoreUsageLimitBlocks || UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else { return nil }
             if record.authMode.isManualAPIKey {
                 if let cooldownUntil = record.cooldownUntil, cooldownUntil <= now {
                     try self.store.updateAccountFailureState(id: record.id, consecutiveFailureCount: 0, cooldownUntil: nil)
@@ -5191,7 +5222,8 @@ public final class DaemonController: @unchecked Sendable {
         records: [AccountRecord],
         now: Int64,
         dataSource: ProxyDataSource,
-        allowedProviderFamilies: Set<AccountProviderFamily>? = nil
+        allowedProviderFamilies: Set<AccountProviderFamily>? = nil,
+        ignoreUsageLimitBlocks: Bool = false
     ) throws -> ProxyCandidate {
         guard var record = records.first(where: { $0.accountKey == accountKey }) else {
             throw ProxyError.message("指定的测试账号不存在。")
@@ -5205,7 +5237,7 @@ public final class DaemonController: @unchecked Sendable {
         guard record.enabled else {
             throw ProxyError.message("指定的测试账号已禁用。")
         }
-        guard UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else {
+        guard ignoreUsageLimitBlocks || UsageLimitWindowSupport.isBlocked(record.usage, now: now) == false else {
             throw ProxyError.message("指定的测试账号当前额度窗口受限，暂不可用于测试。")
         }
 

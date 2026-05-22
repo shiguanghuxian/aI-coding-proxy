@@ -2554,6 +2554,42 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertTrue(remainingAccounts.isEmpty)
     }
 
+    func testAdminBatchRemoveAccountsDeletesExistingAndReportsMissing() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        _ = try await harness.controller.importAuthJSONAccounts([
+            .init(source: "first.json", content: Self.chatGPTAuthJSON(principalID: "principal-a", accountID: "account-a"), label: "First"),
+            .init(source: "second.json", content: Self.chatGPTAuthJSON(principalID: "principal-b", accountID: "account-b"), label: "Second"),
+        ])
+        let accounts = try await harness.controller.listAccounts()
+        XCTAssertEqual(accounts.count, 2)
+        let first = try XCTUnwrap(accounts.first(where: { $0.label == "First" }))
+        let second = try XCTUnwrap(accounts.first(where: { $0.label == "Second" }))
+        await harness.controller.runtimeState.setActive(accountKey: first.accountKey, accountID: first.accountID, label: first.label)
+
+        let payload = #"{"accountIDs":["\#(first.id)","missing-account","\#(second.id)","\#(first.id)"," "]}"#
+        let response = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/accounts/batch/remove",
+                body: payload,
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let body = try await Self.data(from: response.body)
+        XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+        let result = try Helpers.readJSON(BatchDeleteAccountsResult.self, from: body)
+        XCTAssertEqual(result.deleted.map(\.id), [first.id, second.id])
+        XCTAssertEqual(result.failures.map(\.id), ["missing-account"])
+
+        let status = try await harness.controller.status()
+        XCTAssertNil(status.activeAccountKey)
+        let remainingAccounts = try await harness.controller.listAccounts()
+        XCTAssertTrue(remainingAccounts.isEmpty)
+    }
+
     func testAdminOAuthAccountLabelUpdateChangesActiveLabelWithoutRewritingHistoricalLogs() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -4169,6 +4205,75 @@ final class CodexProxyDaemonTests: XCTestCase {
             let hits = await routingState.snapshot()
             XCTAssertEqual(hits.firstHits, 4)
             XCTAssertEqual(hits.secondHits, 4)
+        }
+    }
+
+    func testRestrictedProxyAPIKeyCanUseAccountAfterAutomaticCooldownDisabled() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let routingState = APIKeyRoutingState(
+            firstMode: .success(text: "Recovered restricted route"),
+            secondMode: .success(text: "Fallback API route")
+        )
+        let upstream = Self.makeAPIKeyRoutingUpstreamApplication(state: routingState)
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let account = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Restricted Cooling API",
+                    baseURL: "\(baseURL)/v1",
+                    apiKey: "sk-route-first",
+                    enabled: true
+                )
+            )
+            var config = harness.config
+            config.proxyAPIKeys = [
+                ProxyAPIKeyRecord(
+                    id: "restricted-cooling-key",
+                    label: "Restricted Cooling Key",
+                    key: harness.config.proxyAPIKey,
+                    dataSource: .openAI,
+                    allowedAccountKeys: [account.accountKey],
+                    enabled: true,
+                    createdAt: 1
+                ),
+            ]
+            config.primaryProxyAPIKeyID = "restricted-cooling-key"
+            _ = try await harness.controller.saveConfig(config)
+            try harness.controller.store.updateAccountFailureState(
+                id: account.id,
+                consecutiveFailureCount: 3,
+                cooldownUntil: Helpers.now() + 3_600,
+                usageError: "API key cooling down"
+            )
+
+            let updated = try await harness.controller.updateAccountCooldownPolicy(
+                id: account.id,
+                input: UpdateAccountCooldownPolicyRequest(automaticCooldownDisabled: true)
+            )
+            XCTAssertTrue(updated.automaticCooldownDisabled)
+            XCTAssertEqual(updated.consecutiveFailureCount, 0)
+            XCTAssertNil(updated.cooldownUntil)
+            let reloadedConfig = try await harness.controller.loadConfig()
+            XCTAssertEqual(reloadedConfig.proxyAPIKeys.first?.allowedAccountKeys, [account.accountKey])
+            await routingState.reset()
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"{"model":"gpt-5.4","input":"hello","stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            XCTAssertTrue(Self.string(from: body).contains("Recovered restricted route"))
+
+            let hits = await routingState.snapshot()
+            XCTAssertEqual(hits.firstHits, 1)
+            XCTAssertEqual(hits.secondHits, 0)
         }
     }
 
@@ -11093,6 +11198,82 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertEqual(hits.map(\.path), [OpenAIImagesEndpoint.generations.rawValue])
             XCTAssertEqual(hits.first?.authorization, "Bearer sk-test-daemon-account")
             XCTAssertTrue(hits.first?.body.contains(#""model":"gpt-image-2""#) == true)
+        }
+    }
+
+    func testAdminProxyTestImageGenerationsIgnoresUsageLimitForRestrictedAllowedAccount() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesAPIKeyUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                )
+            ])
+            let accounts = try await harness.controller.listAccounts()
+            let account = try XCTUnwrap(accounts.first)
+            var record = try harness.controller.store.loadAccountRecord(id: account.id)
+            record.usage = UsageSnapshot(
+                planType: "plus",
+                fiveHour: nil,
+                oneWeek: UsageWindow(
+                    usedPercent: 100,
+                    windowSeconds: 604_800,
+                    resetAt: Helpers.now() + 604_800
+                ),
+                credits: nil
+            )
+            record.usageError = "usage_limit_reached"
+            _ = try harness.controller.store.upsertAccount(record)
+
+            var config = harness.config
+            config.proxyAPIKeys = [
+                ProxyAPIKeyRecord(
+                    id: "restricted-openai-images",
+                    label: "Restricted OpenAI Images",
+                    key: harness.config.proxyAPIKey,
+                    dataSource: .openAI,
+                    allowedAccountKeys: [account.accountKey],
+                    enabled: true,
+                    createdAt: 1
+                ),
+            ]
+            config.primaryProxyAPIKeyID = "restricted-openai-images"
+            _ = try await harness.controller.saveConfig(config)
+
+            let payload = AdminProxyTestRunRequest(
+                endpoint: .imageGenerations,
+                model: "gpt-image-2",
+                payloadJSON: #"{"model":"gpt-image-2","prompt":"Draw a small cabin","n":1,"size":"1024x1024"}"#,
+                stream: false,
+                selectedAccountKey: nil,
+                proxyAPIKey: harness.config.proxyAPIKey
+            )
+            let encodedPayload = try Helpers.encodeJSON(payload, pretty: false)
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/proxy-test/run",
+                    body: String(decoding: encodedPayload, as: UTF8.self),
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let data = try await Self.data(from: response.body)
+            let text = Self.string(from: data)
+
+            XCTAssertEqual(response.statusCode, 200, text)
+            XCTAssertTrue(text.contains("images-api-key"), text)
+            XCTAssertFalse(text.contains("限制范围内没有可用的 OpenAI 账号"), text)
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [OpenAIImagesEndpoint.generations.rawValue])
         }
     }
 

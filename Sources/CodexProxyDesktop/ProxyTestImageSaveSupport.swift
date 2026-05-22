@@ -143,7 +143,8 @@ extension DesktopAppModel {
             }
 
             let format = ProxyTestImageFileFormat.detect(data: imageData, contentType: contentType)
-            let filename = "proxy-test-image-\(self.proxyTestImageFilenameTokenProvider()).\(format.fileExtension)"
+            let imageNumber = max(index + 1, 1)
+            let filename = "proxy-test-image-\(imageNumber)-\(self.proxyTestImageFilenameTokenProvider()).\(format.fileExtension)"
             let panelRequest = ProxyTestImageSavePanelRequest(
                 defaultFilename: filename,
                 contentType: format.contentType,
