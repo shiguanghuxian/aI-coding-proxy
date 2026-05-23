@@ -2590,6 +2590,58 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertTrue(remainingAccounts.isEmpty)
     }
 
+    func testAdminStatsSummaryCanFilterByProxyAPIKey() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        try harness.controller.store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/responses",
+                apiKeyHash: Helpers.sha256("sk-local-a"),
+                accountKey: "principal-a|account-a",
+                accountLabel: "Account A",
+                model: "gpt-5.4",
+                success: true,
+                latencyMS: 120,
+                usage: UpstreamUsage(inputTokens: 11, outputTokens: 5, totalTokens: 16),
+                apiKeyValue: "sk-local-a"
+            )
+        )
+        try harness.controller.store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/chat/completions",
+                apiKeyHash: Helpers.sha256("sk-local-b"),
+                accountKey: "principal-b|account-b",
+                accountLabel: "Account B",
+                model: "gpt-4.1",
+                success: false,
+                latencyMS: 320,
+                usage: UpstreamUsage(inputTokens: 20, outputTokens: 6, totalTokens: 26),
+                failureCategory: .quota,
+                lastError: "quota",
+                apiKeyValue: "sk-local-b"
+            )
+        )
+
+        let response = await harness.service.handle(
+            Self.makeAdminQueryRequest(
+                path: "/admin/stats/summary",
+                query: "api_key=sk-local-a",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let body = try await Self.data(from: response.body)
+        XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+        let summary = try Helpers.readJSON(AdminStatsSummary.self, from: body)
+
+        XCTAssertEqual(summary.totalRequests, 1)
+        XCTAssertEqual(summary.totalQuotaFailures, 0)
+        XCTAssertEqual(summary.totalInputTokens, 11)
+        XCTAssertEqual(summary.totalOutputTokens, 5)
+        XCTAssertTrue(summary.latestBuckets.allSatisfy { $0.apiKeyHash == Helpers.sha256("sk-local-a") })
+    }
+
     func testAdminOAuthAccountLabelUpdateChangesActiveLabelWithoutRewritingHistoricalLogs() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }

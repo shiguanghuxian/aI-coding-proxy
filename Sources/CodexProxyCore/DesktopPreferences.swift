@@ -670,8 +670,12 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelRecentFourWeeks
     case labelDailyTrend
     case labelWeeklyTrend
+    case labelOverviewTrafficAPIKeyFilter
+    case optionAllProxyAPIKeys
     case overviewServiceHint
     case overviewTrafficHint
+    case helperOverviewTrafficAPIKeyFilter
+    case helperOverviewTrafficAPIKeyFilterAll
     case overviewDiagnosticsHint
     case requestLogsTitle
     case requestLogsSubtitle
@@ -2476,8 +2480,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRecentFourWeeks: "Recent 4 Weeks",
             .labelDailyTrend: "Daily Trend",
             .labelWeeklyTrend: "Weekly Trend",
+            .labelOverviewTrafficAPIKeyFilter: "Local API Key",
+            .optionAllProxyAPIKeys: "All API Keys",
             .overviewServiceHint: "A concise health view for your local proxy runtime and recent request distribution.",
             .overviewTrafficHint: "Review local request totals at a glance, compare Today, This Week, and This Month, then inspect the latest four weeks through daily and weekly token trends.",
+            .helperOverviewTrafficAPIKeyFilter: "Filter traffic statistics by the local proxy API key that received the request.",
+            .helperOverviewTrafficAPIKeyFilterAll: "Showing combined traffic from every local proxy API key.",
             .overviewDiagnosticsHint: "Detailed service diagnostics and local log paths remain under Settings > Service.",
             .requestLogsTitle: "Request Detail Logs",
             .requestLogsSubtitle: "Inspect request-level token usage, latency, cache hits, and account routing without storing prompt or response bodies.",
@@ -3155,8 +3163,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRecentFourWeeks: "最近 4 周",
             .labelDailyTrend: "按日趋势",
             .labelWeeklyTrend: "按周趋势",
+            .labelOverviewTrafficAPIKeyFilter: "本地 API Key",
+            .optionAllProxyAPIKeys: "全部 API Key",
             .overviewServiceHint: "用更专业的视图快速掌握本地代理运行状态和最近请求分布。",
             .overviewTrafficHint: "先看本地请求汇总，再对比今天、本周和本月的 Token 用量，并结合最近 4 周的按日、按周趋势判断流量变化。",
+            .helperOverviewTrafficAPIKeyFilter: "按接收请求的本地代理 API Key 筛选流量统计。",
+            .helperOverviewTrafficAPIKeyFilterAll: "正在显示所有本地代理 API Key 的合并流量。",
             .overviewDiagnosticsHint: "更详细的服务诊断和本地日志路径请到 设置 > 服务 查看。",
             .requestLogsTitle: "请求详细日志",
             .requestLogsSubtitle: "查看请求级别的 tokens、耗时、缓存命中和账号路由，不保存 prompt 或响应正文。",

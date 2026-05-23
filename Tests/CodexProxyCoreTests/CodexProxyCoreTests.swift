@@ -9066,6 +9066,78 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.map(\.outputTokens), [0, 9, 8, 18])
     }
 
+    func testSQLiteStoreLoadStatsSummaryFiltersByProxyAPIKey() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: SecretStore(dataDirectory: directory))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let baseTimestamp = Int64(now.timeIntervalSince1970) - 3_600
+
+        try store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/responses",
+                apiKeyHash: Helpers.sha256("sk-local-a"),
+                accountKey: "principal-a|account-a",
+                accountLabel: "Account A",
+                model: "gpt-5.4",
+                success: true,
+                latencyMS: 100,
+                usage: UpstreamUsage(inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheHitTokens: 4),
+                timestamp: baseTimestamp,
+                apiKeyValue: "sk-local-a"
+            )
+        )
+        try store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/chat/completions",
+                apiKeyHash: Helpers.sha256("sk-local-b"),
+                accountKey: "principal-b|account-b",
+                accountLabel: "Account B",
+                model: "gpt-4.1",
+                success: false,
+                latencyMS: 250,
+                usage: UpstreamUsage(inputTokens: 20, outputTokens: 6, totalTokens: 26, cacheHitTokens: 2),
+                failureCategory: .rateLimit,
+                lastError: "rate limited",
+                timestamp: baseTimestamp + 60,
+                apiKeyValue: "sk-local-b"
+            )
+        )
+        try store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/responses",
+                apiKeyHash: Helpers.sha256("sk-local-a"),
+                accountKey: "principal-a|account-a",
+                accountLabel: "Account A",
+                model: "gpt-5.4",
+                success: true,
+                latencyMS: 120,
+                usage: UpstreamUsage(inputTokens: 30, outputTokens: 7, totalTokens: 37, cacheHitTokens: nil),
+                timestamp: baseTimestamp - 86_400,
+                apiKeyValue: "sk-local-a"
+            )
+        )
+
+        let allSummary = try store.loadStatsSummary(now: now, calendar: calendar)
+        let filteredSummary = try store.loadStatsSummary(apiKey: " sk-local-a ", now: now, calendar: calendar)
+
+        XCTAssertEqual(allSummary.totalRequests, 3)
+        XCTAssertEqual(filteredSummary.totalRequests, 2)
+        XCTAssertEqual(filteredSummary.totalFailures, 0)
+        XCTAssertEqual(filteredSummary.totalRateLimits, 0)
+        XCTAssertEqual(filteredSummary.totalInputTokens, 40)
+        XCTAssertEqual(filteredSummary.totalOutputTokens, 12)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.month.requestCount, 2)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.month.inputTokens, 40)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.month.outputTokens, 12)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.month.cacheHitTokens, 4)
+        XCTAssertTrue(filteredSummary.latestBuckets.allSatisfy { $0.apiKeyHash == Helpers.sha256("sk-local-a") })
+    }
+
     func testSQLiteStoreLoadStatsSummaryDefaultsNaturalTokenRangesToZeroWithoutLogs() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

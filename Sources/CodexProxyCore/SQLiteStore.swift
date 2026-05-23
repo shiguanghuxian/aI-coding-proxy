@@ -764,9 +764,13 @@ public final class SQLiteStore: @unchecked Sendable {
 
     public func loadStatsSummary(
         limit: Int = 48,
+        apiKey: String? = nil,
         now: Date = Date(),
         calendar: Calendar = .current
     ) throws -> AdminStatsSummary {
+        let apiKeyHash = Self.statsAPIKeyHash(apiKey)
+        let apiKeyWhereSQL = apiKeyHash == nil ? "" : "WHERE api_key_hash = ?"
+        let apiKeyBindings = apiKeyHash.map { [Binding.text($0)] } ?? []
         let totalsRow = try self.querySingle(
             """
             SELECT
@@ -781,19 +785,25 @@ public final class SQLiteStore: @unchecked Sendable {
                 COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
                 COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens
-            FROM request_logs;
-            """
+            FROM request_logs
+            \(apiKeyWhereSQL);
+            """,
+            bindings: apiKeyBindings
         )
+        let bucketWhereSQL = apiKeyHash == nil ? "" : "WHERE api_key_hash = ?"
+        var bucketBindings = apiKeyBindings
+        bucketBindings.append(.int(Int64(limit)))
         let bucketRows = try self.query(
             """
             SELECT granularity, bucket_start, endpoint, api_key_hash, account_key, account_label, model,
                    success_count, failure_count, auth_failure_count, rate_limit_count, quota_failure_count,
                    total_latency_ms, latency_histogram, total_input_tokens, total_output_tokens, total_tokens, last_error
             FROM request_stats_hourly
+            \(bucketWhereSQL)
             ORDER BY bucket_start DESC
             LIMIT ?;
             """,
-            bindings: [.int(Int64(limit))]
+            bindings: bucketBindings
         )
         let buckets = bucketRows.map { row in
             RequestMetricBucket(
@@ -817,7 +827,11 @@ public final class SQLiteStore: @unchecked Sendable {
                 lastError: row.optionalText("last_error")
             )
         }
-        let naturalTokenUsage = try self.loadNaturalTokenUsageSummary(now: now, calendar: calendar)
+        let naturalTokenUsage = try self.loadNaturalTokenUsageSummary(
+            now: now,
+            calendar: calendar,
+            apiKeyHash: apiKeyHash
+        )
 
         return AdminStatsSummary(
             totalRequests: totalsRow?.int("total_requests") ?? 0,
@@ -831,6 +845,11 @@ public final class SQLiteStore: @unchecked Sendable {
             naturalTokenUsage: naturalTokenUsage,
             latestBuckets: buckets
         )
+    }
+
+    private static func statsAPIKeyHash(_ apiKey: String?) -> String? {
+        let trimmed = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : Helpers.sha256(trimmed)
     }
 
     public func loadRequestLogs(query: RequestLogQuery) throws -> RequestLogPage {
@@ -1749,7 +1768,8 @@ public final class SQLiteStore: @unchecked Sendable {
 
     private func loadNaturalTokenUsageSummary(
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        apiKeyHash: String? = nil
     ) throws -> AdminStatsSummary.NaturalTokenUsageSummary {
         let todayStart = calendar.startOfDay(for: now)
         let weekStart = self.startOfMondayWeek(for: now, calendar: calendar)
@@ -1759,7 +1779,8 @@ public final class SQLiteStore: @unchecked Sendable {
         let dailyTrend = try self.loadNaturalDailyTrend(
             from: Int64(earliestTrendWeekStart.timeIntervalSince1970),
             to: upperBound,
-            calendar: calendar
+            calendar: calendar,
+            apiKeyHash: apiKeyHash
         )
         let weeklyTrend = self.loadNaturalWeeklyTrend(
             dailyTrend: dailyTrend,
@@ -1768,9 +1789,21 @@ public final class SQLiteStore: @unchecked Sendable {
         )
 
         return AdminStatsSummary.NaturalTokenUsageSummary(
-            today: try self.loadTokenUsageRange(from: Int64(todayStart.timeIntervalSince1970), to: upperBound),
-            week: try self.loadTokenUsageRange(from: Int64(weekStart.timeIntervalSince1970), to: upperBound),
-            month: try self.loadTokenUsageRange(from: Int64(monthStart.timeIntervalSince1970), to: upperBound),
+            today: try self.loadTokenUsageRange(
+                from: Int64(todayStart.timeIntervalSince1970),
+                to: upperBound,
+                apiKeyHash: apiKeyHash
+            ),
+            week: try self.loadTokenUsageRange(
+                from: Int64(weekStart.timeIntervalSince1970),
+                to: upperBound,
+                apiKeyHash: apiKeyHash
+            ),
+            month: try self.loadTokenUsageRange(
+                from: Int64(monthStart.timeIntervalSince1970),
+                to: upperBound,
+                apiKeyHash: apiKeyHash
+            ),
             dailyTrend: dailyTrend,
             weeklyTrend: weeklyTrend
         )
@@ -1779,9 +1812,18 @@ public final class SQLiteStore: @unchecked Sendable {
     private func loadNaturalDailyTrend(
         from: Int64,
         to: Int64,
-        calendar: Calendar
+        calendar: Calendar,
+        apiKeyHash: String? = nil
     ) throws -> [AdminStatsSummary.NaturalTimeBucketUsage] {
         // Use request_logs so local-day boundaries match the natural day/week cards.
+        let apiKeySQL = apiKeyHash == nil ? "" : " AND api_key_hash = ?"
+        var bindings: [Binding] = [
+            .int(from),
+            .int(to),
+        ]
+        if let apiKeyHash {
+            bindings.append(.text(apiKeyHash))
+        }
         let rows = try self.query(
             """
             SELECT
@@ -1793,13 +1835,11 @@ public final class SQLiteStore: @unchecked Sendable {
                 COALESCE(SUM(CASE WHEN input_tokens - COALESCE(cache_hit_tokens, 0) > 0 THEN input_tokens - COALESCE(cache_hit_tokens, 0) ELSE 0 END), 0) AS total_cache_miss_tokens
             FROM request_logs
             WHERE created_at >= ? AND created_at <= ?
+            \(apiKeySQL)
             GROUP BY local_day
             ORDER BY local_day ASC;
             """,
-            bindings: [
-                .int(from),
-                .int(to),
-            ]
+            bindings: bindings
         )
 
         return try rows.map { row in
@@ -1855,8 +1895,17 @@ public final class SQLiteStore: @unchecked Sendable {
 
     private func loadTokenUsageRange(
         from: Int64,
-        to: Int64
+        to: Int64,
+        apiKeyHash: String? = nil
     ) throws -> AdminStatsSummary.NaturalRangeTokenUsage {
+        let apiKeySQL = apiKeyHash == nil ? "" : " AND api_key_hash = ?"
+        var bindings: [Binding] = [
+            .int(from),
+            .int(to),
+        ]
+        if let apiKeyHash {
+            bindings.append(.text(apiKeyHash))
+        }
         let row = try self.querySingle(
             """
             SELECT
@@ -1866,12 +1915,10 @@ public final class SQLiteStore: @unchecked Sendable {
                 COALESCE(SUM(COALESCE(cache_hit_tokens, 0)), 0) AS total_cache_hit_tokens,
                 COALESCE(SUM(CASE WHEN input_tokens - COALESCE(cache_hit_tokens, 0) > 0 THEN input_tokens - COALESCE(cache_hit_tokens, 0) ELSE 0 END), 0) AS total_cache_miss_tokens
             FROM request_logs
-            WHERE created_at >= ? AND created_at <= ?;
+            WHERE created_at >= ? AND created_at <= ?
+            \(apiKeySQL);
             """,
-            bindings: [
-                .int(from),
-                .int(to),
-            ]
+            bindings: bindings
         )
 
         return AdminStatsSummary.NaturalRangeTokenUsage(

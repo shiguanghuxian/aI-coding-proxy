@@ -606,7 +606,9 @@ final class DaemonHTTPService: @unchecked Sendable {
             let payload = try self.decode(AdminProxyTestRunRequest.self, from: request.body)
             return self.fromProxyResponse(try await self.controller.adminProxyTestRun(payload))
         case ("GET", "/admin/stats/summary"):
-            return try self.codableResponse(try await self.controller.statsSummary())
+            return try self.codableResponse(
+                try await self.controller.statsSummary(apiKey: self.queryItems(from: request.target)["api_key"])
+            )
         case ("GET", "/admin/stats/api-key-usage"):
             return try self.codableResponse(try await self.controller.proxyAPIKeyUsage(query: self.requestLogQuery(from: request)))
         case ("GET", "/admin/stats/requests"):

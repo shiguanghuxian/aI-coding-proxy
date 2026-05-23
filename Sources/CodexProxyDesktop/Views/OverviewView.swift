@@ -510,6 +510,8 @@ private struct OverviewTrafficCard: View {
             subtitle: self.model.text(.overviewTrafficHint),
             accessory: StatusPill(text: self.model.text(.sectionTraffic), tone: .accent)
         ) {
+            OverviewTrafficAPIKeyFilterBar(model: self.model)
+
             LazyVGrid(columns: self.metricColumns, spacing: 14) {
                 MetricTile(
                     label: self.model.text(.labelInputTokens),
@@ -588,6 +590,106 @@ private struct OverviewTrafficCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct OverviewTrafficAPIKeyFilterBar: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                self.titleBlock(palette: palette)
+                Spacer(minLength: 12)
+                self.filterMenu
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                self.titleBlock(palette: palette)
+                self.filterMenu
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.9 : 0.96))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(palette.border, lineWidth: 1)
+        )
+        .help(self.model.text(.helperOverviewTrafficAPIKeyFilter))
+    }
+
+    private func titleBlock(palette: AppearancePalette) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(palette.accentSoft)
+                Image(systemName: "key.horizontal.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(palette.accent)
+            }
+            .frame(width: 32, height: 32)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(self.model.text(.labelOverviewTrafficAPIKeyFilter).uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(palette.textMuted)
+
+                Text(self.model.overviewTrafficAPIKeyFilterDetail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(palette.textSecondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Button {
+                Task { await self.model.selectOverviewTrafficAPIKeyFilter(nil) }
+            } label: {
+                Label(
+                    self.model.text(.optionAllProxyAPIKeys),
+                    systemImage: self.model.overviewTrafficSelectedAPIKey == nil ? "checkmark.circle.fill" : "circle"
+                )
+            }
+
+            if self.model.overviewTrafficAPIKeyOptions.isEmpty == false {
+                Divider()
+            }
+
+            ForEach(self.model.overviewTrafficAPIKeyOptions) { record in
+                Button {
+                    Task { await self.model.selectOverviewTrafficAPIKeyFilter(record.id) }
+                } label: {
+                    Label(
+                        self.model.proxyAPIKeyDisplayLabel(record),
+                        systemImage: self.model.overviewTrafficAPIKeyFilterIsSelected(record)
+                            ? "checkmark.circle.fill"
+                            : "key.horizontal"
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text(self.model.overviewTrafficAPIKeyFilterTitle)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .menuStyle(.button)
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .accessibilityIdentifier("overview-traffic-api-key-filter-menu")
     }
 }
 

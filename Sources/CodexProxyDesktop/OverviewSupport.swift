@@ -170,6 +170,54 @@ extension DesktopAppModel {
         }
     }
 
+    var overviewTrafficAPIKeyOptions: [ProxyAPIKeyRecord] {
+        self.configuredProxyAPIKeys
+    }
+
+    var overviewTrafficSelectedAPIKey: ProxyAPIKeyRecord? {
+        guard let selectedOverviewTrafficAPIKeyID else { return nil }
+        return self.overviewTrafficAPIKeyOptions.first { $0.id == selectedOverviewTrafficAPIKeyID }
+    }
+
+    var overviewTrafficStatsAPIKeyValue: String? {
+        let trimmed = self.overviewTrafficSelectedAPIKey?.key.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var overviewTrafficAPIKeyFilterTitle: String {
+        guard let selected = self.overviewTrafficSelectedAPIKey else {
+            return self.text(.optionAllProxyAPIKeys)
+        }
+        return self.proxyAPIKeyDisplayLabel(selected)
+    }
+
+    var overviewTrafficAPIKeyFilterDetail: String {
+        guard let selected = self.overviewTrafficSelectedAPIKey else {
+            return self.text(.helperOverviewTrafficAPIKeyFilterAll)
+        }
+        return "\(self.proxyAPIKeyMaskedValue(selected)) · \(self.label(for: selected.dataSource))"
+    }
+
+    func overviewTrafficAPIKeyFilterIsSelected(_ record: ProxyAPIKeyRecord) -> Bool {
+        self.overviewTrafficSelectedAPIKey?.id == record.id
+    }
+
+    func selectOverviewTrafficAPIKeyFilter(_ id: String?) async {
+        let trimmedID = id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nextID = trimmedID.isEmpty ? nil : trimmedID
+        guard self.selectedOverviewTrafficAPIKeyID != nextID else { return }
+        self.selectedOverviewTrafficAPIKeyID = nextID
+        await self.refreshOverviewTrafficStatsForCurrentFilter()
+    }
+
+    func refreshOverviewTrafficStatsForCurrentFilter() async {
+        do {
+            self.stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
+        } catch {
+            self.present(error: error, context: .loadAll)
+        }
+    }
+
     var overviewNaturalTokenCards: [OverviewNaturalTokenCard] {
         [
             self.overviewNaturalTokenCard(

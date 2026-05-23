@@ -76,6 +76,7 @@ final class AdminAPIClient {
     typealias ClearReasoningCacheHandler = @Sendable (ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult
     typealias GetStatusHandler = @Sendable () async throws -> ProxyStatus
     typealias GetStatsHandler = @Sendable () async throws -> AdminStatsSummary
+    typealias GetStatsForAPIKeyHandler = @Sendable (String?) async throws -> AdminStatsSummary
     typealias SaveSettingsHandler = @Sendable (AppConfig) async throws -> AppConfig
     typealias GetSettingsHandler = @Sendable () async throws -> AppConfig
     typealias GetManagedProxySnapshotHandler = @Sendable () async throws -> ManagedProxySnapshot
@@ -119,6 +120,7 @@ final class AdminAPIClient {
     private let clearReasoningCacheHandler: ClearReasoningCacheHandler?
     private let getStatusHandler: GetStatusHandler?
     private let getStatsHandler: GetStatsHandler?
+    private let getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler?
     private let saveSettingsHandler: SaveSettingsHandler?
     private let getSettingsHandler: GetSettingsHandler?
     private let getManagedProxySnapshotHandler: GetManagedProxySnapshotHandler?
@@ -169,6 +171,7 @@ final class AdminAPIClient {
         clearReasoningCacheHandler: ClearReasoningCacheHandler? = nil,
         getStatusHandler: GetStatusHandler? = nil,
         getStatsHandler: GetStatsHandler? = nil,
+        getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler? = nil,
         saveSettingsHandler: SaveSettingsHandler? = nil,
         getSettingsHandler: GetSettingsHandler? = nil,
         getManagedProxySnapshotHandler: GetManagedProxySnapshotHandler? = nil,
@@ -212,6 +215,7 @@ final class AdminAPIClient {
         self.clearReasoningCacheHandler = clearReasoningCacheHandler
         self.getStatusHandler = getStatusHandler
         self.getStatsHandler = getStatsHandler
+        self.getStatsForAPIKeyHandler = getStatsForAPIKeyHandler
         self.saveSettingsHandler = saveSettingsHandler
         self.getSettingsHandler = getSettingsHandler
         self.getManagedProxySnapshotHandler = getManagedProxySnapshotHandler
@@ -672,14 +676,25 @@ final class AdminAPIClient {
         return try await self.controller().completeOAuthCallback(providerFamily: providerFamily, url: callbackURL)
     }
 
-    func getStats() async throws -> AdminStatsSummary {
-        if let getStatsHandler {
+    func getStats(apiKey: String? = nil) async throws -> AdminStatsSummary {
+        let trimmedAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let getStatsForAPIKeyHandler {
+            return try await getStatsForAPIKeyHandler(trimmedAPIKey.isEmpty ? nil : trimmedAPIKey)
+        }
+        if trimmedAPIKey.isEmpty, let getStatsHandler {
             return try await getStatsHandler()
         }
-        if let stats: AdminStatsSummary = try await self.httpRequest("/stats/summary", method: "GET") {
+        let queryItems = trimmedAPIKey.isEmpty
+            ? []
+            : [URLQueryItem(name: "api_key", value: trimmedAPIKey)]
+        if let stats: AdminStatsSummary = try await self.httpRequest(
+            "/stats/summary",
+            method: "GET",
+            queryItems: queryItems
+        ) {
             return stats
         }
-        return try await self.controller().statsSummary()
+        return try await self.controller().statsSummary(apiKey: trimmedAPIKey.isEmpty ? nil : trimmedAPIKey)
     }
 
     func getReasoningCacheSummary() async throws -> ReasoningCacheSummary {

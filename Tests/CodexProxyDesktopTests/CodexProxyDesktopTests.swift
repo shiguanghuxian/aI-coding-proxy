@@ -7446,6 +7446,28 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testOverviewTrafficAPIKeyFilterUIAndLocalizationAreDeclared() throws {
+        let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let model = DesktopAppModel()
+
+        XCTAssertTrue(source.contains("OverviewTrafficAPIKeyFilterBar"))
+        XCTAssertTrue(source.contains("overview-traffic-api-key-filter-menu"))
+        XCTAssertTrue(source.contains("self.model.selectOverviewTrafficAPIKeyFilter"))
+        XCTAssertTrue(source.contains(".labelOverviewTrafficAPIKeyFilter"))
+        XCTAssertTrue(source.contains(".optionAllProxyAPIKeys"))
+
+        model.preferences.languageMode = .english
+        XCTAssertEqual(model.text(.labelOverviewTrafficAPIKeyFilter), "Local API Key")
+        XCTAssertEqual(model.text(.optionAllProxyAPIKeys), "All API Keys")
+        XCTAssertTrue(model.text(.helperOverviewTrafficAPIKeyFilter).contains("Filter traffic statistics"))
+
+        model.preferences.languageMode = .zhHans
+        XCTAssertEqual(model.text(.labelOverviewTrafficAPIKeyFilter), "本地 API Key")
+        XCTAssertEqual(model.text(.optionAllProxyAPIKeys), "全部 API Key")
+        XCTAssertTrue(model.text(.helperOverviewTrafficAPIKeyFilter).contains("筛选流量统计"))
+    }
+
+    @MainActor
     func testOutboundProxyGlobalModeHintIsLocalized() {
         let model = DesktopAppModel()
 
@@ -8530,6 +8552,57 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(callCount, 1)
         XCTAssertEqual(model.stats.totalRequests, 7)
         XCTAssertEqual(model.sidebarBrandSummary.requestCountText, "7")
+    }
+
+    @MainActor
+    func testOverviewTrafficAPIKeyFilterRefreshesStatsWithSelectedProxyKey() async {
+        let probe = OverviewTrafficStatsFilterProbe()
+        let primary = ProxyAPIKeyRecord(
+            id: "primary",
+            label: "Primary",
+            key: "sk-local-primary",
+            dataSource: .openAI,
+            enabled: true,
+            createdAt: 1
+        )
+        let secondary = ProxyAPIKeyRecord(
+            id: "secondary",
+            label: "Design Team",
+            key: "sk-local-secondary",
+            dataSource: .all,
+            enabled: true,
+            createdAt: 2
+        )
+        let admin = AdminAPIClient(
+            getStatsForAPIKeyHandler: { apiKey in
+                await probe.record(apiKey)
+                return Self.makeStatsSummary(totalRequests: apiKey == secondary.key ? 9 : 21)
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.settings.proxyAPIKeys = [primary, secondary]
+        model.settings.primaryProxyAPIKeyID = primary.id
+
+        XCTAssertNil(model.overviewTrafficStatsAPIKeyValue)
+        XCTAssertEqual(model.overviewTrafficAPIKeyFilterTitle, model.text(.optionAllProxyAPIKeys))
+
+        await model.selectOverviewTrafficAPIKeyFilter(secondary.id)
+
+        XCTAssertEqual(model.selectedOverviewTrafficAPIKeyID, secondary.id)
+        XCTAssertEqual(model.overviewTrafficStatsAPIKeyValue, secondary.key)
+        XCTAssertEqual(model.overviewTrafficAPIKeyFilterTitle, "Design Team")
+        XCTAssertTrue(model.overviewTrafficAPIKeyFilterDetail.contains(model.label(for: ProxyDataSource.all)))
+        XCTAssertEqual(model.stats.totalRequests, 9)
+        let selectedCalls = await probe.snapshot()
+        XCTAssertEqual(selectedCalls, [secondary.key])
+
+        await model.selectOverviewTrafficAPIKeyFilter(nil)
+
+        XCTAssertNil(model.selectedOverviewTrafficAPIKeyID)
+        XCTAssertNil(model.overviewTrafficStatsAPIKeyValue)
+        XCTAssertEqual(model.stats.totalRequests, 21)
+        let allCalls = await probe.snapshot()
+        XCTAssertEqual(allCalls, [secondary.key, nil])
     }
 
     @MainActor
@@ -16551,6 +16624,18 @@ private actor StatsRefreshProbe {
 
     func snapshot() -> Int {
         self.callCount
+    }
+}
+
+private actor OverviewTrafficStatsFilterProbe {
+    private var apiKeys: [String?] = []
+
+    func record(_ apiKey: String?) {
+        self.apiKeys.append(apiKey)
+    }
+
+    func snapshot() -> [String?] {
+        self.apiKeys
     }
 }
 

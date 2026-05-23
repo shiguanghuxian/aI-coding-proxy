@@ -940,8 +940,8 @@ public final class DaemonController: @unchecked Sendable {
         return BatchDeleteAccountsResult(deleted: deleted, failures: failures)
     }
 
-    public func statsSummary() async throws -> AdminStatsSummary {
-        try self.store.loadStatsSummary()
+    public func statsSummary(apiKey: String? = nil) async throws -> AdminStatsSummary {
+        try self.store.loadStatsSummary(apiKey: apiKey)
     }
 
     public func reasoningCacheSummary() async throws -> ReasoningCacheSummary {

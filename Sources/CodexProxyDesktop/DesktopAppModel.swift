@@ -364,6 +364,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var selectedProxyWorkspaceTab: ProxyWorkspaceTab = .access
     @Published var selectedOverviewTab: OverviewTab = .runtime
     @Published var selectedOverviewTrafficWeekOffset = 0
+    @Published var selectedOverviewTrafficAPIKeyID: String?
     @Published var status: ProxyStatus?
     @Published var localServiceStatus: LocalServiceStatus?
     @Published var accounts: [AccountSummary] = [] {
@@ -3250,7 +3251,7 @@ final class DesktopAppModel: ObservableObject {
         }
 
         do {
-            self.stats = try await self.admin.getStats()
+            self.stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
         } catch {
             firstError = firstError ?? (error, .loadAll)
         }
@@ -3323,7 +3324,7 @@ final class DesktopAppModel: ObservableObject {
 
     private func refreshStatsSilently(generation: UInt64) async {
         do {
-            let stats = try await self.admin.getStats()
+            let stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
             try Task.checkCancellation()
             guard self.statsAutoRefreshGeneration == generation else { return }
             self.stats = stats
@@ -3797,7 +3798,7 @@ final class DesktopAppModel: ObservableObject {
         defer { self.isBusy = false }
         do {
             self.accounts = try await self.admin.refreshUsage()
-            self.stats = (try? await self.admin.getStats()) ?? self.stats
+            self.stats = (try? await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)) ?? self.stats
             self.publishSuccess(.refreshUsage)
         } catch {
             self.present(error: error, context: .refreshUsage)
@@ -4649,7 +4650,7 @@ final class DesktopAppModel: ObservableObject {
         self.syncSelectedRemoteHost()
         self.accounts = try await self.admin.getAccounts()
         self.status = try? await self.admin.getStatus()
-        self.stats = (try? await self.admin.getStats()) ?? self.stats
+        self.stats = (try? await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)) ?? self.stats
         if let snapshot = try? await self.admin.getManagedProxySnapshot() {
             self.syncManagedProxySnapshotState(snapshot)
         }
@@ -4767,7 +4768,7 @@ final class DesktopAppModel: ObservableObject {
         if let accounts = try? await self.admin.getAccounts() {
             self.accounts = accounts
         }
-        if let stats = try? await self.admin.getStats() {
+        if let stats = try? await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue) {
             self.stats = stats
         }
     }
