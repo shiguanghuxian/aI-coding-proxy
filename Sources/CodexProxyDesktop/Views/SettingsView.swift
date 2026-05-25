@@ -30,6 +30,8 @@ struct SettingsView: View {
                     SettingsAppearancePanel(model: self.model)
                 case .general:
                     SettingsGeneralPanel(model: self.model)
+                case .ocr:
+                    SettingsOCRPanel(model: self.model)
                 case .proxy:
                     SettingsProxyPanel(model: self.model)
                 case .service:
@@ -527,6 +529,185 @@ private struct SettingsGeneralPanel: View {
                     .dashboardFieldChrome()
             }
         }
+    }
+
+    private func saveSettings() {
+        Task { await self.model.saveSettings() }
+    }
+}
+
+private struct SettingsOCRPanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        SectionCard(
+            title: self.model.text(SettingsTab.ocr.panelTitleKey),
+            subtitle: self.model.text(SettingsTab.ocr.subtitleKey),
+            accessory: Button(self.model.text(.actionRefreshOCRCache)) {
+                self.refresh()
+            }
+            .buttonStyle(AppActionButtonStyle(kind: .secondary))
+            .disabled(self.model.ocrCacheIsRefreshing)
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                OCRSettingsPanel(model: self.model)
+                self.cachePanel
+
+                HStack {
+                    Button(self.model.text(.actionSaveOCRSettings), action: self.saveSettings)
+                        .buttonStyle(AppActionButtonStyle(kind: .primary))
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onAppear {
+            if self.model.ocrCacheSummary.totalCount == 0 {
+                self.refresh()
+            }
+        }
+    }
+
+    private var cachePanel: some View {
+        SettingsInsetPanel(
+            title: self.model.text(.sectionOCRCache),
+            subtitle: self.model.text(.helperOCRCache)
+        ) {
+            self.privacyNotice
+            self.metrics
+            self.actions
+        }
+    }
+
+    private var privacyNotice: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        return HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.info)
+                .frame(width: 16, height: 16)
+            Text(self.model.text(.helperOCRCachePrivacy))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(palette.infoSoft.opacity(self.colorScheme == .dark ? 0.34 : 0.62))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(palette.infoBorder.opacity(self.colorScheme == .dark ? 0.40 : 0.55), lineWidth: 1)
+        )
+    }
+
+    private var metrics: some View {
+        LazyVGrid(columns: self.metricColumns, spacing: 10) {
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheTotal),
+                value: "\(self.model.ocrCacheSummary.totalCount)",
+                footnote: self.model.text(.sectionOCRCache),
+                tone: .accent,
+                symbol: "text.viewfinder",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheExpired),
+                value: "\(self.model.ocrCacheSummary.expiredCount)",
+                footnote: self.model.text(.actionClearExpiredOCRCache),
+                tone: self.model.ocrCacheSummary.expiredCount > 0 ? .warning : .neutral,
+                symbol: "clock.badge.exclamationmark",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheNewest),
+                value: self.model.ocrCacheTimestampText(self.model.ocrCacheSummary.newestTouchedAt),
+                footnote: self.model.text(.labelLastRefreshed),
+                tone: .neutral,
+                symbol: "clock.arrow.circlepath",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheOldest),
+                value: self.model.ocrCacheTimestampText(self.model.ocrCacheSummary.oldestTouchedAt),
+                footnote: self.model.text(.labelTime),
+                tone: .neutral,
+                symbol: "clock",
+                compact: true
+            )
+        }
+    }
+
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FormFieldPanel(title: self.model.text(.labelReasoningCacheOlderThan)) {
+                Picker(
+                    self.model.text(.labelReasoningCacheOlderThan),
+                    selection: self.$model.ocrCacheOlderThanSeconds
+                ) {
+                    ForEach(ReasoningCacheOlderThanPreset.allCases) { preset in
+                        Text(self.model.reasoningCacheOlderThanLabel(preset.rawValue)).tag(preset.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(self.model.ocrCacheIsClearing)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    self.clearExpiredButton
+                    self.clearOlderButton
+                    self.clearAllButton
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    self.clearExpiredButton
+                    self.clearOlderButton
+                    self.clearAllButton
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var clearExpiredButton: some View {
+        Button(self.model.text(.actionClearExpiredOCRCache)) {
+            Task { await self.model.clearExpiredOCRCache() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(self.model.ocrCacheIsClearing)
+    }
+
+    private var clearOlderButton: some View {
+        Button(self.model.text(.actionClearOCRCacheOlderThan)) {
+            Task { await self.model.clearOCRCacheOlderThanSelectedPreset() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(!self.model.ocrCacheHasEntries || self.model.ocrCacheIsClearing)
+    }
+
+    private var clearAllButton: some View {
+        Button(self.model.text(.actionClearAllOCRCache)) {
+            Task { await self.model.clearAllOCRCache() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .danger))
+        .disabled(!self.model.ocrCacheHasEntries || self.model.ocrCacheIsClearing)
+    }
+
+    private let metricColumns = [
+        GridItem(.adaptive(minimum: 150, maximum: 230), spacing: 10),
+    ]
+
+    private func refresh() {
+        Task { await self.model.loadOCRCacheSummary() }
     }
 
     private func saveSettings() {

@@ -736,6 +736,9 @@ public enum AnthropicTranscoder {
                         )
                     )
 
+                case "image":
+                    continue
+
                 case "tool_use":
                     if !textBlocks.isEmpty {
                         input.append(self.messageItem(role: role, textBlocks: textBlocks))

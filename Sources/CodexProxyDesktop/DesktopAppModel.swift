@@ -32,11 +32,13 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmStopAccountCooldownHandler = (AccountCooldownStopConfirmationContent) -> Bool
     typealias ConfirmBatchRemoveAccountsHandler = (BatchRemoveAccountsConfirmationContent) -> Bool
     typealias ConfirmClearReasoningCacheHandler = (ReasoningCacheClearConfirmationContent) -> Bool
+    typealias ConfirmClearOCRCacheHandler = (OCRCacheClearConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
     typealias ConfirmInstallUpdateHandler = (AppUpdatePackage) -> AppUpdatePromptDecision
     typealias ImportAuthFileSelectionHandler = () -> [URL]?
     typealias ImportAuthFileReader = (URL) throws -> String
+    typealias ProxyTestImageEditFileSelectionHandler = () -> [URL]?
     typealias ProxyTestImageSavePanelHandler = @MainActor (ProxyTestImageSavePanelRequest) -> URL?
     typealias ProxyTestImageDownloadHandler = @Sendable (URL) async throws -> ProxyTestDownloadedImage
     typealias ProxyTestImageFileWriter = (Data, URL) throws -> Void
@@ -122,6 +124,12 @@ final class DesktopAppModel: ObservableObject {
         var actionTitle: String
     }
 
+    struct OCRCacheClearConfirmationContent: Equatable {
+        var title: String
+        var informativeText: String
+        var actionTitle: String
+    }
+
     struct InterfaceModeSwitchConfirmationContent: Equatable {
         var title: String
         var informativeText: String
@@ -152,6 +160,7 @@ final class DesktopAppModel: ObservableObject {
         var apiKey = ""
         var enabled = true
         var automaticCooldownDisabled = false
+        var supportsVision = false
         var editingAccountID: String?
         var originalAccountKey: String?
 
@@ -210,6 +219,17 @@ final class DesktopAppModel: ObservableObject {
         var label: String
         var defaultTargetModel: String
         var mappings: [AccountModelMapping]
+    }
+
+    struct AccountReasoningEffortDraft: Identifiable, Equatable {
+        let id = UUID()
+        var accountID: String
+        var accountKey: String
+        var label: String
+        var low: String
+        var medium: String
+        var high: String
+        var xhigh: String
     }
 
     enum AccountCardEditActionKind: Equatable {
@@ -444,6 +464,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var accountOrderDraft: AccountOrderDraft?
     @Published var accountManagedProxyNodeDraft: AccountManagedProxyNodeDraft?
     @Published var accountModelRoutingDraft: AccountModelRoutingDraft?
+    @Published var accountReasoningEffortDraft: AccountReasoningEffortDraft?
     @Published var proxyAPIKeyDraft: ProxyAPIKeyDraft?
     @Published var manualAPIKeyIsSubmitting = false
     @Published var authImportIsSubmitting = false
@@ -451,6 +472,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var accountOrderIsSubmitting = false
     @Published var accountManagedProxyNodeIsSubmitting = false
     @Published var accountModelRoutingIsSubmitting = false
+    @Published var accountReasoningEffortIsSubmitting = false
     @Published var refreshingAccountIDs: Set<String> = []
     @Published var isRefreshingAccountList = false
     @Published var isProxyTestPresented = false
@@ -487,6 +509,10 @@ final class DesktopAppModel: ObservableObject {
     @Published var reasoningCacheIsClearing = false
     @Published var reasoningCacheSelectedAccountKey = ""
     @Published var reasoningCacheOlderThanSeconds: Int64 = 604_800
+    @Published var ocrCacheSummary = OCRCacheSummary()
+    @Published var ocrCacheIsRefreshing = false
+    @Published var ocrCacheIsClearing = false
+    @Published var ocrCacheOlderThanSeconds: Int64 = 604_800
     @Published var proxyAPIKeyUsageFilter = ProxyAPIKeyUsageFilter()
     @Published var proxyAPIKeyUsageReport = ProxyAPIKeyUsageReport(from: 0, to: 0)
     @Published var proxyAPIKeyUsageIsRefreshing = false
@@ -506,11 +532,13 @@ final class DesktopAppModel: ObservableObject {
     private let confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler?
     private let confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler?
     let confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler?
+    let confirmClearOCRCacheHandler: ConfirmClearOCRCacheHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
     let confirmInstallUpdateHandler: ConfirmInstallUpdateHandler?
     private let importAuthFileSelectionHandler: ImportAuthFileSelectionHandler?
     private let importAuthFileReader: ImportAuthFileReader
+    let proxyTestImageEditFileSelectionHandler: ProxyTestImageEditFileSelectionHandler?
     let proxyTestImageSavePanelHandler: ProxyTestImageSavePanelHandler
     let proxyTestImageDownloadHandler: ProxyTestImageDownloadHandler
     let proxyTestImageFileWriter: ProxyTestImageFileWriter
@@ -591,6 +619,7 @@ final class DesktopAppModel: ObservableObject {
         confirmStopAccountCooldownHandler: ConfirmStopAccountCooldownHandler? = nil,
         confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler? = nil,
         confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler? = nil,
+        confirmClearOCRCacheHandler: ConfirmClearOCRCacheHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
         confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil,
         confirmInstallUpdateHandler: ConfirmInstallUpdateHandler? = nil,
@@ -598,6 +627,7 @@ final class DesktopAppModel: ObservableObject {
         importAuthFileReader: @escaping ImportAuthFileReader = { url in
             try String(contentsOf: url, encoding: .utf8)
         },
+        proxyTestImageEditFileSelectionHandler: ProxyTestImageEditFileSelectionHandler? = nil,
         proxyTestImageSavePanelHandler: @escaping ProxyTestImageSavePanelHandler = DesktopAppModel.defaultProxyTestImageSavePanel,
         proxyTestImageDownloadHandler: @escaping ProxyTestImageDownloadHandler = DesktopAppModel.defaultProxyTestImageDownload,
         proxyTestImageFileWriter: @escaping ProxyTestImageFileWriter = { data, url in
@@ -627,11 +657,13 @@ final class DesktopAppModel: ObservableObject {
         self.confirmStopAccountCooldownHandler = confirmStopAccountCooldownHandler
         self.confirmBatchRemoveAccountsHandler = confirmBatchRemoveAccountsHandler
         self.confirmClearReasoningCacheHandler = confirmClearReasoningCacheHandler
+        self.confirmClearOCRCacheHandler = confirmClearOCRCacheHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.confirmInstallUpdateHandler = confirmInstallUpdateHandler
         self.importAuthFileSelectionHandler = importAuthFileSelectionHandler
         self.importAuthFileReader = importAuthFileReader
+        self.proxyTestImageEditFileSelectionHandler = proxyTestImageEditFileSelectionHandler
         self.proxyTestImageSavePanelHandler = proxyTestImageSavePanelHandler
         self.proxyTestImageDownloadHandler = proxyTestImageDownloadHandler
         self.proxyTestImageFileWriter = proxyTestImageFileWriter
@@ -1624,6 +1656,15 @@ final class DesktopAppModel: ObservableObject {
         account.authMode.isManualAPIKey
     }
 
+    func canEditAccountReasoningEffort(_ account: AccountSummary) -> Bool {
+        guard account.authMode == .openAIAPIKey else { return false }
+        if account.providerPreset.usesOpenAIChatCompletionsAPI {
+            return true
+        }
+        return account.providerPreset == .genericOpenAICompatible
+            && account.upstreamAdapter == .chatCompletions
+    }
+
     func accountCooldownPolicyText(_ account: AccountSummary) -> String {
         account.automaticCooldownDisabled
             ? self.localized(zh: "已禁用", en: "Disabled")
@@ -1691,6 +1732,7 @@ final class DesktopAppModel: ObservableObject {
                 apiKey: details.apiKey,
                 enabled: details.enabled,
                 automaticCooldownDisabled: details.automaticCooldownDisabled,
+                supportsVision: details.supportsVision,
                 editingAccountID: account.id,
                 originalAccountKey: account.accountKey
             )
@@ -1726,6 +1768,20 @@ final class DesktopAppModel: ObservableObject {
             label: account.label,
             defaultTargetModel: modelRouting?.defaultTargetModel ?? "",
             mappings: modelRouting?.mappings ?? []
+        )
+    }
+
+    func openAccountReasoningEffortSheet(_ account: AccountSummary) {
+        guard self.canEditAccountReasoningEffort(account) else { return }
+        let reasoningEffort = account.reasoningEffort
+        self.accountReasoningEffortDraft = AccountReasoningEffortDraft(
+            accountID: account.id,
+            accountKey: account.accountKey,
+            label: account.label,
+            low: reasoningEffort.low,
+            medium: reasoningEffort.medium,
+            high: reasoningEffort.high,
+            xhigh: reasoningEffort.xhigh
         )
     }
 
@@ -2053,6 +2109,11 @@ final class DesktopAppModel: ObservableObject {
         self.accountModelRoutingDraft = nil
     }
 
+    func dismissAccountReasoningEffortSheet() {
+        guard self.accountReasoningEffortIsSubmitting == false else { return }
+        self.accountReasoningEffortDraft = nil
+    }
+
     func manualAPIKeySheetTitle(for presentedDraft: ManualAPIKeyDraft) -> String {
         let draft = self.resolvedManualAPIKeyDraft(for: presentedDraft)
         return draft.isEditing ? self.text(.actionEditAPIKey) : self.text(.actionManualAddAccount)
@@ -2072,6 +2133,10 @@ final class DesktopAppModel: ObservableObject {
 
     var accountModelRoutingSheetTitle: String {
         self.text(.actionEditModelRouting)
+    }
+
+    var accountReasoningEffortSheetTitle: String {
+        self.text(.actionEditReasoningEffort)
     }
 
     var availableManagedProxyNodeNames: [String] {
@@ -2405,6 +2470,19 @@ final class DesktopAppModel: ObservableObject {
             zh: "账号映射优先，其次是账号默认目标模型。两者都未命中时，Anthropic / Claude 请求才会继续回退到设置页里的全局 Anthropic 模型映射；其它请求再回到各自现有的默认模型解析。",
             en: "Exact account mappings win first, then the account default target model. When neither matches, Anthropic / Claude requests still fall back to the global Anthropic model mapping from Proxy, and other requests continue using their existing default model resolution."
         )
+    }
+
+    func accountReasoningEffortHint() -> String {
+        self.text(.helperAccountReasoningEffort)
+    }
+
+    func accountReasoningEffortStatusText(for draft: AccountReasoningEffortDraft) -> String {
+        [
+            "\(self.text(.labelReasoningEffortLow)) -> \(draft.low.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "low" : draft.low)",
+            "\(self.text(.labelReasoningEffortMedium)) -> \(draft.medium.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "medium" : draft.medium)",
+            "\(self.text(.labelReasoningEffortHigh)) -> \(draft.high.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "high" : draft.high)",
+            "\(self.text(.labelReasoningEffortXHigh)) -> \(draft.xhigh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "xhigh" : draft.xhigh)",
+        ].joined(separator: " · ")
     }
 
     func accountModelRoutingTargetHint() -> String {
@@ -3552,7 +3630,14 @@ final class DesktopAppModel: ObservableObject {
 
     private func preparedManualAPIKeySavePayload(
         from draft: ManualAPIKeyDraft
-    ) -> (label: String?, baseURL: String, baseURLMode: ManualAPIKeyBaseURLMode?, upstreamAdapter: ManualAPIKeyUpstreamAdapter?, apiKey: String)? {
+    ) -> (
+        label: String?,
+        baseURL: String,
+        baseURLMode: ManualAPIKeyBaseURLMode?,
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+        apiKey: String,
+        supportsVision: Bool
+    )? {
         let trimmedAPIKey = draft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedAPIKey.isEmpty == false else {
             self.publishBanner(.warning, title: self.text(.errorAccountManagementFailed), detail: self.text(.helperManualAccountAPIKeyRequired))
@@ -3606,7 +3691,8 @@ final class DesktopAppModel: ObservableObject {
             normalizedBaseURL,
             baseURLMode,
             upstreamAdapter,
-            trimmedAPIKey
+            trimmedAPIKey,
+            draft.supportsVision
         )
     }
 
@@ -3628,7 +3714,8 @@ final class DesktopAppModel: ObservableObject {
                     upstreamAdapter: payload.upstreamAdapter,
                     apiKey: payload.apiKey,
                     enabled: draft.enabled,
-                    automaticCooldownDisabled: draft.automaticCooldownDisabled
+                    automaticCooldownDisabled: draft.automaticCooldownDisabled,
+                    supportsVision: payload.supportsVision
                 )
             )
             return (saved, .manualUpdateAccount)
@@ -3643,7 +3730,8 @@ final class DesktopAppModel: ObservableObject {
                 upstreamAdapter: payload.upstreamAdapter,
                 apiKey: payload.apiKey,
                 enabled: draft.enabled,
-                automaticCooldownDisabled: draft.automaticCooldownDisabled
+                automaticCooldownDisabled: draft.automaticCooldownDisabled,
+                supportsVision: payload.supportsVision
             )
         )
         return (saved, .manualAddAccount)
@@ -3774,6 +3862,30 @@ final class DesktopAppModel: ObservableObject {
             self.publishSuccess(.updateAccountModelRouting, detail: saved.label)
         } catch {
             self.present(error: error, context: .updateAccountModelRouting)
+        }
+    }
+
+    func submitAccountReasoningEffortUpdate() async {
+        guard let draft = self.accountReasoningEffortDraft else { return }
+
+        self.accountReasoningEffortIsSubmitting = true
+        defer { self.accountReasoningEffortIsSubmitting = false }
+
+        do {
+            let saved = try await self.admin.updateAccountReasoningEffort(
+                id: draft.accountID,
+                input: UpdateAccountReasoningEffortRequest(
+                    low: draft.low,
+                    medium: draft.medium,
+                    high: draft.high,
+                    xhigh: draft.xhigh
+                )
+            )
+            try await self.reloadAccountState()
+            self.accountReasoningEffortDraft = nil
+            self.publishSuccess(.updateAccountReasoningEffort, detail: saved.label)
+        } catch {
+            self.present(error: error, context: .updateAccountReasoningEffort)
         }
     }
 

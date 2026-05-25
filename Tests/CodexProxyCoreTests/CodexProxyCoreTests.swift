@@ -86,6 +86,340 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
+    func testOCRModelConfigDecodesSnakeCaseAndPreservesBuiltInPrompt() throws {
+        let json = """
+        {
+          "ocr_model": {
+            "provider": "openai_compatible",
+            "model": "gpt-4o-mini",
+            "api_key": " sk-ocr ",
+            "base_url": " https://ocr.example.com/v1 ",
+            "timeout": 12,
+            "max_image_size": 123456,
+            "enabled": true,
+            "debug_mode": true
+          }
+        }
+        """
+
+        let config = try Helpers.readJSON(AppConfig.self, from: Data(json.utf8))
+
+        XCTAssertEqual(config.ocrModel.provider, .openAICompatible)
+        XCTAssertEqual(config.ocrModel.model, "gpt-4o-mini")
+        XCTAssertEqual(config.ocrModel.apiKey, "sk-ocr")
+        XCTAssertEqual(config.ocrModel.baseURL, "https://ocr.example.com/v1")
+        XCTAssertEqual(config.ocrModel.timeout, 12)
+        XCTAssertEqual(config.ocrModel.maxImageSize, 123456)
+        XCTAssertTrue(config.ocrModel.enabled)
+        XCTAssertTrue(config.ocrModel.debugMode)
+        XCTAssertTrue(config.ocrModel.prompt.contains("你是一个专业的图片内容识别助手"))
+        XCTAssertTrue(config.ocrModel.prompt.contains("[OCR识别结果]"))
+    }
+
+    func testOCRImageContextInjectsNumberedResultsAndStripsImages() throws {
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "请分析第2张图片里的报错原因"],
+                        ["type": "input_image", "image_url": "data:image/png;base64,aW1hZ2Ux"],
+                        ["type": "input_image", "image_url": "https://example.com/error.png"],
+                    ],
+                ],
+            ],
+        ]
+
+        let references = OCRImageContextSupport.imageReferences(in: request)
+        XCTAssertEqual(references.map(\.index), [1, 2])
+        XCTAssertEqual(references.map(\.imageURL), ["data:image/png;base64,aW1hZ2Ux", "https://example.com/error.png"])
+
+        let updated = OCRImageContextSupport.requestByInjectingOCRContext(
+            into: request,
+            results: [
+                OCRImageRecognitionResult(index: 1, text: "[OCR识别结果]\n图片类型：登录页"),
+                OCRImageRecognitionResult(index: 2, text: "[OCR识别结果]\n错误信息：TypeError"),
+            ]
+        )
+        let input = try XCTUnwrap(updated["input"] as? [[String: Any]])
+        let first = try XCTUnwrap(input.first)
+        let content = try XCTUnwrap(first["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertTrue(text.contains("<image_ocr_context>"))
+        XCTAssertTrue(text.contains("[图片1 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[图片2 OCR识别结果]"))
+        XCTAssertTrue(text.contains("TypeError"))
+        XCTAssertTrue(text.contains("用户原始消息："))
+        XCTAssertTrue(text.contains("请分析第2张图片里的报错原因"))
+        XCTAssertFalse(String(describing: updated).contains("input_image"))
+    }
+
+    func testOCRImageProcessorLeavesRequestUnchangedWhenOCRCredentialsMissing() async throws {
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "识别这张图"],
+                        ["type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="],
+                    ],
+                ],
+            ],
+        ]
+        let processor = OCRImageProcessor(cache: OCRResultCache())
+        let config = AppConfig(ocrModel: OCRModelConfig(enabled: true))
+
+        let updated = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+
+        XCTAssertTrue(OCRImageContextSupport.imageReferences(in: updated).isEmpty == false)
+        XCTAssertFalse(String(describing: updated).contains("<image_ocr_context>"))
+    }
+
+    func testOCRImageProcessorUsesCacheAndDoesNotNeedNetwork() async throws {
+        let imageURL = "data:image/png;base64,aW1hZ2U="
+        let cache = OCRResultCache()
+        await cache.store("[OCR识别结果]\n图片类型：缓存截图", for: Helpers.sha256(Data("image".utf8)))
+        let processor = OCRImageProcessor(cache: cache)
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "这是什么"],
+                        ["type": "input_image", "image_url": imageURL],
+                    ],
+                ],
+            ],
+        ]
+        let config = AppConfig(
+            ocrModel: OCRModelConfig(
+                model: "ocr-model",
+                apiKey: "sk-ocr",
+                baseURL: "http://127.0.0.1:9/v1",
+                enabled: true
+            )
+        )
+
+        let updated = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+        let input = try XCTUnwrap(updated["input"] as? [[String: Any]])
+        let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertTrue(text.contains("图片类型：缓存截图"))
+        XCTAssertFalse(String(describing: updated).contains("input_image"))
+    }
+
+    func testOCRResultCachePersistsEncryptedEntriesByImageHash() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let imageBytes = Data("same-image-bytes".utf8)
+        let imageHash = Helpers.sha256(imageBytes)
+        let cache = OCRResultCache(ttlSeconds: 60, capacity: 16, store: store)
+
+        await cache.store(
+            "[OCR识别结果]\n文字内容：sensitive screenshot text",
+            for: imageHash,
+            mimeType: "image/png",
+            byteCount: imageBytes.count,
+            now: 1_000
+        )
+
+        let summary = try await cache.summary(now: 1_001)
+        XCTAssertEqual(summary.totalCount, 1)
+        XCTAssertEqual(summary.expiredCount, 0)
+
+        let reloaded = OCRResultCache(ttlSeconds: 60, capacity: 16, store: store)
+        let value = await reloaded.value(for: imageHash, now: 1_002)
+        XCTAssertEqual(value, "[OCR识别结果]\n文字内容：sensitive screenshot text")
+
+        let databaseBytes = try Data(contentsOf: Paths.databaseURL(in: directory))
+        let databaseText = String(decoding: databaseBytes, as: UTF8.self)
+        XCTAssertFalse(databaseText.contains("sensitive screenshot text"))
+        XCTAssertFalse(databaseText.contains("same-image-bytes"))
+
+        let expiredSummary = try await reloaded.summary(now: 1_100)
+        XCTAssertEqual(expiredSummary.totalCount, 1)
+        XCTAssertEqual(expiredSummary.expiredCount, 1)
+
+        let cleared = try await reloaded.clear(ClearOCRCacheRequest(expiredOnly: true), now: 1_100)
+        XCTAssertEqual(cleared.deletedCount, 1)
+        XCTAssertEqual(cleared.summary.totalCount, 0)
+    }
+
+    func testOCRImageProcessorInjectsFailureContextForUnsupportedImageFormat() async throws {
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "识别这张图"],
+                        ["type": "input_image", "image_url": "data:text/plain;base64,aGVsbG8="],
+                    ],
+                ],
+            ],
+        ]
+        let processor = OCRImageProcessor(cache: OCRResultCache())
+        let config = AppConfig(
+            ocrModel: OCRModelConfig(
+                model: "ocr-model",
+                apiKey: "sk-ocr",
+                baseURL: "http://127.0.0.1:9/v1",
+                enabled: true
+            )
+        )
+
+        let updated = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+        let input = try XCTUnwrap(updated["input"] as? [[String: Any]])
+        let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertTrue(text.contains("[图片1 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[OCR识别失败]"))
+        XCTAssertTrue(text.contains("图片格式不支持"))
+        XCTAssertFalse(String(describing: updated).contains("input_image"))
+    }
+
+    func testOCRAnthropicNativeContextInjectsAndStripsImages() throws {
+        let request: [String: Any] = [
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": "请分析第二张图"],
+                        [
+                            "type": "image",
+                            "source": [
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aW1hZ2Ux",
+                            ],
+                        ],
+                        [
+                            "type": "image",
+                            "source": [
+                                "type": "url",
+                                "url": "https://example.com/error.png",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        let references = OCRImageContextSupport.anthropicImageReferences(in: request)
+        XCTAssertEqual(references.map(\.index), [1, 2])
+        XCTAssertEqual(references[0].imageURL, "data:image/png;base64,aW1hZ2Ux")
+        XCTAssertEqual(references[1].imageURL, "https://example.com/error.png")
+
+        let updated = OCRImageContextSupport.anthropicRequestByInjectingOCRContext(
+            into: request,
+            results: [
+                OCRImageRecognitionResult(index: 1, text: "[OCR识别结果]\n图片类型：登录页"),
+                OCRImageRecognitionResult(index: 2, text: "[OCR识别结果]\n错误信息：TypeError"),
+            ]
+        )
+        let messages = try XCTUnwrap(updated["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.first?["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertTrue(text.contains("<image_ocr_context>"))
+        XCTAssertTrue(text.contains("[图片1 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[图片2 OCR识别结果]"))
+        XCTAssertTrue(text.contains("TypeError"))
+        XCTAssertTrue(text.contains("用户原始消息："))
+        XCTAssertTrue(text.contains("请分析第二张图"))
+        XCTAssertEqual(content.count, 1)
+        XCTAssertEqual(content.first?["type"] as? String, "text")
+    }
+
+    func testOCRGeminiNativeContextInjectsAndStripsImages() throws {
+        let request: [String: Any] = [
+            "contents": [
+                [
+                    "role": "user",
+                    "parts": [
+                        ["text": "请分析图片"],
+                        [
+                            "inlineData": [
+                                "mimeType": "image/png",
+                                "data": "aW1hZ2Ux",
+                            ],
+                        ],
+                        [
+                            "fileData": [
+                                "mimeType": "image/png",
+                                "fileUri": "gs://private/file.png",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        let references = OCRImageContextSupport.geminiImageReferences(in: request)
+        XCTAssertEqual(references.map(\.index), [1, 2])
+        XCTAssertEqual(references[0].imageURL, "data:image/png;base64,aW1hZ2Ux")
+        XCTAssertEqual(references[1].imageURL, "gs://private/file.png")
+
+        let updated = OCRImageContextSupport.geminiRequestByInjectingOCRContext(
+            into: request,
+            results: [
+                OCRImageRecognitionResult(index: 1, text: "[OCR识别结果]\n图片类型：截图"),
+                OCRImageRecognitionResult(index: 2, error: "图片格式不支持：仅支持 data URL、http 或 https 图片。"),
+            ]
+        )
+        let contents = try XCTUnwrap(updated["contents"] as? [[String: Any]])
+        let parts = try XCTUnwrap(contents.first?["parts"] as? [[String: Any]])
+        let text = try XCTUnwrap(parts.first?["text"] as? String)
+
+        XCTAssertTrue(text.contains("<image_ocr_context>"))
+        XCTAssertTrue(text.contains("[图片1 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[图片2 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[OCR识别失败]"))
+        XCTAssertTrue(text.contains("用户原始消息："))
+        XCTAssertTrue(text.contains("请分析图片"))
+        XCTAssertFalse(String(describing: updated).contains("inlineData"))
+        XCTAssertFalse(String(describing: updated).contains("fileData"))
+    }
+
+    func testOCRResultCacheExpiresAndPrunesEntries() async throws {
+        let cache = OCRResultCache(ttlSeconds: 60, capacity: 2)
+
+        await cache.store("first", for: "one", now: 100)
+        let freshValue = await cache.value(for: "one", now: 120)
+        let expiredValue = await cache.value(for: "one", now: 200)
+        XCTAssertEqual(freshValue, "first")
+        XCTAssertNil(expiredValue)
+
+        let pruneCache = OCRResultCache(ttlSeconds: 100, capacity: 16)
+        for index in 0..<16 {
+            await pruneCache.store("value-\(index)", for: "item-\(index)", now: Int64(210 + index))
+        }
+        _ = await pruneCache.value(for: "item-0", now: 230)
+        await pruneCache.store("value-16", for: "item-16", now: 231)
+
+        let retainedValue = await pruneCache.value(for: "item-0", now: 232)
+        let prunedValue = await pruneCache.value(for: "item-1", now: 232)
+        let newestValue = await pruneCache.value(for: "item-16", now: 232)
+        XCTAssertEqual(retainedValue, "value-0")
+        XCTAssertNil(prunedValue)
+        XCTAssertEqual(newestValue, "value-16")
+    }
+
     func testNormalizeAnthropicAPIKeyAuthJSONInfersManualProviderFamily() throws {
         let raw = """
         {
@@ -2212,6 +2546,87 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(body, Data(bodyText.utf8))
     }
 
+    func testOpenAIImagesEditsRequestInfoExtractsMultipleImagesJSONURLsAndMasks() throws {
+        let boundary = "ImagesEditBoundary"
+        let multipart = """
+        --\(boundary)\r
+        Content-Disposition: form-data; name="model"\r
+        \r
+        gpt-image-2\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="prompt"\r
+        \r
+        Edit both images\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="image"; filename="first.png"\r
+        Content-Type: image/png\r
+        \r
+        FIRSTPNG\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="image[]"; filename="second.webp"\r
+        Content-Type: image/webp\r
+        \r
+        SECONDWEBP\r
+        --\(boundary)\r
+        Content-Disposition: form-data; name="mask"; filename="mask.png"\r
+        Content-Type: image/png\r
+        \r
+        MASKPNG\r
+        --\(boundary)--\r
+
+        """
+        let multipartInfo = OpenAIImagesProxySupport.requestInfo(
+            body: Data(multipart.utf8),
+            headers: ["content-type": "multipart/form-data; boundary=\(boundary)"],
+            endpoint: .edits
+        )
+
+        XCTAssertEqual(multipartInfo.inputImageDataURIs.count, 2)
+        XCTAssertTrue(multipartInfo.inputImageDataURIs[0].hasPrefix("data:image/png;base64,"))
+        XCTAssertTrue(multipartInfo.inputImageDataURIs[1].hasPrefix("data:image/webp;base64,"))
+        XCTAssertEqual(multipartInfo.maskImageDataURIs.count, 1)
+        XCTAssertTrue(multipartInfo.maskImageDataURIs[0].hasPrefix("data:image/png;base64,"))
+
+        let jsonInfo = OpenAIImagesProxySupport.requestInfo(
+            body: Data(#"{"model":"gpt-image-2","prompt":"Edit URL","images":["https://example.com/a.png",{"url":"data:image/jpeg;base64,AA=="}],"mask":"MASKB64"}"#.utf8),
+            headers: ["content-type": "application/json"],
+            endpoint: .edits
+        )
+        XCTAssertEqual(jsonInfo.inputImageDataURIs, ["https://example.com/a.png", "data:image/jpeg;base64,AA=="])
+        XCTAssertEqual(jsonInfo.maskImageDataURIs, ["data:image/png;base64,MASKB64"])
+    }
+
+    func testChatGPTWebImageConversationPayloadIncludesUploadedImageAssetPointers() throws {
+        let payload = OpenAIImagesProxySupport.chatGPTWebConversationPayload(
+            prompt: "Remove the watermark",
+            model: "codex-gpt-image-2",
+            imageReferences: [
+                [
+                    "file_id": "file_upload_1",
+                    "file_name": "input.png",
+                    "file_size": 1234,
+                    "mime_type": "image/png",
+                    "width": 640,
+                    "height": 480,
+                ],
+            ]
+        )
+
+        let messages = try XCTUnwrap(payload["messages"] as? [[String: Any]])
+        let message = try XCTUnwrap(messages.first)
+        let content = try XCTUnwrap(message["content"] as? [String: Any])
+        XCTAssertEqual(content["content_type"] as? String, "multimodal_text")
+        let parts = try XCTUnwrap(content["parts"] as? [Any])
+        let imagePart = try XCTUnwrap(parts.first as? [String: Any])
+        XCTAssertEqual(imagePart["content_type"] as? String, "image_asset_pointer")
+        XCTAssertEqual(imagePart["asset_pointer"] as? String, "file-service://file_upload_1")
+        XCTAssertEqual(parts.last as? String, "Remove the watermark")
+        let metadata = try XCTUnwrap(message["metadata"] as? [String: Any])
+        let attachments = try XCTUnwrap(metadata["attachments"] as? [[String: Any]])
+        XCTAssertEqual(attachments.first?["id"] as? String, "file_upload_1")
+        XCTAssertEqual(attachments.first?["mimeType"] as? String, "image/png")
+    }
+
     func testOpenAIImagesBridgeResponseConvertsCompletedImageToImagesPayload() throws {
         let response = Data(
             #"""
@@ -3080,7 +3495,7 @@ final class CodexProxyCoreTests: XCTestCase {
                 [
                     "role": "user",
                     "content": [
-                        ["type": "image", "source": "ignored"],
+                        ["type": "document", "source": "ignored"],
                     ],
                 ],
             ],
@@ -3563,16 +3978,40 @@ final class CodexProxyCoreTests: XCTestCase {
         }
     }
 
-    func testGeminiGenerateContentNormalizationRejectsUnsupportedMultimodalParts() {
+    func testGeminiGenerateContentNormalizationSkipsImagePartsForNativeOCRPreflight() throws {
+        let payload: [String: Any] = [
+            "contents": [
+                [
+                    "role": "user",
+                    "parts": [
+                        ["text": "describe this image"],
+                        [
+                            "inlineData": [
+                                "mimeType": "image/png",
+                                "data": "ignored",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        let normalized = try GeminiTranscoder.normalizeGenerateContentRequest(payload, model: "gemini-2.5-flash")
+        let input = try XCTUnwrap(normalized.request["input"] as? [[String: Any]])
+        XCTAssertEqual(input.count, 1)
+        XCTAssertFalse(String(describing: normalized.request).contains("inlineData"))
+    }
+
+    func testGeminiGenerateContentNormalizationStillRejectsExecutableParts() {
         let payload: [String: Any] = [
             "contents": [
                 [
                     "role": "user",
                     "parts": [
                         [
-                            "inlineData": [
-                                "mimeType": "image/png",
-                                "data": "ignored",
+                            "executableCode": [
+                                "language": "PYTHON",
+                                "code": "print('ignored')",
                             ],
                         ],
                     ],
@@ -5134,6 +5573,121 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(reloaded.first?.modelRouting, updated.modelRouting)
     }
 
+    func testAccountReasoningEffortConfigDecodesSnakeCaseAndMapsCodexEffort() throws {
+        let decoded = try Helpers.readJSON(
+            AccountReasoningEffortConfig.self,
+            from: Data(#"{"low":"minimal","medium":"balanced","high":"deep","extra_high":"max"}"#.utf8)
+        )
+
+        XCTAssertEqual(decoded.low, "minimal")
+        XCTAssertEqual(decoded.medium, "balanced")
+        XCTAssertEqual(decoded.high, "deep")
+        XCTAssertEqual(decoded.xhigh, "max")
+        XCTAssertEqual(decoded.mappedReasoningEffort(for: " low "), "minimal")
+        XCTAssertEqual(decoded.mappedReasoningEffort(for: "xhigh"), "max")
+        XCTAssertEqual(decoded.mappedReasoningEffort(for: "vendor-custom"), "vendor-custom")
+        XCTAssertNil(decoded.mappedReasoningEffort(for: " "))
+
+        let emptyMapping = AccountReasoningEffortConfig(low: "", medium: "m", high: "h", xhigh: "")
+        XCTAssertEqual(emptyMapping.mappedReasoningEffort(for: "low"), "low")
+        XCTAssertEqual(emptyMapping.mappedReasoningEffort(for: "xhigh"), "xhigh")
+    }
+
+    func testAccountServiceUpdateAccountReasoningEffortRoundTripsAndExports() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleChatCompletionsApplication(probe: probe)
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let sourceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let targetDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+            defer {
+                try? FileManager.default.removeItem(at: sourceDirectory)
+                try? FileManager.default.removeItem(at: targetDirectory)
+            }
+
+            let sourceService = try Self.makeAccountService(dataDirectory: sourceDirectory)
+            let added = try await sourceService.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Reasoning Effort",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-reasoning-effort",
+                    enabled: true
+                ),
+                config: AppConfig()
+            )
+
+            let updated = try await sourceService.updateAccountReasoningEffort(
+                id: added.id,
+                input: UpdateAccountReasoningEffortRequest(
+                    low: "lite",
+                    medium: "normal",
+                    high: "think",
+                    xhigh: "max-thinking"
+                )
+            )
+
+            XCTAssertEqual(updated.upstreamAdapter, .chatCompletions)
+            XCTAssertEqual(updated.reasoningEffort.low, "lite")
+            XCTAssertEqual(updated.reasoningEffort.medium, "normal")
+            XCTAssertEqual(updated.reasoningEffort.high, "think")
+            XCTAssertEqual(updated.reasoningEffort.xhigh, "max-thinking")
+
+            let reloaded = try await sourceService.listAccounts()
+            XCTAssertEqual(reloaded.first?.reasoningEffort, updated.reasoningEffort)
+
+            let exported = try await sourceService.exportAccounts()
+            XCTAssertTrue(String(decoding: exported, as: UTF8.self).contains("max-thinking"))
+
+            let targetService = try Self.makeAccountService(dataDirectory: targetDirectory)
+            _ = try await targetService.importAuthJSONAccounts(
+                items: [.init(source: "backup.json", content: String(decoding: exported, as: UTF8.self))],
+                config: AppConfig()
+            )
+            let importedAccounts = try await targetService.listAccounts()
+            let imported = try XCTUnwrap(importedAccounts.first)
+            XCTAssertEqual(imported.reasoningEffort, updated.reasoningEffort)
+            XCTAssertEqual(imported.upstreamAdapter, .chatCompletions)
+        }
+    }
+
+    func testAccountServiceRejectsReasoningEffortUpdateForResponsesAdapter() async throws {
+        let probe = ManualValidationProbe()
+        let upstream = Self.makeOpenAICompatibleResponsesApplication(probe: probe)
+
+        try await upstream.test(TestingSetup.ahc()) { client in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let service = try Self.makeAccountService(dataDirectory: directory)
+            let added = try await service.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Responses Adapter",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: "http://localhost:\(client.port ?? 0)/v1",
+                    upstreamAdapter: .responses,
+                    apiKey: "sk-responses-adapter",
+                    enabled: true
+                ),
+                config: AppConfig()
+            )
+
+            do {
+                _ = try await service.updateAccountReasoningEffort(
+                    id: added.id,
+                    input: UpdateAccountReasoningEffortRequest(low: "lite")
+                )
+                XCTFail("Expected reasoning effort update to reject Responses adapter accounts")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("Chat Completions"))
+            }
+        }
+    }
+
     func testAccountServiceExportImportPreservesAccountModelRouting() async throws {
         let sourceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let targetDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -5385,7 +5939,8 @@ final class CodexProxyCoreTests: XCTestCase {
                 providerPreset: .aliyunQwenCodingPlan,
                 baseURL: "https://example.com/proxy",
                 apiKey: "sk-stored-secret",
-                enabled: false
+                enabled: false,
+                supportsVision: true
             )
         )
     }
@@ -5434,7 +5989,8 @@ final class CodexProxyCoreTests: XCTestCase {
                 baseURLMode: .exactAPIPrefix,
                 upstreamAdapter: .responses,
                 apiKey: "sk-legacy-details",
-                enabled: false
+                enabled: false,
+                supportsVision: true
             )
         )
     }

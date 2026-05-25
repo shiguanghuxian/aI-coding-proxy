@@ -7,6 +7,7 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
     case chatCompletions
     case responses
     case imageGenerations
+    case imageEdits
     case anthropicMessages
     case geminiGenerateContent
 
@@ -20,6 +21,8 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return "responses"
         case .imageGenerations:
             return "images/generations"
+        case .imageEdits:
+            return "images/edits"
         case .anthropicMessages:
             return "messages"
         case .geminiGenerateContent:
@@ -40,11 +43,11 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
     }
 
     var supportsStreaming: Bool {
-        self != .imageGenerations
+        self != .imageGenerations && self != .imageEdits
     }
 
     var supportsSystemPrompt: Bool {
-        self != .imageGenerations
+        self != .imageGenerations && self != .imageEdits
     }
 
     var supportsToolsJSON: Bool {
@@ -53,7 +56,7 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
 
     var modelFamily: ProxyTestModelFamily {
         switch self {
-        case .imageGenerations:
+        case .imageGenerations, .imageEdits:
             return .image
         case .anthropicMessages:
             return .anthropic
@@ -72,7 +75,7 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return catalog.chatCompletions
         case .responses:
             return catalog.responses
-        case .imageGenerations:
+        case .imageGenerations, .imageEdits:
             return catalog.imageGenerations
         case .geminiGenerateContent:
             return catalog.geminiGenerateContent
@@ -96,7 +99,7 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
         if self.availableModels(in: catalog).contains(trimmed) {
             return true
         }
-        if self == .imageGenerations {
+        if self == .imageGenerations || self == .imageEdits {
             return true
         }
         return Self.inferredFamily(for: trimmed) == self.modelFamily
@@ -108,7 +111,7 @@ enum ProxyTestEndpoint: String, CaseIterable, Identifiable, Sendable {
             return ProxyTestDraft.defaultAnthropicModel
         case .geminiGenerateContent:
             return ProxyTestDraft.defaultGeminiModel
-        case .imageGenerations:
+        case .imageGenerations, .imageEdits:
             return ProxyTestDraft.defaultImageModel
         case .chatCompletions, .responses:
             return ProxyTestDraft.defaultOpenAIModel
@@ -227,6 +230,7 @@ struct ProxyTestDraft: Equatable, Sendable {
     var endpointURL: String
     var apiKey: String
     var selectedAccountKey: String
+    var imageEditFileURLs: [URL]
 
     init(
         endpoint: ProxyTestEndpoint = .chatCompletions,
@@ -237,10 +241,11 @@ struct ProxyTestDraft: Equatable, Sendable {
         stream: Bool = false,
         endpointURL: String = "",
         apiKey: String = "",
-        selectedAccountKey: String = ""
+        selectedAccountKey: String = "",
+        imageEditFileURLs: [URL] = []
     ) {
         self.endpoint = endpoint
-        self.model = endpoint == .imageGenerations && model == Self.defaultOpenAIModel
+        self.model = (endpoint == .imageGenerations || endpoint == .imageEdits) && model == Self.defaultOpenAIModel
             ? Self.defaultImageModel
             : model
         self.systemPrompt = systemPrompt
@@ -250,6 +255,7 @@ struct ProxyTestDraft: Equatable, Sendable {
         self.endpointURL = endpointURL
         self.apiKey = apiKey
         self.selectedAccountKey = selectedAccountKey
+        self.imageEditFileURLs = imageEditFileURLs
     }
 
     var hasPrompt: Bool {
@@ -259,6 +265,14 @@ struct ProxyTestDraft: Equatable, Sendable {
     var selectedAccountKeyValue: String? {
         let trimmed = self.selectedAccountKey.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var hasImageEditInputs: Bool {
+        self.imageEditFileURLs.isEmpty == false
+    }
+
+    var requiresImageEditInputs: Bool {
+        self.endpoint == .imageEdits
     }
 
     func requestPayload() throws -> [String: Any] {
@@ -301,6 +315,8 @@ struct ProxyTestDraft: Equatable, Sendable {
                 "n": 1,
                 "size": "1024x1024",
             ]
+        case .imageEdits:
+            return self.imageEditsPreviewPayload()
         case .anthropicMessages:
             var payload: [String: Any] = [
                 "model": self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? ProxyTestDraft.defaultAnthropicModel : self.model,
@@ -372,12 +388,30 @@ struct ProxyTestDraft: Equatable, Sendable {
     }
 
     func requestData(pretty: Bool = false) throws -> Data {
+        if self.endpoint == .imageEdits {
+            return try self.multipartImageEditBody().data
+        }
         let options: JSONSerialization.WritingOptions = pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
         return try JSONSerialization.data(withJSONObject: self.requestPayload(), options: options)
     }
 
+    func requestBody() throws -> ProxyTestRequestBody {
+        if self.endpoint == .imageEdits {
+            return try self.multipartImageEditBody()
+        }
+        return ProxyTestRequestBody(
+            data: try self.requestData(),
+            contentType: "application/json"
+        )
+    }
+
     func requestPreview() -> String {
         do {
+            if self.endpoint == .imageEdits {
+                let payload = self.imageEditsPreviewPayload()
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+                return String(decoding: data, as: UTF8.self)
+            }
             return String(decoding: try self.requestData(pretty: true), as: UTF8.self)
         } catch {
             let payload = ["error": error.localizedDescription]
@@ -389,6 +423,113 @@ struct ProxyTestDraft: Equatable, Sendable {
             return String(decoding: data, as: UTF8.self)
         }
     }
+
+    private func imageEditsPreviewPayload() -> [String: Any] {
+        [
+            "content_type": self.multipartImageEditsContentType(),
+            "model": self.resolvedImageModel,
+            "prompt": self.userPrompt,
+            "n": 1,
+            "size": "1024x1024",
+            "response_format": "b64_json",
+            "images": self.imageEditFileURLs.map { url in
+                [
+                    "filename": url.lastPathComponent,
+                    "size_bytes": Self.fileSize(at: url) ?? 0,
+                    "content_type": Self.imageContentType(for: url),
+                ] as [String: Any]
+            },
+        ]
+    }
+
+    private var resolvedImageModel: String {
+        let trimmed = self.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? ProxyTestDraft.defaultImageModel : trimmed
+    }
+
+    private func multipartImageEditBody() throws -> ProxyTestRequestBody {
+        guard self.imageEditFileURLs.isEmpty == false else {
+            throw ProxyError.message("Images edits test requires at least one selected image.")
+        }
+        let boundary = self.multipartImageEditsBoundary()
+        var body = Data()
+        func appendTextField(_ name: String, _ value: String) {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8))
+            body.append(Data(value.utf8))
+            body.append(Data("\r\n".utf8))
+        }
+        appendTextField("model", self.resolvedImageModel)
+        appendTextField("prompt", self.userPrompt)
+        appendTextField("n", "1")
+        appendTextField("size", "1024x1024")
+        appendTextField("response_format", "b64_json")
+
+        for url in self.imageEditFileURLs {
+            let data = try Data(contentsOf: url)
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(
+                Data(
+                    "Content-Disposition: form-data; name=\"image\"; filename=\"\(Self.multipartEscapedFilename(url.lastPathComponent))\"\r\n".utf8
+                )
+            )
+            body.append(Data("Content-Type: \(Self.imageContentType(for: url))\r\n\r\n".utf8))
+            body.append(data)
+            body.append(Data("\r\n".utf8))
+        }
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        return ProxyTestRequestBody(
+            data: body,
+            contentType: self.multipartImageEditsContentType(boundary: boundary)
+        )
+    }
+
+    private func multipartImageEditsContentType(boundary: String? = nil) -> String {
+        "multipart/form-data; boundary=\(boundary ?? self.multipartImageEditsBoundary())"
+    }
+
+    private func multipartImageEditsBoundary() -> String {
+        let seed = [
+            self.endpoint.rawValue,
+            self.resolvedImageModel,
+            self.userPrompt,
+            self.imageEditFileURLs.map(\.path).joined(separator: "|"),
+        ].joined(separator: "\u{1F}")
+        return "CodexProxyImageEdit-\(Helpers.sha256(seed).prefix(24))"
+    }
+
+    private static func imageContentType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "webp":
+            return "image/webp"
+        case "gif":
+            return "image/gif"
+        default:
+            return "image/png"
+        }
+    }
+
+    private static func fileSize(at url: URL) -> Int64? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber
+        else {
+            return nil
+        }
+        return size.int64Value
+    }
+
+    private static func multipartEscapedFilename(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+}
+
+struct ProxyTestRequestBody: Equatable, Sendable {
+    var data: Data
+    var contentType: String
 }
 
 struct ProxyPublicRequestFailure: Error, LocalizedError, Sendable {
@@ -485,11 +626,13 @@ actor ProxyPublicAPIClient {
             return try await executeNonStreamHandler(draft)
         }
         let url = try Self.requestURL(for: draft, stream: false)
+        let requestBody = try draft.requestBody()
         return try await self.dataRequest(
             url: url,
             apiKey: nil,
             method: "POST",
-            body: try draft.requestData(),
+            body: requestBody.data,
+            bodyContentType: requestBody.contentType,
             additionalHeaders: self.additionalHeaders(for: draft)
                 .merging(self.authenticationHeaders(for: draft), uniquingKeysWith: { _, new in new })
         )
@@ -500,12 +643,13 @@ actor ProxyPublicAPIClient {
             return try await executeStreamHandler(draft)
         }
         let url = try Self.requestURL(for: draft, stream: true)
+        let requestBody = try draft.requestBody()
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = try draft.requestData()
+        request.httpBody = requestBody.data
         request.timeoutInterval = 1_800
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(requestBody.contentType, forHTTPHeaderField: "Content-Type")
         for (name, value) in self.authenticationHeaders(for: draft)
             .merging(self.additionalHeaders(for: draft), uniquingKeysWith: { _, new in new })
         {
@@ -574,6 +718,7 @@ actor ProxyPublicAPIClient {
         apiKey: String?,
         method: String,
         body: Data?,
+        bodyContentType: String = "application/json",
         additionalHeaders: [String: String] = [:]
     ) async throws -> SimpleHTTPResponse {
         var request = URLRequest(url: url)
@@ -585,7 +730,7 @@ actor ProxyPublicAPIClient {
         }
         if let body {
             request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(bodyContentType, forHTTPHeaderField: "Content-Type")
         }
         for (name, value) in additionalHeaders {
             request.setValue(value, forHTTPHeaderField: name)
@@ -630,7 +775,7 @@ actor ProxyPublicAPIClient {
         switch draft.endpoint {
         case .geminiGenerateContent:
             return ["x-goog-api-key": draft.apiKey]
-        case .chatCompletions, .responses, .imageGenerations, .anthropicMessages:
+        case .chatCompletions, .responses, .imageGenerations, .imageEdits, .anthropicMessages:
             return ["Authorization": "Bearer \(draft.apiKey)"]
         }
     }
@@ -665,7 +810,7 @@ actor ProxyPublicAPIClient {
 
     private static func requestURL(for draft: ProxyTestDraft, stream: Bool) throws -> URL {
         switch draft.endpoint {
-        case .chatCompletions, .responses, .imageGenerations:
+        case .chatCompletions, .responses, .imageGenerations, .imageEdits:
             return try self.openAIAPIBaseURL(from: draft.endpointURL).appendingPathComponent(draft.endpoint.pathComponent)
         case .anthropicMessages:
             return try self.v1BaseURL(from: draft.endpointURL).appendingPathComponent(draft.endpoint.pathComponent)
@@ -782,15 +927,15 @@ extension DesktopAppModel {
         guard let account = self.proxyTestSelectedAccount(for: draft),
               (
                 (account.authMode == .geminiOAuth && draft.endpoint != .geminiGenerateContent)
-                    || (draft.endpoint == .imageGenerations && account.authMode.providerFamily != .openAI)
+                    || ((draft.endpoint == .imageGenerations || draft.endpoint == .imageEdits) && account.authMode.providerFamily != .openAI)
               )
         else {
             return nil
         }
-        if draft.endpoint == .imageGenerations {
+        if draft.endpoint == .imageGenerations || draft.endpoint == .imageEdits {
             return self.localized(
-                zh: "Images 图片生成测试只支持 OpenAI 授权登录账号和 OpenAI API Key 类型账号。",
-                en: "Images generation tests only support OpenAI authorized login accounts and OpenAI API key accounts."
+                zh: "Images 图片测试只支持 OpenAI 授权登录账号和 OpenAI API Key 类型账号。",
+                en: "Images tests only support OpenAI authorized login accounts and OpenAI API key accounts."
             )
         }
         return self.localized(
@@ -804,6 +949,7 @@ extension DesktopAppModel {
             && self.proxyTestDraft.hasPrompt
             && self.proxyTestCompatibilityIssueText == nil
             && self.proxyTestSelectedAccountEndpointCompatibilityIssue(for: self.proxyTestDraft) == nil
+            && (!self.proxyTestDraft.requiresImageEditInputs || self.proxyTestDraft.hasImageEditInputs)
             && (
                 self.proxyTestUsesAdminOnlyGeminiExecution(for: self.proxyTestDraft)
                     || !self.proxyTestDraft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -951,6 +1097,8 @@ extension DesktopAppModel {
             return self.text(.optionResponses)
         case .imageGenerations:
             return self.text(.optionImageGenerations)
+        case .imageEdits:
+            return self.text(.optionImageEdits)
         case .anthropicMessages:
             return self.text(.optionAnthropicMessages)
         case .geminiGenerateContent:
@@ -1035,6 +1183,7 @@ extension DesktopAppModel {
         }
         self.applyProxyTestConnectionDefaults(
             resetModelIfNeeded: endpoint == .imageGenerations
+                || endpoint == .imageEdits
                 || !endpoint.acceptsModelFamily(self.proxyTestDraft.model, catalog: self.proxyTestModelCatalog)
         )
         self.syncProxyTestModelList()
@@ -1193,7 +1342,7 @@ extension DesktopAppModel {
             switch snapshot.endpoint {
             case .responses:
                 throw ProxyError.message("上游未返回 response.completed")
-            case .imageGenerations:
+            case .imageGenerations, .imageEdits:
                 break
             case .anthropicMessages:
                 throw ProxyError.message("Anthropic stream did not finish with `message_stop`.")
@@ -1313,16 +1462,22 @@ extension DesktopAppModel {
         let model = draft.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? self.defaultProxyTestModel(for: draft.endpoint)
             : draft.model
+        let requestBody = try draft.requestBody()
+        let payloadJSON = draft.endpoint == .imageEdits
+            ? draft.requestPreview()
+            : String(decoding: requestBody.data, as: UTF8.self)
         return AdminProxyTestRunRequest(
             endpoint: self.adminProxyTestEndpoint(for: draft.endpoint),
             model: model,
-            payloadJSON: String(decoding: try draft.requestData(), as: UTF8.self),
+            payloadJSON: payloadJSON,
             stream: draft.endpoint.supportsStreaming && draft.stream,
             selectedAccountKey: selectedAccountKey,
             proxyAPIKey: usesAdminOnlyGeminiExecution
                 ? nil
                 : draft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
-            anthropicVersion: draft.endpoint == .anthropicMessages ? AnthropicTranscoder.defaultAnthropicVersion : nil
+            anthropicVersion: draft.endpoint == .anthropicMessages ? AnthropicTranscoder.defaultAnthropicVersion : nil,
+            contentType: draft.endpoint == .imageEdits ? requestBody.contentType : nil,
+            bodyBase64: draft.endpoint == .imageEdits ? requestBody.data.base64EncodedString() : nil
         )
     }
 
@@ -1358,6 +1513,8 @@ extension DesktopAppModel {
             return .responses
         case .imageGenerations:
             return .imageGenerations
+        case .imageEdits:
+            return .imageEdits
         case .anthropicMessages:
             return .anthropicMessages
         case .geminiGenerateContent:
@@ -1436,7 +1593,7 @@ extension DesktopAppModel {
             if self.proxyTestDraft.endpoint == .anthropicMessages {
                 return self.anthropicAccessProxyAPIKeyValue ?? ""
             }
-            if self.proxyTestDraft.endpoint == .imageGenerations {
+            if self.proxyTestDraft.endpoint == .imageGenerations || self.proxyTestDraft.endpoint == .imageEdits {
                 return self.openAIProxyTestAPIKeyValue
             }
             return self.localProxyAPIKeyValue
@@ -1623,7 +1780,7 @@ extension DesktopAppModel {
                 default:
                     continue
                 }
-            case .imageGenerations:
+            case .imageGenerations, .imageEdits:
                 continue
             case .anthropicMessages:
                 let type = (object["type"] as? String) ?? event.event ?? ""
@@ -1745,7 +1902,7 @@ extension DesktopAppModel {
                 httpStatus: response.statusCode,
                 usage: extractResponsesUsage(from: object["usage"])
             )
-        case .imageGenerations:
+        case .imageGenerations, .imageEdits:
             let outputs = self.extractImageOutputs(from: object["data"])
             return ProxyTestResult(
                 assistantText: self.imageSummaryText(for: outputs),

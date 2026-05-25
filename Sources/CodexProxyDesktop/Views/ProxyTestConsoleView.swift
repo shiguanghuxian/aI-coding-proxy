@@ -234,6 +234,10 @@ struct ProxyTestConsoleView: View {
                     .disabled(self.model.proxyTestRunState == .running)
                 }
 
+                if self.model.proxyTestDraft.endpoint == .imageEdits {
+                    self.imageEditInputsField
+                }
+
                 if self.model.proxyTestDraft.endpoint.supportsToolsJSON {
                     FormFieldPanel(title: self.model.text(.labelToolsJSON)) {
                         PromptEditor(
@@ -330,6 +334,10 @@ struct ProxyTestConsoleView: View {
                         urlTitle: self.model.text(.labelImageURL),
                         copyTitle: self.model.text(.commonCopy),
                         saveTitle: self.model.text(.actionSaveImageAs),
+                        viewLargeTitle: self.model.text(.actionViewLargeImage),
+                        largePreviewTitle: self.model.text(.labelLargeImagePreview),
+                        resetZoomTitle: self.model.text(.actionResetZoom),
+                        dismissTitle: self.model.text(.commonDismiss),
                         outputs: result.imageOutputs
                     ) { url in
                         self.model.copyToPasteboard(url, context: .copyEndpoint)
@@ -499,6 +507,71 @@ struct ProxyTestConsoleView: View {
         }
     }
 
+    private var imageEditInputsField: some View {
+        FormFieldPanel(title: self.model.text(.labelImageEditInputs)) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Button {
+                        self.model.selectProxyTestImageEditFiles()
+                    } label: {
+                        Label(self.model.text(.actionChooseImages), systemImage: "photo.on.rectangle.angled")
+                    }
+                    .buttonStyle(QuietCapsuleButtonStyle(tint: AppearanceStore.palette(for: self.colorScheme).accent))
+                    .disabled(self.model.proxyTestRunState == .running)
+
+                    Button {
+                        self.model.clearProxyTestImageEditFiles()
+                    } label: {
+                        Label(self.model.text(.actionClearImages), systemImage: "xmark.circle")
+                    }
+                    .buttonStyle(QuietCapsuleButtonStyle(tint: AppearanceStore.palette(for: self.colorScheme).warning))
+                    .disabled(self.model.proxyTestRunState == .running || self.model.proxyTestDraft.imageEditFileURLs.isEmpty)
+                }
+
+                if self.model.proxyTestDraft.imageEditFileURLs.isEmpty {
+                    Text(self.model.text(.helperImageEditInputs))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AppearanceStore.palette(for: self.colorScheme).textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(self.model.proxyTestDraft.imageEditFileURLs.enumerated()), id: \.offset) { index, url in
+                            HStack(spacing: 8) {
+                                Text(self.imageEditOrdinalText(index + 1))
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(AppearanceStore.palette(for: self.colorScheme).accent)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(AppearanceStore.palette(for: self.colorScheme).accentSoft))
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(url.lastPathComponent)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(AppearanceStore.palette(for: self.colorScheme).textPrimary)
+                                        .lineLimit(1)
+                                    Text(self.fileSizeText(for: url))
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(AppearanceStore.palette(for: self.colorScheme).textMuted)
+                                }
+                                Spacer(minLength: 8)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(self.paletteFieldBackground)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(self.paletteBorder, lineWidth: 1)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var paletteFieldBackground: Color {
         let palette = AppearanceStore.palette(for: self.colorScheme)
         return palette.fieldBackground.opacity(self.colorScheme == .dark ? 0.84 : 0.90)
@@ -534,6 +607,17 @@ struct ProxyTestConsoleView: View {
         default:
             return .neutral
         }
+    }
+
+    private func fileSizeText(for url: URL) -> String {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber else {
+            return self.model.text(.statusNoData)
+        }
+        return ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+    }
+
+    private func imageEditOrdinalText(_ index: Int) -> String {
+        self.model.localization.resolvedLanguage == .zhHans ? "图片\(index)" : "Image \(index)"
     }
 }
 
@@ -714,12 +798,17 @@ private struct PromptEditor: View {
 
 private struct ProxyTestImageResultsPanel: View {
     @Environment(\.colorScheme) private var colorScheme
+    @State private var presentedLargeImage: PresentedProxyTestLargeImage?
 
     let title: String
     let previewTitle: String
     let urlTitle: String
     let copyTitle: String
     let saveTitle: String
+    let viewLargeTitle: String
+    let largePreviewTitle: String
+    let resetZoomTitle: String
+    let dismissTitle: String
     let outputs: [ProxyTestImageOutput]
     let copyURL: (String) -> Void
     let saveOutput: (ProxyTestImageOutput, Int) -> Void
@@ -739,6 +828,18 @@ private struct ProxyTestImageResultsPanel: View {
                 }
             }
         }
+        .sheet(item: self.$presentedLargeImage) { presented in
+            ProxyTestLargeImagePreviewSheet(
+                title: self.largePreviewTitle,
+                resetZoomTitle: self.resetZoomTitle,
+                saveTitle: self.saveTitle,
+                dismissTitle: self.dismissTitle,
+                imageData: presented.imageData,
+                save: {
+                    self.saveOutput(presented.output, presented.index)
+                }
+            )
+        }
     }
 
     @ViewBuilder
@@ -750,6 +851,7 @@ private struct ProxyTestImageResultsPanel: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(palette.textSecondary)
                     Spacer(minLength: 12)
+                    self.viewLargeButton(output, index: index, palette: palette)
                     self.saveButton(output, index: index, palette: palette)
                 }
 
@@ -839,6 +941,19 @@ private struct ProxyTestImageResultsPanel: View {
         .disabled(output.imageData == nil && (output.url?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
     }
 
+    private func viewLargeButton(_ output: ProxyTestImageOutput, index: Int, palette: AppearancePalette) -> some View {
+        Button(self.viewLargeTitle) {
+            guard let imageData = output.imageData else { return }
+            self.presentedLargeImage = PresentedProxyTestLargeImage(
+                index: index,
+                output: output,
+                imageData: imageData
+            )
+        }
+        .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+        .disabled(output.imageData == nil)
+    }
+
     private func urlActionButtons(_ output: ProxyTestImageOutput, index: Int, url: String, palette: AppearancePalette) -> some View {
         HStack(spacing: 8) {
             self.saveButton(output, index: index, palette: palette)
@@ -849,6 +964,85 @@ private struct ProxyTestImageResultsPanel: View {
     private func image(from data: Data?) -> NSImage? {
         guard let data else { return nil }
         return NSImage(data: data)
+    }
+}
+
+private struct PresentedProxyTestLargeImage: Identifiable {
+    let id = UUID()
+    var index: Int
+    var output: ProxyTestImageOutput
+    var imageData: Data
+}
+
+private struct ProxyTestLargeImagePreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var scale: Double = 1.0
+
+    let title: String
+    let resetZoomTitle: String
+    let saveTitle: String
+    let dismissTitle: String
+    let imageData: Data
+    let save: () -> Void
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Text(self.title)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(palette.textPrimary)
+                Spacer(minLength: 12)
+                Button(self.saveTitle, action: self.save)
+                    .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+                Button(self.dismissTitle) {
+                    self.dismiss()
+                }
+                .buttonStyle(QuietCapsuleButtonStyle(tint: palette.textSecondary))
+            }
+
+            if let image = NSImage(data: self.imageData) {
+                ScrollView([.horizontal, .vertical]) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(self.scale)
+                        .frame(minWidth: 720, minHeight: 460)
+                        .padding(24)
+                }
+                .frame(minWidth: 780, minHeight: 520)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(palette.consoleBackground.opacity(self.colorScheme == .dark ? 0.92 : 0.86))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(palette.border, lineWidth: 1)
+                )
+
+                HStack(spacing: 12) {
+                    Slider(value: self.$scale, in: 0.25...4.0)
+                        .frame(width: 260)
+                    Text("\(Int(self.scale * 100))%")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(palette.textSecondary)
+                        .frame(width: 52, alignment: .leading)
+                    Button(self.resetZoomTitle) {
+                        self.scale = 1.0
+                    }
+                    .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent))
+                    Spacer()
+                }
+            } else {
+                EmptyStatePanel(title: self.title, detail: "")
+                    .frame(minWidth: 780, minHeight: 520)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 860, minHeight: 660)
+        .background(ShellBackground())
     }
 }
 

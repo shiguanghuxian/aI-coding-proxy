@@ -89,6 +89,19 @@ struct ManualAPIKeyAccountForm: View {
                 }
             }
 
+            FormFieldPanel(
+                title: self.model.text(.labelSupportsVision),
+                footer: self.model.text(.helperSupportsVision),
+                compact: self.compact
+            ) {
+                Toggle(isOn: self.$draft.supportsVision) {
+                    Text(self.model.text(.labelSupportsVision))
+                        .font(.system(size: self.compact ? 11 : 12, weight: .semibold))
+                        .foregroundStyle(palette.textPrimary)
+                }
+                .toggleStyle(.switch)
+            }
+
             FormFieldPanel(title: self.model.text(.labelAPIKey), compact: self.compact) {
                 TextField(
                     self.model.text(.placeholderManualAccountAPIKey),

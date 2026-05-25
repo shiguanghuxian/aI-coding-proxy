@@ -167,6 +167,11 @@ public enum Helpers {
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 
+    public static func sha256(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
     public static func base64URLEncoded(_ data: Data) -> String {
         data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

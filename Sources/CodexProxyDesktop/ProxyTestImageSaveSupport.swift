@@ -87,6 +87,20 @@ private enum ProxyTestImageFileFormat {
 }
 
 extension DesktopAppModel {
+    static func defaultProxyTestImageEditFileSelectionPanel() -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [
+            .png,
+            .jpeg,
+            UTType(filenameExtension: "webp") ?? .image,
+        ]
+        guard panel.runModal() == .OK else { return nil }
+        return panel.urls
+    }
+
     nonisolated static func defaultProxyTestImageFilenameToken() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -117,6 +131,23 @@ extension DesktopAppModel {
         let contentType = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Type") ?? response.mimeType
         return ProxyTestDownloadedImage(data: data, contentType: contentType)
+    }
+
+    func selectProxyTestImageEditFiles() {
+        guard self.proxyTestRunState != .running else { return }
+        let urls: [URL]?
+        if let proxyTestImageEditFileSelectionHandler {
+            urls = proxyTestImageEditFileSelectionHandler()
+        } else {
+            urls = Self.defaultProxyTestImageEditFileSelectionPanel()
+        }
+        guard let urls else { return }
+        self.proxyTestDraft.imageEditFileURLs = urls
+    }
+
+    func clearProxyTestImageEditFiles() {
+        guard self.proxyTestRunState != .running else { return }
+        self.proxyTestDraft.imageEditFileURLs.removeAll()
     }
 
     func saveProxyTestImage(_ output: ProxyTestImageOutput, index: Int) async {

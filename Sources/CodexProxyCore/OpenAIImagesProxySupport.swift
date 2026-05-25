@@ -35,6 +35,7 @@ public struct OpenAIImagesRequestInfo: Sendable, Equatable {
     public var contentType: String?
     public var fields: [String: String]
     public var inputImageDataURIs: [String]
+    public var maskImageDataURIs: [String]
     public var isMultipart: Bool
 
     public init(
@@ -42,12 +43,14 @@ public struct OpenAIImagesRequestInfo: Sendable, Equatable {
         contentType: String?,
         fields: [String: String],
         inputImageDataURIs: [String],
+        maskImageDataURIs: [String] = [],
         isMultipart: Bool
     ) {
         self.endpoint = endpoint
         self.contentType = contentType
         self.fields = fields
         self.inputImageDataURIs = inputImageDataURIs
+        self.maskImageDataURIs = maskImageDataURIs
         self.isMultipart = isMultipart
     }
 
@@ -212,21 +215,25 @@ public enum OpenAIImagesProxySupport {
                 contentType: contentType,
                 fields: parsed.textFields,
                 inputImageDataURIs: parsed.inputImageDataURIs,
+                maskImageDataURIs: parsed.maskImageDataURIs,
                 isMultipart: true
             )
         }
 
         var fields: [String: String] = [:]
         var images: [String] = []
+        var masks: [String] = []
         if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
             fields = self.textFields(fromJSONObject: object)
-            images = self.imageDataURIs(fromJSONObject: object)
+            images = self.imageDataURIs(fromJSONObject: object, keys: ["image", "images"])
+            masks = self.imageDataURIs(fromJSONObject: object, keys: ["mask", "masks"])
         }
         return OpenAIImagesRequestInfo(
             endpoint: endpoint,
             contentType: contentType,
             fields: fields,
             inputImageDataURIs: images,
+            maskImageDataURIs: masks,
             isMultipart: false
         )
     }
@@ -412,7 +419,7 @@ public enum OpenAIImagesProxySupport {
         timezone: String = "Asia/Shanghai",
         timezoneOffsetMinutes: Int = -480
     ) -> [String: Any] {
-        [
+        return [
             "action": "next",
             "fork_from_shared_post": false,
             "parent_message_id": self.uuid(),
@@ -439,25 +446,56 @@ public enum OpenAIImagesProxySupport {
     public static func chatGPTWebConversationPayload(
         prompt: String,
         model: String,
+        imageReferences: [[String: Any]] = [],
         timezone: String = "Asia/Shanghai",
         timezoneOffsetMinutes: Int = -480
     ) -> [String: Any] {
-        [
+        let content: [String: Any]
+        var metadata: [String: Any] = [
+            "selected_all_github_repos": false,
+            "system_hints": ["picture_v2"],
+            "serialization_metadata": ["custom_symbol_offsets": []],
+        ]
+        if imageReferences.isEmpty {
+            content = [
+                "content_type": "text",
+                "parts": [prompt],
+            ]
+        } else {
+            var parts: [Any] = imageReferences.map { reference -> [String: Any] in
+                [
+                    "content_type": "image_asset_pointer",
+                    "asset_pointer": "file-service://\(self.nonEmptyString(reference["file_id"]) ?? "")",
+                    "width": reference["width"] ?? 0,
+                    "height": reference["height"] ?? 0,
+                    "size_bytes": reference["file_size"] ?? 0,
+                ]
+            }
+            parts.append(prompt)
+            content = [
+                "content_type": "multimodal_text",
+                "parts": parts,
+            ]
+            metadata["attachments"] = imageReferences.map { reference in
+                [
+                    "id": self.nonEmptyString(reference["file_id"]) ?? "",
+                    "mimeType": self.nonEmptyString(reference["mime_type"]) ?? "image/png",
+                    "name": self.nonEmptyString(reference["file_name"]) ?? "image.png",
+                    "size": reference["file_size"] ?? 0,
+                    "width": reference["width"] ?? 0,
+                    "height": reference["height"] ?? 0,
+                ]
+            }
+        }
+        return [
             "action": "next",
             "messages": [
                 [
                     "id": self.uuid(),
                     "author": ["role": "user"],
                     "create_time": Double(Helpers.nowMilliseconds()) / 1_000,
-                    "content": [
-                        "content_type": "text",
-                        "parts": [prompt],
-                    ],
-                    "metadata": [
-                        "selected_all_github_repos": false,
-                        "system_hints": ["picture_v2"],
-                        "serialization_metadata": ["custom_symbol_offsets": []],
-                    ],
+                    "content": content,
+                    "metadata": metadata,
                 ],
             ],
             "parent_message_id": self.uuid(),
@@ -624,10 +662,11 @@ public enum OpenAIImagesProxySupport {
         return fields
     }
 
-    private static func imageDataURIs(fromJSONObject object: [String: Any]) -> [String] {
+    private static func imageDataURIs(fromJSONObject object: [String: Any], keys: [String]) -> [String] {
         var values: [String] = []
-        self.collectImageStrings(from: object["image"], into: &values)
-        self.collectImageStrings(from: object["images"], into: &values)
+        for key in keys {
+            self.collectImageStrings(from: object[key], into: &values)
+        }
         return values.compactMap(self.normalizedImageDataURI)
     }
 
@@ -1234,6 +1273,21 @@ private struct ParsedMultipart {
             guard part.filename != nil,
                   let name = part.name,
                   name == "image" || name == "image[]",
+                  part.body.isEmpty == false
+            else {
+                return nil
+            }
+            let mimeType = part.contentType?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedMimeType = (mimeType?.isEmpty == false ? mimeType! : "image/png")
+            return "data:\(resolvedMimeType);base64,\(part.body.base64EncodedString())"
+        }
+    }
+
+    var maskImageDataURIs: [String] {
+        self.parts.compactMap { part -> String? in
+            guard part.filename != nil,
+                  let name = part.name,
+                  name == "mask" || name == "mask[]",
                   part.body.isEmpty == false
             else {
                 return nil

@@ -1022,6 +1022,20 @@ public enum ProxyTranscoder {
                     return item
                 }
 
+                if let type = item["type"] as? String, type == "image_url",
+                   let imageURL = self.chatCompletionImageURLObject(from: item),
+                   let url = imageURL["url"] as? String
+                {
+                    var converted: [String: Any] = [
+                        "type": "input_image",
+                        "image_url": url,
+                    ]
+                    if let detail = imageURL["detail"] {
+                        converted["detail"] = detail
+                    }
+                    return converted
+                }
+
                 if let type = item["type"] as? String, type == "input_image" || type == "input_file" {
                     return item
                 }

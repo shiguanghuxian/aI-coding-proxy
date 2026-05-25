@@ -629,6 +629,11 @@ final class DaemonHTTPService: @unchecked Sendable {
         case ("POST", "/admin/reasoning-cache/clear"):
             let payload = try self.decode(ClearReasoningCacheRequest.self, from: request.body)
             return try self.codableResponse(try await self.controller.clearReasoningCache(payload))
+        case ("GET", "/admin/ocr-cache/summary"):
+            return try self.codableResponse(try await self.controller.ocrCacheSummary())
+        case ("POST", "/admin/ocr-cache/clear"):
+            let payload = try self.decode(ClearOCRCacheRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.clearOCRCache(payload))
         default:
             if let response = try await self.handleAccountManagementRoute(request) {
                 return response
@@ -683,6 +688,12 @@ final class DaemonHTTPService: @unchecked Sendable {
             let id = components[2].removingPercentEncoding ?? components[2]
             let payload = try self.decode(UpdateAccountModelRoutingRequest.self, from: request.body)
             return try self.codableResponse(try await self.controller.updateAccountModelRouting(id: id, input: payload))
+        }
+
+        if request.method == "PATCH", components.count == 4, components[0] == "admin", components[1] == "accounts", components[3] == "reasoning-effort" {
+            let id = components[2].removingPercentEncoding ?? components[2]
+            let payload = try self.decode(UpdateAccountReasoningEffortRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.updateAccountReasoningEffort(id: id, input: payload))
         }
 
         if request.method == "GET", components.count == 4, components[0] == "admin", components[1] == "accounts", components[3] == "manual-api-key" {

@@ -56,6 +56,7 @@ public final class AccountService: @unchecked Sendable {
                         enabled: candidate.enabled ?? true,
                         managedProxyNodeName: candidate.managedProxyNodeName,
                         modelRouting: candidate.modelRouting,
+                        reasoningEffort: candidate.reasoningEffort,
                         automaticCooldownDisabled: candidate.automaticCooldownDisabled ?? false
                     )
                     if try self.store.upsertAccount(record) {
@@ -104,7 +105,8 @@ public final class AccountService: @unchecked Sendable {
                 sourceLabel: input.label,
                 config: config,
                 enabled: input.enabled,
-                automaticCooldownDisabled: input.automaticCooldownDisabled
+                automaticCooldownDisabled: input.automaticCooldownDisabled,
+                supportsVision: input.supportsVision
             )
         } catch {
             throw ProxyError.message("手动添加 API Key 账号失败：准备账号数据时出错，\(error.localizedDescription)")
@@ -154,7 +156,8 @@ public final class AccountService: @unchecked Sendable {
             upstreamAdapter: extracted.upstreamAdapter,
             apiKey: extracted.accessToken,
             enabled: record.enabled,
-            automaticCooldownDisabled: record.automaticCooldownDisabled
+            automaticCooldownDisabled: record.automaticCooldownDisabled,
+            supportsVision: record.supportsVision
         )
     }
 
@@ -194,7 +197,8 @@ public final class AccountService: @unchecked Sendable {
                 sourceLabel: input.label,
                 config: config,
                 enabled: input.enabled,
-                automaticCooldownDisabled: input.automaticCooldownDisabled
+                automaticCooldownDisabled: input.automaticCooldownDisabled,
+                supportsVision: input.supportsVision
             )
         } catch {
             throw ProxyError.message("编辑 API Key 账号失败：准备账号数据时出错，\(error.localizedDescription)")
@@ -214,6 +218,8 @@ public final class AccountService: @unchecked Sendable {
             upstreamBaseURL: prepared.upstreamBaseURL,
             managedProxyNodeName: existingRecord.managedProxyNodeName,
             modelRouting: existingRecord.modelRouting,
+            reasoningEffort: existingRecord.reasoningEffort,
+            supportsVision: prepared.supportsVision,
             authJSON: prepared.authJSON,
             addedAt: existingRecord.addedAt,
             updatedAt: Helpers.now(),
@@ -327,6 +333,45 @@ public final class AccountService: @unchecked Sendable {
             return try self.summary(forID: existingRecord.id)
         } catch {
             throw ProxyError.message("更新账号模型转换失败：回读账号摘要时出错，\(error.localizedDescription)")
+        }
+    }
+
+    func updateAccountReasoningEffort(
+        id: String,
+        input: UpdateAccountReasoningEffortRequest
+    ) async throws -> AccountSummary {
+        let existingRecord: AccountRecord
+        do {
+            existingRecord = try self.store.loadAccountRecord(id: id)
+        } catch {
+            throw ProxyError.message("更新账号思考强度失败：读取现有账号时出错，\(error.localizedDescription)")
+        }
+
+        guard existingRecord.authMode == .openAIAPIKey else {
+            throw ProxyError.message("更新账号思考强度失败：仅支持 OpenAI API Key 类型账号")
+        }
+        let extracted = try AuthService.extractAuth(from: existingRecord.authJSON, secretStore: self.secretStore)
+        let usesChatCompletions = (
+            extracted.authMode == .openAIAPIKey
+            && (
+                (extracted.providerPreset == .genericOpenAICompatible && extracted.upstreamAdapter == .chatCompletions)
+                || extracted.providerPreset.usesOpenAIChatCompletionsAPI
+            )
+        )
+        guard usesChatCompletions else {
+            throw ProxyError.message("更新账号思考强度失败：仅支持 Chat Completions 上游适配账号")
+        }
+
+        do {
+            try self.store.updateAccountReasoningEffort(id: id, reasoningEffort: input.reasoningEffort)
+        } catch {
+            throw ProxyError.message("更新账号思考强度失败：写入本地账号池时出错，\(error.localizedDescription)")
+        }
+
+        do {
+            return try self.summary(forID: existingRecord.id)
+        } catch {
+            throw ProxyError.message("更新账号思考强度失败：回读账号摘要时出错，\(error.localizedDescription)")
         }
     }
 
@@ -688,8 +733,11 @@ public final class AccountService: @unchecked Sendable {
         enabled: Bool,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
-        automaticCooldownDisabled: Bool = false
+        reasoningEffort: AccountReasoningEffortConfig? = nil,
+        automaticCooldownDisabled: Bool = false,
+        supportsVision: Bool? = nil
     ) async throws -> AccountRecord {
+        let importedSupportsVision = Self.extractSupportsVisionOverride(from: text)
         let normalized = try AuthService.normalizeImportedAuthJSON(text)
         let extracted = try AuthService.extractAuth(from: normalized, secretStore: self.secretStore)
         if extracted.authMode.isManualAPIKey,
@@ -764,12 +812,52 @@ public final class AccountService: @unchecked Sendable {
             upstreamBaseURL: extracted.upstreamBaseURL,
             managedProxyNodeName: managedProxyNodeName,
             modelRouting: modelRouting,
+            reasoningEffort: reasoningEffort ?? .defaultConfig,
+            supportsVision: supportsVision
+                ?? importedSupportsVision
+                ?? Self.defaultSupportsVision(for: extracted.authMode),
             authJSON: normalized,
             enabled: enabled,
             automaticCooldownDisabled: extracted.authMode.isManualAPIKey ? automaticCooldownDisabled : false,
             usage: usage,
             usageError: usageError
         )
+    }
+
+    private static func defaultSupportsVision(for authMode: AccountAuthMode) -> Bool {
+        authMode.isManualAPIKey == false
+    }
+
+    private static func extractSupportsVisionOverride(from text: String) -> Bool? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        return self.boolValue(object["supportsVision"])
+            ?? self.boolValue(object["supports_vision"])
+            ?? self.boolValue((object["tokens"] as? [String: Any])?["supportsVision"])
+            ?? self.boolValue((object["tokens"] as? [String: Any])?["supports_vision"])
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        if let string = value as? String {
+            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "y", "on":
+                return true
+            case "false", "0", "no", "n", "off":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
     }
 
     private func refreshUsage(for record: AccountRecord, config: AppConfig, forceRefresh: Bool) async -> RefreshOutcome {
@@ -983,6 +1071,9 @@ public final class AccountService: @unchecked Sendable {
                     modelRouting: try Self.decodeAccountModelRouting(
                         from: account["modelRouting"] ?? account["model_routing"]
                     ),
+                    reasoningEffort: try Self.decodeAccountReasoningEffort(
+                        from: account["reasoningEffort"] ?? account["reasoning_effort"]
+                    ),
                     automaticCooldownDisabled: (account["automaticCooldownDisabled"] as? Bool)
                         ?? (account["automatic_cooldown_disabled"] as? Bool)
                 )
@@ -996,6 +1087,9 @@ public final class AccountService: @unchecked Sendable {
                     content: String(decoding: authJSONData, as: UTF8.self),
                     label: item.label,
                     enabled: self.importEnabledFlag(from: object, fallback: item.enabled),
+                    reasoningEffort: try Self.decodeAccountReasoningEffort(
+                        from: object["reasoningEffort"] ?? object["reasoning_effort"]
+                    ) ?? item.reasoningEffort,
                     automaticCooldownDisabled: item.automaticCooldownDisabled
                 )
             }
@@ -1009,6 +1103,9 @@ public final class AccountService: @unchecked Sendable {
                     enabled: self.importEnabledFlag(from: object, fallback: item.enabled),
                     managedProxyNodeName: item.managedProxyNodeName,
                     modelRouting: item.modelRouting,
+                    reasoningEffort: try Self.decodeAccountReasoningEffort(
+                        from: object["reasoningEffort"] ?? object["reasoning_effort"]
+                    ) ?? item.reasoningEffort,
                     automaticCooldownDisabled: item.automaticCooldownDisabled
                 ),
             ]
@@ -1155,6 +1252,8 @@ public final class AccountService: @unchecked Sendable {
             upstreamBaseURL: extracted.upstreamBaseURL,
             managedProxyNodeName: record.managedProxyNodeName,
             modelRouting: record.modelRouting,
+            reasoningEffort: record.reasoningEffort,
+            supportsVision: record.supportsVision,
             authJSON: normalized,
             addedAt: record.addedAt,
             updatedAt: Helpers.now(),
@@ -1220,6 +1319,12 @@ public final class AccountService: @unchecked Sendable {
         guard let value else { return nil }
         let data = try JSONSerialization.data(withJSONObject: value)
         return AccountSummary.normalizedModelRouting(try Helpers.readJSON(AccountModelRoutingConfig.self, from: data))
+    }
+
+    private static func decodeAccountReasoningEffort(from value: Any?) throws -> AccountReasoningEffortConfig? {
+        guard let value else { return nil }
+        let data = try JSONSerialization.data(withJSONObject: value)
+        return try Helpers.readJSON(AccountReasoningEffortConfig.self, from: data)
     }
 
     private func manualAPIKeyEditBaseURL(

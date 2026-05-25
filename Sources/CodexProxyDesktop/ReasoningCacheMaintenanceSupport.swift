@@ -156,5 +156,93 @@ extension DesktopAppModel {
         alert.addButton(withTitle: self.text(.commonCancel))
         return alert.runModal() == .alertFirstButtonReturn
     }
+
+    var ocrCacheHasEntries: Bool {
+        self.ocrCacheSummary.totalCount > 0
+    }
+
+    func loadOCRCacheSummary() async {
+        self.ocrCacheIsRefreshing = true
+        defer { self.ocrCacheIsRefreshing = false }
+        do {
+            self.ocrCacheSummary = try await self.admin.getOCRCacheSummary()
+        } catch {
+            self.present(error: error, context: .loadOCRCache)
+        }
+    }
+
+    func clearExpiredOCRCache() async {
+        await self.clearOCRCache(
+            request: ClearOCRCacheRequest(expiredOnly: true),
+            title: self.text(.confirmClearOCRCacheExpiredTitle),
+            message: self.text(.confirmClearOCRCacheExpiredMessage)
+        )
+    }
+
+    func clearOCRCacheOlderThanSelectedPreset() async {
+        let seconds = max(1, self.ocrCacheOlderThanSeconds)
+        await self.clearOCRCache(
+            request: ClearOCRCacheRequest(olderThanSeconds: seconds),
+            title: self.text(.confirmClearOCRCacheOlderThanTitle),
+            message: self.localized(
+                zh: "将清理最后使用时间早于 \(self.reasoningCacheOlderThanLabel(seconds)) 的 OCR 结果缓存。",
+                en: "This clears OCR result cache entries last used more than \(self.reasoningCacheOlderThanLabel(seconds)) ago."
+            )
+        )
+    }
+
+    func clearAllOCRCache() async {
+        await self.clearOCRCache(
+            request: ClearOCRCacheRequest(clearAll: true),
+            title: self.text(.confirmClearOCRCacheAllTitle),
+            message: self.text(.confirmClearOCRCacheAllMessage)
+        )
+    }
+
+    func ocrCacheTimestampText(_ timestamp: Int64?) -> String {
+        self.reasoningCacheTimestampText(timestamp)
+    }
+
+    private func clearOCRCache(
+        request: ClearOCRCacheRequest,
+        title: String,
+        message: String
+    ) async {
+        guard self.ocrCacheHasEntries || request.expiredOnly else { return }
+        let confirmation = OCRCacheClearConfirmationContent(
+            title: title,
+            informativeText: message,
+            actionTitle: self.text(.actionClearOCRCacheConfirm)
+        )
+        guard self.confirmClearOCRCache(confirmation) else { return }
+
+        self.ocrCacheIsClearing = true
+        defer { self.ocrCacheIsClearing = false }
+        do {
+            let result = try await self.admin.clearOCRCache(request)
+            self.ocrCacheSummary = result.summary
+            self.publishBanner(
+                .success,
+                title: self.text(.successOCRCacheCleared),
+                detail: self.localized(zh: "已清理 \(result.deletedCount) 条 OCR 缓存。", en: "Cleared \(result.deletedCount) OCR cache entries.")
+            )
+        } catch {
+            self.present(error: error, context: .clearOCRCache)
+        }
+    }
+
+    private func confirmClearOCRCache(_ content: OCRCacheClearConfirmationContent) -> Bool {
+        if let confirmClearOCRCacheHandler {
+            return confirmClearOCRCacheHandler(content)
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = content.title
+        alert.informativeText = content.informativeText
+        alert.addButton(withTitle: content.actionTitle)
+        alert.addButton(withTitle: self.text(.commonCancel))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 }
 #endif

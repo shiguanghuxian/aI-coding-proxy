@@ -1,4 +1,8 @@
 import Foundation
+#if canImport(CoreGraphics) && canImport(ImageIO)
+import CoreGraphics
+import ImageIO
+#endif
 
 public struct ProxyHTTPResponse: Sendable {
     public enum Body: Sendable {
@@ -578,6 +582,7 @@ public final class DaemonController: @unchecked Sendable {
     private let managedProxyNodeCoordinator: ManagedProxyNodeCoordinator
     private let accountModelDiscoveryCache: AccountModelDiscoveryCache
     private let chatCompletionsReasoningCache: ChatCompletionsReasoningCache
+    private let ocrImageProcessor: OCRImageProcessor
 
     public convenience init(
         dataDirectory: URL = Paths.defaultDataDirectory(),
@@ -615,6 +620,7 @@ public final class DaemonController: @unchecked Sendable {
         self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
         self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
         self.chatCompletionsReasoningCache = ChatCompletionsReasoningCache(store: self.store)
+        self.ocrImageProcessor = OCRImageProcessor(cache: OCRResultCache(store: self.store))
         self.managedProxyRuntime = manageManagedProxyRuntime
             ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
             : nil
@@ -639,6 +645,7 @@ public final class DaemonController: @unchecked Sendable {
         try await self.reconcileManagedProxyAccountNodeListeners(config: normalizedConfig)
         try self.store.pruneStats(retentionDays: config.statsRetentionDays)
         self.chatCompletionsReasoningCache.pruneExpired()
+        await self.ocrImageProcessor.pruneExpiredCache()
     }
 
     public func loadConfig() async throws -> AppConfig {
@@ -832,6 +839,10 @@ public final class DaemonController: @unchecked Sendable {
         )
     }
 
+    public func updateAccountReasoningEffort(id: String, input: UpdateAccountReasoningEffortRequest) async throws -> AccountSummary {
+        try await self.accountService.updateAccountReasoningEffort(id: id, input: input)
+    }
+
     public func exportAccounts() async throws -> Data {
         try await self.accountService.exportAccounts()
     }
@@ -950,6 +961,14 @@ public final class DaemonController: @unchecked Sendable {
 
     public func clearReasoningCache(_ request: ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult {
         try self.chatCompletionsReasoningCache.clear(request)
+    }
+
+    public func ocrCacheSummary() async throws -> OCRCacheSummary {
+        try await self.ocrImageProcessor.cacheSummary()
+    }
+
+    public func clearOCRCache(_ request: ClearOCRCacheRequest) async throws -> ClearOCRCacheResult {
+        try await self.ocrImageProcessor.clearCache(request)
     }
 
     public func proxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {
@@ -1881,10 +1900,10 @@ public final class DaemonController: @unchecked Sendable {
         resolvedModel: String
     ) async throws -> [String: Any] {
         let conversationURL = self.chatGPTWebURL(config: config, path: "/backend-api/f/conversation")
-        guard endpoint == .generations else {
+        guard endpoint == .generations || endpoint == .edits else {
             throw ChatGPTWebImageFailure(
                 statusCode: 400,
-                bodyText: "ChatGPT OAuth image proxy currently supports /v1/images/generations only.",
+                bodyText: "ChatGPT OAuth image proxy currently supports /v1/images/generations and /v1/images/edits only.",
                 upstreamURL: conversationURL,
                 shouldContinueOverride: true
             )
@@ -1892,7 +1911,7 @@ public final class DaemonController: @unchecked Sendable {
         if info.responseFormat == "url" {
             throw ChatGPTWebImageFailure(
                 statusCode: 400,
-                bodyText: "ChatGPT OAuth image generation returns b64_json only; response_format=url requires an OpenAI API key account.",
+                bodyText: "ChatGPT OAuth image proxy returns b64_json only; response_format=url requires an OpenAI API key account.",
                 upstreamURL: conversationURL,
                 shouldContinueOverride: true
             )
@@ -1900,20 +1919,46 @@ public final class DaemonController: @unchecked Sendable {
         guard let prompt = info.prompt else {
             throw ChatGPTWebImageFailure(
                 statusCode: 400,
-                bodyText: "ChatGPT OAuth image generation requires a non-empty prompt.",
+                bodyText: "ChatGPT OAuth image proxy requires a non-empty prompt.",
                 upstreamURL: conversationURL,
                 shouldContinueOverride: true
             )
+        }
+        if endpoint == .edits {
+            if info.maskImageDataURIs.isEmpty == false {
+                throw ChatGPTWebImageFailure(
+                    statusCode: 400,
+                    bodyText: "ChatGPT OAuth image edits do not support mask inputs yet; use an OpenAI API key account for masked edits.",
+                    upstreamURL: conversationURL,
+                    shouldContinueOverride: true
+                )
+            }
+            if info.inputImageDataURIs.isEmpty {
+                throw ChatGPTWebImageFailure(
+                    statusCode: 400,
+                    bodyText: "ChatGPT OAuth image edits require at least one base64/data URL/http(s) image input; file-id-only edits are not supported.",
+                    upstreamURL: conversationURL,
+                    shouldContinueOverride: true
+                )
+            }
         }
 
         let count = OpenAIImagesProxySupport.chatGPTWebImageCount(info.n)
         var imageData: [Data] = []
         let session = try await self.chatGPTWebImageSession(candidate: candidate, config: config)
         let requirements = try await self.chatGPTWebImageRequirements(candidate: candidate, config: config, session: session)
+        let references = try await self.chatGPTWebUploadedImageReferences(
+            for: endpoint == .edits ? info.inputImageDataURIs : [],
+            candidate: candidate,
+            config: config,
+            session: session,
+            upstreamURL: conversationURL
+        )
         for _ in 0..<count {
             let state = try await self.runChatGPTWebImageTurn(
                 prompt: prompt,
                 model: resolvedModel,
+                imageReferences: references.map(\.payload),
                 requirements: requirements,
                 candidate: candidate,
                 config: config,
@@ -1943,6 +1988,272 @@ public final class DaemonController: @unchecked Sendable {
             )
         }
         return OpenAIImagesProxySupport.chatGPTWebImagesAPIResponse(imageData: imageData)
+    }
+
+    private func chatGPTWebUploadedImageReferences(
+        for imageValues: [String],
+        candidate: ProxyCandidate,
+        config: AppConfig,
+        session: ChatGPTWebImageSessionContext,
+        upstreamURL: String
+    ) async throws -> [ChatGPTWebUploadedImageReference] {
+        var references: [ChatGPTWebUploadedImageReference] = []
+        for (offset, value) in imageValues.enumerated() {
+            references.append(
+                try await self.chatGPTWebUploadImage(
+                    value,
+                    index: offset + 1,
+                    candidate: candidate,
+                    config: config,
+                    session: session,
+                    upstreamURL: upstreamURL
+                )
+            )
+        }
+        return references
+    }
+
+    private func chatGPTWebUploadImage(
+        _ imageValue: String,
+        index: Int,
+        candidate: ProxyCandidate,
+        config: AppConfig,
+        session: ChatGPTWebImageSessionContext,
+        upstreamURL: String
+    ) async throws -> ChatGPTWebUploadedImageReference {
+        let image = try await self.chatGPTWebImageBinary(
+            from: imageValue,
+            index: index,
+            candidate: candidate,
+            config: config,
+            upstreamURL: upstreamURL
+        )
+        let path = "/backend-api/files"
+        let url = self.chatGPTWebURL(config: config, path: path)
+        let uploadInitBody = try JSONSerialization.data(withJSONObject: [
+            "file_name": image.fileName,
+            "file_size": image.data.count,
+            "use_case": "multimodal",
+            "width": image.width,
+            "height": image.height,
+        ])
+        let uploadInitHeaders = self.chatGPTWebHeaders(
+            auth: candidate.auth,
+            config: config,
+            session: session,
+            path: path,
+            accept: "application/json",
+            contentType: "application/json"
+        )
+        let uploadInitResponse = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+            try await HTTPClientFactory.request(
+                config: requestConfig,
+                url: url,
+                method: .POST,
+                headers: uploadInitHeaders,
+                body: uploadInitBody
+            )
+        }
+        guard (200..<300).contains(uploadInitResponse.statusCode) else {
+            throw ChatGPTWebImageFailure(
+                statusCode: uploadInitResponse.statusCode,
+                bodyText: uploadInitResponse.bodyText,
+                upstreamURL: url
+            )
+        }
+        guard let uploadObject = try? JSONSerialization.jsonObject(with: uploadInitResponse.body) as? [String: Any],
+              let fileID = self.trimmedString(uploadObject["file_id"]),
+              let uploadURLValue = self.trimmedString(uploadObject["upload_url"])
+        else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 502,
+                bodyText: "ChatGPT image upload init response did not include file_id and upload_url.",
+                upstreamURL: url,
+                shouldContinueOverride: true
+            )
+        }
+
+        let uploadURL = self.resolvedChatGPTWebURL(config: config, value: uploadURLValue)
+        let baseURL = self.chatGPTWebBaseURL(config: config)
+        let blobHeaders: [String: String] = [
+            "Content-Type": image.mimeType,
+            "x-ms-blob-type": "BlockBlob",
+            "x-ms-version": "2020-04-08",
+            "Origin": baseURL,
+            "Referer": "\(baseURL)/",
+            "User-Agent": session.userAgent,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+        ]
+        let blobResponse = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+            try await HTTPClientFactory.request(
+                config: requestConfig,
+                url: uploadURL,
+                method: .PUT,
+                headers: blobHeaders,
+                body: image.data
+            )
+        }
+        guard (200..<300).contains(blobResponse.statusCode) else {
+            throw ChatGPTWebImageFailure(
+                statusCode: blobResponse.statusCode,
+                bodyText: blobResponse.bodyText,
+                upstreamURL: uploadURL
+            )
+        }
+
+        let uploadedPath = "/backend-api/files/\(self.percentEncodedPathComponent(fileID))/uploaded"
+        let uploadedURL = self.chatGPTWebURL(config: config, path: uploadedPath)
+        let uploadedHeaders = self.chatGPTWebHeaders(
+            auth: candidate.auth,
+            config: config,
+            session: session,
+            path: uploadedPath,
+            accept: "application/json",
+            contentType: "application/json"
+        )
+        let uploadedResponse = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+            try await HTTPClientFactory.request(
+                config: requestConfig,
+                url: uploadedURL,
+                method: .POST,
+                headers: uploadedHeaders,
+                body: Data("{}".utf8)
+            )
+        }
+        guard (200..<300).contains(uploadedResponse.statusCode) else {
+            throw ChatGPTWebImageFailure(
+                statusCode: uploadedResponse.statusCode,
+                bodyText: uploadedResponse.bodyText,
+                upstreamURL: uploadedURL
+            )
+        }
+
+        return ChatGPTWebUploadedImageReference(
+            fileID: fileID,
+            fileName: image.fileName,
+            fileSize: image.data.count,
+            mimeType: image.mimeType,
+            width: image.width,
+            height: image.height
+        )
+    }
+
+    private func chatGPTWebImageBinary(
+        from rawValue: String,
+        index: Int,
+        candidate: ProxyCandidate,
+        config: AppConfig,
+        upstreamURL: String
+    ) async throws -> ChatGPTWebImageBinary {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits received an empty image input.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+
+        let data: Data
+        let mimeType: String
+        if trimmed.lowercased().hasPrefix("data:") {
+            let parsed = try self.chatGPTWebParseDataImage(trimmed, upstreamURL: upstreamURL)
+            data = parsed.data
+            mimeType = parsed.mimeType
+        } else if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") {
+            let response = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                try await HTTPClientFactory.request(
+                    config: requestConfig,
+                    url: trimmed,
+                    method: .GET,
+                    headers: ["Accept": "image/*,*/*;q=0.8"]
+                )
+            }
+            guard (200..<300).contains(response.statusCode) else {
+                throw ChatGPTWebImageFailure(
+                    statusCode: response.statusCode,
+                    bodyText: "ChatGPT OAuth image edit input download failed: HTTP \(response.statusCode).",
+                    upstreamURL: trimmed,
+                    shouldContinueOverride: true
+                )
+            }
+            data = response.body
+            mimeType = self.normalizedImageMimeType(
+                response.headers["content-type"],
+                data: data
+            )
+        } else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits only support base64/data URL/http(s) image inputs; file-id-only edits are not supported.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+
+        guard data.isEmpty == false else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edit input is empty.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+        let normalizedMimeType = self.normalizedImageMimeType(mimeType, data: data)
+        guard normalizedMimeType.hasPrefix("image/") else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits received an unsupported image format: \(mimeType).",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+        let dimensions = self.imageDimensions(from: data)
+        let fileName = "image_\(max(index, 1)).\(self.fileExtension(forImageMimeType: normalizedMimeType))"
+        return ChatGPTWebImageBinary(
+            data: data,
+            mimeType: normalizedMimeType,
+            fileName: fileName,
+            width: dimensions.width,
+            height: dimensions.height
+        )
+    }
+
+    private func chatGPTWebParseDataImage(_ value: String, upstreamURL: String) throws -> (mimeType: String, data: Data) {
+        guard let comma = value.firstIndex(of: ",") else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits received an invalid data URL image input.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+        let header = String(value[..<comma]).lowercased()
+        guard header.contains(";base64") else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits require base64 data URL image inputs.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+        let mimeType = header
+            .dropFirst("data:".count)
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map(String.init) ?? "image/png"
+        let payload = String(value[value.index(after: comma)...])
+        guard let data = Data(base64Encoded: payload) else {
+            throw ChatGPTWebImageFailure(
+                statusCode: 400,
+                bodyText: "ChatGPT OAuth image edits only support base64/data URL/http(s) image inputs; file-id-only edits are not supported.",
+                upstreamURL: upstreamURL,
+                shouldContinueOverride: true
+            )
+        }
+        return (mimeType, data)
     }
 
     private func chatGPTWebImageSession(
@@ -2099,6 +2410,7 @@ public final class DaemonController: @unchecked Sendable {
     private func runChatGPTWebImageTurn(
         prompt: String,
         model: String,
+        imageReferences: [[String: Any]] = [],
         requirements: ChatGPTWebImageRequirements,
         candidate: ProxyCandidate,
         config: AppConfig,
@@ -2152,7 +2464,11 @@ public final class DaemonController: @unchecked Sendable {
         let conversationPath = "/backend-api/f/conversation"
         let conversationURL = self.chatGPTWebURL(config: config, path: conversationPath)
         let conversationBody = try JSONSerialization.data(
-            withJSONObject: OpenAIImagesProxySupport.chatGPTWebConversationPayload(prompt: prompt, model: model)
+            withJSONObject: OpenAIImagesProxySupport.chatGPTWebConversationPayload(
+                prompt: prompt,
+                model: model,
+                imageReferences: imageReferences
+            )
         )
         let conversationHeaders = self.chatGPTWebHeaders(
             auth: candidate.auth,
@@ -2508,6 +2824,63 @@ public final class DaemonController: @unchecked Sendable {
             path: path,
             accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
         )
+    }
+
+    private func normalizedImageMimeType(_ value: String?, data: Data) -> String {
+        let contentType = value?
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let contentType, ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"].contains(contentType) {
+            return contentType == "image/jpg" ? "image/jpeg" : contentType
+        }
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
+            return "image/png"
+        }
+        if bytes.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "image/jpeg"
+        }
+        if bytes.starts(with: [0x47, 0x49, 0x46]) {
+            return "image/gif"
+        }
+        if bytes.count >= 12,
+           Array(bytes[0...3]) == [0x52, 0x49, 0x46, 0x46],
+           Array(bytes[8...11]) == [0x57, 0x45, 0x42, 0x50]
+        {
+            return "image/webp"
+        }
+        return contentType ?? "application/octet-stream"
+    }
+
+    private func fileExtension(forImageMimeType mimeType: String) -> String {
+        switch mimeType.lowercased() {
+        case "image/jpeg", "image/jpg":
+            return "jpg"
+        case "image/webp":
+            return "webp"
+        case "image/gif":
+            return "gif"
+        default:
+            return "png"
+        }
+    }
+
+    private func imageDimensions(from data: Data) -> (width: Int, height: Int) {
+        #if canImport(CoreGraphics) && canImport(ImageIO)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else {
+            return (0, 0)
+        }
+        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        return (width, height)
+        #else
+        return (0, 0)
+        #endif
     }
 
     private func percentEncodedPathComponent(_ value: String) -> String {
@@ -2976,6 +3349,7 @@ public final class DaemonController: @unchecked Sendable {
     ) async throws -> ProxyHTTPResponse {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
         var request = try GeminiTranscoder.normalizeCountTokensRequest(object, model: model)
+        let config = try await self.loadConfigForNetworkRequests()
         let promptCacheContext = PromptCacheSupport.context(
             headers: headers,
             requestPayload: object,
@@ -3022,6 +3396,7 @@ public final class DaemonController: @unchecked Sendable {
                     clientSource: clientSource,
                     promptCacheContext: promptCacheContext,
                     candidate: candidate,
+                    config: config,
                     requestedModel: request.responseModel,
                     startMS: startMS
                 )
@@ -3108,8 +3483,17 @@ public final class DaemonController: @unchecked Sendable {
     }
 
     public func adminProxyTestRun(_ input: AdminProxyTestRunRequest) async throws -> ProxyHTTPResponse {
-        guard let body = input.payloadJSON.data(using: .utf8) else {
-            throw ProxyError.message("Admin proxy test payload must be valid UTF-8 JSON.")
+        let body: Data
+        if let bodyBase64 = self.trimmed(input.bodyBase64) {
+            guard let decoded = Data(base64Encoded: bodyBase64) else {
+                throw ProxyError.message("Admin proxy test bodyBase64 must be valid base64.")
+            }
+            body = decoded
+        } else {
+            guard let payloadBody = input.payloadJSON.data(using: .utf8) else {
+                throw ProxyError.message("Admin proxy test payload must be valid UTF-8 JSON.")
+            }
+            body = payloadBody
         }
         let selectedAccountKey = self.trimmed(input.selectedAccountKey)
         let proxyAPIKey = self.trimmed(input.proxyAPIKey)
@@ -3125,11 +3509,14 @@ public final class DaemonController: @unchecked Sendable {
             throw ProxyError.message("Admin proxy test route requires `proxyAPIKey` for this endpoint.")
         }
 
-        let headers = self.adminProxyTestHeaders(
+        var headers = self.adminProxyTestHeaders(
             selectedAccountKey: selectedAccountKey,
             anthropicVersion: input.anthropicVersion,
             anthropicBeta: input.anthropicBeta
         )
+        if let contentType = self.trimmed(input.contentType) {
+            headers["content-type"] = contentType
+        }
         let proxyKey = try await self.authenticateProxyAPIKey(proxyAPIKey)
 
         switch input.endpoint {
@@ -3153,6 +3540,15 @@ public final class DaemonController: @unchecked Sendable {
             return try await self.proxyImages(
                 body: body,
                 endpoint: .generations,
+                proxyKey: proxyKey,
+                apiKeyValue: proxyAPIKey,
+                headers: headers,
+                selectedAccountKey: selectedAccountKey
+            )
+        case .imageEdits:
+            return try await self.proxyImages(
+                body: body,
+                endpoint: .edits,
                 proxyKey: proxyKey,
                 apiKeyValue: proxyAPIKey,
                 headers: headers,
@@ -3262,6 +3658,7 @@ public final class DaemonController: @unchecked Sendable {
         normalizedRequest: [String: Any],
         context: GeminiRequestContext
     ) async throws -> ProxyHTTPResponse {
+        let config = try await self.loadConfigForNetworkRequests()
         let endpoint = downstreamStream
             ? "/v1beta/models/\(requestedModel):streamGenerateContent"
             : "/v1beta/models/\(requestedModel):generateContent"
@@ -3291,7 +3688,7 @@ public final class DaemonController: @unchecked Sendable {
                     requestedModel: requestedModel,
                     sourceAnthropicModel: nil,
                     record: candidate.record,
-                    config: AppConfig(),
+                    config: config,
                     auth: candidate.auth
                 )
                 let resolvedUpstreamModel = modelResolution.resolvedRequestModel
@@ -3306,7 +3703,8 @@ public final class DaemonController: @unchecked Sendable {
                 let preparedGeminiRequest = await self.preparedGeminiNativeRequestPayload(
                     rawRequest: rawGeminiRequest,
                     candidate: candidate,
-                    context: promptCacheContext
+                    context: promptCacheContext,
+                    config: config
                 )
                 let upstreamBody = try GeminiAuthService.generateContentRequestBody(
                     rawRequest: preparedGeminiRequest,
@@ -3515,6 +3913,7 @@ public final class DaemonController: @unchecked Sendable {
         clientSource: RequestLogClientSource,
         promptCacheContext: PromptCacheContext,
         candidate: ProxyCandidate,
+        config: AppConfig,
         requestedModel: String,
         startMS: Int64
     ) async throws -> ProxyHTTPResponse {
@@ -3522,7 +3921,7 @@ public final class DaemonController: @unchecked Sendable {
             requestedModel: requestedModel,
             sourceAnthropicModel: nil,
             record: candidate.record,
-            config: AppConfig(),
+            config: config,
             auth: candidate.auth
         )
         let resolvedUpstreamModel = modelResolution.resolvedRequestModel
@@ -3532,8 +3931,14 @@ public final class DaemonController: @unchecked Sendable {
             accept: "application/json"
         )
         let upstreamURL = upstream.url
-        let requestBody = try GeminiAuthService.countTokensRequestBody(
+        let preparedGeminiRequest = await self.preparedGeminiNativeRequestPayload(
             rawRequest: rawGeminiRequest,
+            candidate: candidate,
+            context: promptCacheContext,
+            config: config
+        )
+        let requestBody = try GeminiAuthService.countTokensRequestBody(
+            rawRequest: preparedGeminiRequest,
             model: resolvedUpstreamModel
         )
         let response = try await self.withNetworkConfig(for: candidate.record) {
@@ -3746,7 +4151,7 @@ public final class DaemonController: @unchecked Sendable {
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
                     for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel
                 )
-                let upstreamRequestBody = adapterUsesChatCompletions
+                var upstreamRequestBody = adapterUsesChatCompletions
                     ? self.upstreamChatCompletionsRequest(
                         from: compatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
@@ -3758,6 +4163,13 @@ public final class DaemonController: @unchecked Sendable {
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
                 )
+                if adapterUsesChatCompletions {
+                    upstreamRequestBody = self.applyAccountReasoningEffortMapping(
+                        to: upstreamRequestBody,
+                        candidate: candidate,
+                        rawReasoningEffort: nil
+                    )
+                }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
                 let candidateAuth = candidate.auth
@@ -4072,7 +4484,17 @@ public final class DaemonController: @unchecked Sendable {
                     : self.resolveOpenAIToAnthropicModel(
                         requestedModel: modelResolution.resolvedRequestModel
                     )
-                let anthropicRequest = rawAnthropicRequest.map {
+                let preparedRawAnthropicRequest: [String: Any]?
+                if let rawAnthropicRequest {
+                    preparedRawAnthropicRequest = await self.anthropicRequestByApplyingOCRIfNeeded(
+                        rawAnthropicRequest,
+                        candidate: candidate,
+                        config: resolvedConfig
+                    )
+                } else {
+                    preparedRawAnthropicRequest = nil
+                }
+                let anthropicRequest = preparedRawAnthropicRequest.map {
                     self.preparedAnthropicRequestPayload(
                         rawPayload: $0,
                         upstreamModel: upstreamModel,
@@ -4382,7 +4804,17 @@ public final class DaemonController: @unchecked Sendable {
                     : self.resolveOpenAIToAnthropicModel(
                         requestedModel: modelResolution.resolvedRequestModel
                     )
-                var anthropicRequest = rawAnthropicRequest.map {
+                let preparedRawAnthropicRequest: [String: Any]?
+                if let rawAnthropicRequest {
+                    preparedRawAnthropicRequest = await self.anthropicRequestByApplyingOCRIfNeeded(
+                        rawAnthropicRequest,
+                        candidate: candidate,
+                        config: resolvedConfig
+                    )
+                } else {
+                    preparedRawAnthropicRequest = nil
+                }
+                var anthropicRequest = preparedRawAnthropicRequest.map {
                     self.preparedAnthropicRequestPayload(
                         rawPayload: $0,
                         upstreamModel: upstreamModel,
@@ -4544,11 +4976,16 @@ public final class DaemonController: @unchecked Sendable {
             context: promptCacheContext,
             auth: candidate.auth
         )
+        let upstreamCompatibleRequest = await self.requestByApplyingOCRIfNeeded(
+            compatibleRequest,
+            candidate: candidate,
+            config: config
+        )
         let adapters = self.openAIUpstreamAdapters(for: candidate.auth)
 
         for adapter in adapters {
             var upstreamRequestBody = self.openAIUpstreamRequestBody(
-                from: compatibleRequest,
+                from: upstreamCompatibleRequest,
                 requestedModel: requestedModel,
                 auth: candidate.auth,
                 adapter: adapter,
@@ -4557,6 +4994,11 @@ public final class DaemonController: @unchecked Sendable {
                 useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
             )
             if adapter == .chatCompletions {
+                upstreamRequestBody = self.applyAccountReasoningEffortMapping(
+                    to: upstreamRequestBody,
+                    candidate: candidate,
+                    rawReasoningEffort: reasoningEffort
+                )
                 upstreamRequestBody = self.chatCompletionsReasoningCache.apply(
                     to: upstreamRequestBody,
                     accountKey: candidate.record.accountKey,
@@ -4630,7 +5072,7 @@ public final class DaemonController: @unchecked Sendable {
                 }
 
                 await self.setActive(candidate)
-                let streamInputData = self.syntheticResponseInputData(from: compatibleRequest["input"])
+                let streamInputData = self.syntheticResponseInputData(from: upstreamCompatibleRequest["input"])
                 let adaptedBody = adapter == .chatCompletions
                     ? self.openAIChatToSyntheticResponseStream(
                         upstreamBody: response.body,
@@ -4729,7 +5171,7 @@ public final class DaemonController: @unchecked Sendable {
                 completed = ProxyTranscoder.completedResponse(
                     fromChatCompletion: object,
                     requestedModel: requestedModel,
-                    input: compatibleRequest["input"]
+                    input: upstreamCompatibleRequest["input"]
                 )
                 self.chatCompletionsReasoningCache.record(
                     completedResponse: completed,
@@ -4893,26 +5335,38 @@ public final class DaemonController: @unchecked Sendable {
                     context: promptCacheContext,
                     auth: candidate.auth
                 )
+                let upstreamCompatibleRequest = await self.requestByApplyingOCRIfNeeded(
+                    compatibleRequest,
+                    candidate: candidate,
+                    config: config
+                )
                 let adapterUsesChatCompletions = self.usesOpenAIChatCompletionsAdapter(candidate.auth)
-                let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
+                let effectiveRequestedModel = (upstreamCompatibleRequest["model"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let resolvedUpstreamModel = modelResolution.usesAccountModelRouting
                     ? (effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel)
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
                     for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel
                 )
-                let upstreamRequestBody = adapterUsesChatCompletions
+                var upstreamRequestBody = adapterUsesChatCompletions
                     ? self.upstreamChatCompletionsRequest(
-                        from: compatibleRequest,
+                        from: upstreamCompatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
                         stream: downstreamStream,
                         auth: candidate.auth
                     )
                     : self.compatibleCodexRequest(
-                        compatibleRequest,
+                        upstreamCompatibleRequest,
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
                 )
+                if adapterUsesChatCompletions {
+                    upstreamRequestBody = self.applyAccountReasoningEffortMapping(
+                        to: upstreamRequestBody,
+                        candidate: candidate,
+                        rawReasoningEffort: reasoningEffort
+                    )
+                }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
@@ -4980,7 +5434,7 @@ public final class DaemonController: @unchecked Sendable {
                     }
 
                     await self.setActive(candidate)
-                    let streamInputData = self.syntheticResponseInputData(from: compatibleRequest["input"])
+                    let streamInputData = self.syntheticResponseInputData(from: upstreamCompatibleRequest["input"])
                     let adaptedBody = adapterUsesChatCompletions
                         ? self.openAIChatToSyntheticResponseStream(
                             upstreamBody: response.body,
@@ -5075,7 +5529,7 @@ public final class DaemonController: @unchecked Sendable {
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
                         requestedModel: requestedModel,
-                        input: compatibleRequest["input"]
+                        input: upstreamCompatibleRequest["input"]
                     )
                 } else {
                     let events = ProxyTranscoder.decodeSSE(response.body)
@@ -5310,6 +5764,39 @@ public final class DaemonController: @unchecked Sendable {
             ?? context.upstreamPromptCacheKey
     }
 
+    private func requestByApplyingOCRIfNeeded(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        config: AppConfig
+    ) async -> [String: Any] {
+        guard candidate.record.supportsVision == false else {
+            return request
+        }
+        return await self.ocrImageProcessor.requestByApplyingOCRIfNeeded(request, config: config)
+    }
+
+    private func anthropicRequestByApplyingOCRIfNeeded(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        config: AppConfig
+    ) async -> [String: Any] {
+        guard candidate.record.supportsVision == false else {
+            return request
+        }
+        return await self.ocrImageProcessor.anthropicRequestByApplyingOCRIfNeeded(request, config: config)
+    }
+
+    private func geminiNativeRequestByApplyingOCRIfNeeded(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        config: AppConfig
+    ) async -> [String: Any] {
+        guard candidate.record.supportsVision == false else {
+            return request
+        }
+        return await self.ocrImageProcessor.geminiRequestByApplyingOCRIfNeeded(request, config: config)
+    }
+
     private func syntheticResponseInputData(from input: Any?) -> Data? {
         guard let input else { return nil }
         return try? JSONSerialization.data(withJSONObject: input)
@@ -5318,18 +5805,24 @@ public final class DaemonController: @unchecked Sendable {
     private func preparedGeminiNativeRequestPayload(
         rawRequest: [String: Any],
         candidate: ProxyCandidate,
-        context: PromptCacheContext
+        context: PromptCacheContext,
+        config: AppConfig
     ) async -> [String: Any] {
+        let request = await self.geminiNativeRequestByApplyingOCRIfNeeded(
+            rawRequest,
+            candidate: candidate,
+            config: config
+        )
         guard await self.shouldApplyGeminiNativeThoughtSignatureCompatibility(
-            rawRequest: rawRequest,
+            rawRequest: request,
             selectedAccountKey: candidate.record.accountKey,
             context: context
         ) else {
-            return rawRequest
+            return request
         }
 
         return GeminiTranscoder.replacingThoughtSignaturesWithCompatibilitySignature(
-            in: rawRequest
+            in: request
         )
     }
 
@@ -6246,6 +6739,22 @@ public final class DaemonController: @unchecked Sendable {
             upstreamModel: upstreamModel,
             stream: stream
         )
+    }
+
+    private func applyAccountReasoningEffortMapping(
+        to request: [String: Any],
+        candidate: ProxyCandidate,
+        rawReasoningEffort: String?
+    ) -> [String: Any] {
+        guard candidate.auth.authMode == .openAIAPIKey,
+              self.usesOpenAIChatCompletionsAdapter(candidate.auth),
+              let mapped = candidate.record.reasoningEffort.mappedReasoningEffort(for: rawReasoningEffort)
+        else {
+            return request
+        }
+        var updated = request
+        updated["reasoning_effort"] = mapped
+        return updated
     }
 
     private func usesOpenAIChatCompletionsAdapter(_ auth: ExtractedAuth) -> Bool {
@@ -7517,6 +8026,34 @@ public final class DaemonController: @unchecked Sendable {
             scriptSources: [OpenAIImagesProxySupport.chatGPTWebDefaultPOWScript],
             dataBuild: ""
         )
+    }
+
+    private struct ChatGPTWebImageBinary: Sendable {
+        var data: Data
+        var mimeType: String
+        var fileName: String
+        var width: Int
+        var height: Int
+    }
+
+    private struct ChatGPTWebUploadedImageReference: Sendable {
+        var fileID: String
+        var fileName: String
+        var fileSize: Int
+        var mimeType: String
+        var width: Int
+        var height: Int
+
+        var payload: [String: Any] {
+            [
+                "file_id": self.fileID,
+                "file_name": self.fileName,
+                "file_size": self.fileSize,
+                "mime_type": self.mimeType,
+                "width": self.width,
+                "height": self.height,
+            ]
+        }
     }
 
     private struct ChatGPTWebImageFailure: Error {

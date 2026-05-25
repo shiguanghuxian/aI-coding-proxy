@@ -5,6 +5,7 @@ import Foundation
 enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
     case appearance
     case general
+    case ocr
     case proxy
     case service
     case cleanup
@@ -17,6 +18,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return "circle.lefthalf.filled"
         case .general:
             return "slider.horizontal.3"
+        case .ocr:
+            return "text.viewfinder"
         case .proxy:
             return "network"
         case .service:
@@ -32,6 +35,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .sectionAppearance
         case .general:
             return .sectionGeneral
+        case .ocr:
+            return .sectionOCRModel
         case .proxy:
             return .proxyTitle
         case .service:
@@ -47,6 +52,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .sectionAppearance
         case .general:
             return .sectionGeneral
+        case .ocr:
+            return .sectionOCRModel
         case .proxy:
             return .sectionOutboundProxy
         case .service:
@@ -62,6 +69,8 @@ enum SettingsTab: String, CaseIterable, Identifiable, Sendable, Equatable {
             return .helperAppearanceAppliesImmediately
         case .general:
             return .settingsSubtitle
+        case .ocr:
+            return .helperOCRModelSettings
         case .proxy:
             return .proxySubtitle
         case .service:

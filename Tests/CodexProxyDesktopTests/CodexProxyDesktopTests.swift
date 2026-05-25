@@ -536,6 +536,51 @@ private final class ReasoningCacheMaintenanceProbe: @unchecked Sendable {
     }
 }
 
+private final class OCRCacheMaintenanceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSummary: OCRCacheSummary
+    private var storedSummaryCallCount = 0
+    private var storedClearRequests: [ClearOCRCacheRequest] = []
+    private var storedConfirmations: [DesktopAppModel.OCRCacheClearConfirmationContent] = []
+
+    init(summary: OCRCacheSummary = OCRCacheSummary()) {
+        self.storedSummary = summary
+    }
+
+    func summary() -> OCRCacheSummary {
+        self.lock.withLock {
+            self.storedSummaryCallCount += 1
+            return self.storedSummary
+        }
+    }
+
+    func recordClear(_ request: ClearOCRCacheRequest, resultSummary: OCRCacheSummary) -> ClearOCRCacheResult {
+        self.lock.withLock {
+            self.storedClearRequests.append(request)
+            self.storedSummary = resultSummary
+        }
+        return ClearOCRCacheResult(deletedCount: 3, summary: resultSummary)
+    }
+
+    func recordConfirmation(_ content: DesktopAppModel.OCRCacheClearConfirmationContent) {
+        self.lock.withLock {
+            self.storedConfirmations.append(content)
+        }
+    }
+
+    func summaryCallCount() -> Int {
+        self.lock.withLock { self.storedSummaryCallCount }
+    }
+
+    func clearRequests() -> [ClearOCRCacheRequest] {
+        self.lock.withLock { self.storedClearRequests }
+    }
+
+    func confirmations() -> [DesktopAppModel.OCRCacheClearConfirmationContent] {
+        self.lock.withLock { self.storedConfirmations }
+    }
+}
+
 private final class AccountBatchRemoveProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var storedAccounts: [AccountSummary]
@@ -636,8 +681,9 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     func testSettingsTabOrderMatchesPlannedInformationArchitecture() {
-        XCTAssertEqual(SettingsTab.allCases, [.appearance, .general, .proxy, .service, .cleanup])
+        XCTAssertEqual(SettingsTab.allCases, [.appearance, .general, .ocr, .proxy, .service, .cleanup])
         XCTAssertEqual(SettingsTab.appearance.rawValue, "appearance")
+        XCTAssertEqual(SettingsTab.ocr.rawValue, "ocr")
         XCTAssertEqual(SettingsTab.service.rawValue, "service")
         XCTAssertEqual(SettingsTab.cleanup.rawValue, "cleanup")
     }
@@ -772,6 +818,28 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(accountsSource.contains("accountCooldownPolicyActionTitle"))
         XCTAssertTrue(formSource.contains("self.draft.upstreamAdapter == .chatCompletions"))
         XCTAssertTrue(formSource.contains(".helperReasoningCacheAccountIsolation"))
+    }
+
+    func testAccountReasoningEffortUIIsMenuOnlyAndLocalized() throws {
+        let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
+        let modelSource = try Self.repoFileText("Sources/CodexProxyDesktop/DesktopAppModel.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertTrue(accountsSource.contains("AccountReasoningEffortSheet"))
+        XCTAssertTrue(accountsSource.contains("self.model.canEditAccountReasoningEffort(self.account)"))
+        XCTAssertTrue(accountsSource.contains("self.model.text(.actionEditReasoningEffort)"))
+        XCTAssertTrue(accountsSource.contains("openAccountReasoningEffortSheet"))
+        XCTAssertTrue(accountsSource.contains("submitAccountReasoningEffortUpdate"))
+        XCTAssertFalse(accountsSource.contains("self.reasoningEffortButton\n            self.moreActionsMenu"))
+
+        XCTAssertTrue(modelSource.contains("account.providerPreset == .genericOpenAICompatible"))
+        XCTAssertTrue(modelSource.contains("account.upstreamAdapter == .chatCompletions"))
+        XCTAssertTrue(preferencesSource.contains(".actionEditReasoningEffort: \"Reasoning Effort\""))
+        XCTAssertTrue(preferencesSource.contains(".actionEditReasoningEffort: \"思考强度\""))
+        XCTAssertTrue(preferencesSource.contains(".labelReasoningEffortXHigh: \"Extra High\""))
+        XCTAssertTrue(preferencesSource.contains(".labelReasoningEffortXHigh: \"超高\""))
+        XCTAssertTrue(preferencesSource.contains("未知值和空映射会按原值透传"))
+        XCTAssertTrue(preferencesSource.contains("Unknown values and empty mappings are passed through unchanged"))
     }
 
 
@@ -3963,6 +4031,79 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(probe.clearRequests().isEmpty)
         XCTAssertTrue(model.banners.isEmpty)
         XCTAssertFalse(model.reasoningCacheIsClearing)
+    }
+
+    @MainActor
+    func testOCRCacheSummaryAndClearActionsSendExpectedRequests() async {
+        let activeSummary = OCRCacheSummary(
+            totalCount: 4,
+            expiredCount: 1,
+            oldestTouchedAt: 1_776_000_000,
+            newestTouchedAt: 1_776_000_300
+        )
+        let emptySummary = OCRCacheSummary()
+        let probe = OCRCacheMaintenanceProbe(summary: activeSummary)
+        let admin = AdminAPIClient(
+            ocrCacheSummaryHandler: { probe.summary() },
+            clearOCRCacheHandler: { request in
+                probe.recordClear(request, resultSummary: emptySummary)
+            }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearOCRCacheHandler: { content in
+                probe.recordConfirmation(content)
+                return true
+            }
+        )
+
+        await model.loadOCRCacheSummary()
+        XCTAssertEqual(probe.summaryCallCount(), 1)
+        XCTAssertEqual(model.ocrCacheSummary, activeSummary)
+
+        model.ocrCacheSummary = activeSummary
+        await model.clearExpiredOCRCache()
+
+        model.ocrCacheSummary = activeSummary
+        model.ocrCacheOlderThanSeconds = ReasoningCacheOlderThanPreset.oneDay.rawValue
+        await model.clearOCRCacheOlderThanSelectedPreset()
+
+        model.ocrCacheSummary = activeSummary
+        await model.clearAllOCRCache()
+
+        let requests = probe.clearRequests()
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests[0].expiredOnly)
+        XCTAssertEqual(requests[1].olderThanSeconds, ReasoningCacheOlderThanPreset.oneDay.rawValue)
+        XCTAssertTrue(requests[2].clearAll)
+        XCTAssertEqual(probe.confirmations().count, 3)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successOCRCacheCleared))
+        XCTAssertFalse(model.ocrCacheIsClearing)
+    }
+
+    @MainActor
+    func testOCRCacheClearCancellationDoesNotCallAdmin() async {
+        let summary = OCRCacheSummary(totalCount: 1, expiredCount: 0)
+        let probe = OCRCacheMaintenanceProbe(summary: summary)
+        let admin = AdminAPIClient(clearOCRCacheHandler: { request in
+            probe.recordClear(request, resultSummary: OCRCacheSummary())
+        })
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearOCRCacheHandler: { content in
+                probe.recordConfirmation(content)
+                return false
+            }
+        )
+        model.ocrCacheSummary = summary
+
+        await model.clearAllOCRCache()
+
+        XCTAssertEqual(probe.confirmations().count, 1)
+        XCTAssertTrue(probe.clearRequests().isEmpty)
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertFalse(model.ocrCacheIsClearing)
     }
 
     @MainActor
@@ -7380,10 +7521,17 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "Aliyun / Qwen Coding Plan")
         XCTAssertEqual(model.text(.proxyTestTitle), "Test Console")
         XCTAssertEqual(model.text(.optionImageGenerations), "Images")
+        XCTAssertEqual(model.text(.optionImageEdits), "Image Edits")
         XCTAssertEqual(model.text(.labelGeneratedImages), "Generated Images")
         XCTAssertEqual(model.text(.labelImagePreview), "Image Preview")
         XCTAssertEqual(model.text(.labelImageURL), "Image URL")
+        XCTAssertEqual(model.text(.labelImageEditInputs), "Edit Images")
+        XCTAssertEqual(model.text(.labelLargeImagePreview), "Large Image Preview")
         XCTAssertEqual(model.text(.actionSaveImageAs), "Save As")
+        XCTAssertEqual(model.text(.actionViewLargeImage), "View Large")
+        XCTAssertEqual(model.text(.actionChooseImages), "Choose Images")
+        XCTAssertEqual(model.text(.actionClearImages), "Clear Images")
+        XCTAssertEqual(model.text(.actionResetZoom), "Reset Zoom")
         XCTAssertEqual(model.text(.successProxyTestImageSaved), "Image Saved")
         XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "Image Save Failed")
         XCTAssertEqual(
@@ -7393,6 +7541,14 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelQuickActionLoginGroup), "Login")
         XCTAssertEqual(model.text(.labelQuickActionImportGroup), "Add / Import")
         XCTAssertEqual(model.text(.labelQuickActionMaintenanceGroup), "Maintenance")
+        XCTAssertEqual(model.text(.labelSupportsVision), "Supports Image Context")
+        XCTAssertEqual(model.text(.sectionOCRModel), "OCR Model")
+        XCTAssertEqual(model.text(.sectionOCRCache), "OCR Cache")
+        XCTAssertEqual(model.text(.labelOCRModel), "OCR Model")
+        XCTAssertEqual(model.text(.labelOCRDebugMode), "OCR Debug Mode")
+        XCTAssertEqual(model.text(.actionRefreshOCRCache), "Refresh OCR Cache")
+        XCTAssertEqual(model.text(.actionSaveOCRSettings), "Save OCR Settings")
+        XCTAssertTrue(model.text(.helperOCRCachePrivacy).contains("image SHA-256 hash"))
         XCTAssertEqual(model.text(.actionMoreQuickActions), "More")
         XCTAssertEqual(
             model.text(.helperMoreQuickActions),
@@ -7407,10 +7563,17 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "阿里百炼 / Qwen Coding Plan")
         XCTAssertEqual(model.text(.proxyTestTitle), "测试控制台")
         XCTAssertEqual(model.text(.optionImageGenerations), "图片生成")
+        XCTAssertEqual(model.text(.optionImageEdits), "图片编辑")
         XCTAssertEqual(model.text(.labelGeneratedImages), "生成图片")
         XCTAssertEqual(model.text(.labelImagePreview), "图片预览")
         XCTAssertEqual(model.text(.labelImageURL), "图片 URL")
+        XCTAssertEqual(model.text(.labelImageEditInputs), "编辑图片")
+        XCTAssertEqual(model.text(.labelLargeImagePreview), "大图预览")
         XCTAssertEqual(model.text(.actionSaveImageAs), "另存为")
+        XCTAssertEqual(model.text(.actionViewLargeImage), "查看大图")
+        XCTAssertEqual(model.text(.actionChooseImages), "选择图片")
+        XCTAssertEqual(model.text(.actionClearImages), "清空图片")
+        XCTAssertEqual(model.text(.actionResetZoom), "重置缩放")
         XCTAssertEqual(model.text(.successProxyTestImageSaved), "图片已保存")
         XCTAssertEqual(model.text(.errorProxyTestImageSaveFailed), "图片保存失败")
         XCTAssertEqual(
@@ -7420,6 +7583,14 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelQuickActionLoginGroup), "登录")
         XCTAssertEqual(model.text(.labelQuickActionImportGroup), "新增 / 导入")
         XCTAssertEqual(model.text(.labelQuickActionMaintenanceGroup), "维护")
+        XCTAssertEqual(model.text(.labelSupportsVision), "支持图片上下文")
+        XCTAssertEqual(model.text(.sectionOCRModel), "OCR 模型")
+        XCTAssertEqual(model.text(.sectionOCRCache), "OCR 缓存")
+        XCTAssertEqual(model.text(.labelOCRModel), "OCR 模型")
+        XCTAssertEqual(model.text(.labelOCRDebugMode), "OCR 调试模式")
+        XCTAssertEqual(model.text(.actionRefreshOCRCache), "刷新 OCR 缓存")
+        XCTAssertEqual(model.text(.actionSaveOCRSettings), "保存 OCR 设置")
+        XCTAssertTrue(model.text(.helperOCRCachePrivacy).contains("图片 SHA-256 哈希"))
         XCTAssertEqual(model.text(.actionMoreQuickActions), "更多")
         XCTAssertEqual(
             model.text(.helperMoreQuickActions),
@@ -8666,6 +8837,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.manualAPIKeyDraft?.providerPreset, .genericOpenAICompatible)
         XCTAssertEqual(model.manualAPIKeyDraft?.baseURL, OpenAICompatibleUpstream.defaultBaseURL)
         XCTAssertEqual(model.manualAPIKeyDraft?.enabled, true)
+        XCTAssertEqual(model.manualAPIKeyDraft?.supportsVision, false)
     }
 
     @MainActor
@@ -8930,7 +9102,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                     baseURL: "https://loaded.example.com/root",
                     apiKey: "sk-loaded-secret",
                     enabled: false,
-                    automaticCooldownDisabled: true
+                    automaticCooldownDisabled: true,
+                    supportsVision: true
                 )
             }
         )
@@ -8946,6 +9119,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.manualAPIKeyDraft?.apiKey, "sk-loaded-secret")
         XCTAssertEqual(model.manualAPIKeyDraft?.enabled, false)
         XCTAssertEqual(model.manualAPIKeyDraft?.automaticCooldownDisabled, true)
+        XCTAssertEqual(model.manualAPIKeyDraft?.supportsVision, true)
         let draft = try XCTUnwrap(model.manualAPIKeyDraft)
         XCTAssertEqual(model.manualAPIKeySheetTitle(for: draft), model.text(.actionEditAPIKey))
     }
@@ -9153,6 +9327,7 @@ final class CodexProxyDesktopTests: XCTestCase {
             apiKey: "sk-original",
             enabled: false,
             automaticCooldownDisabled: true,
+            supportsVision: true,
             editingAccountID: updatedAccount.id,
             originalAccountKey: "key-before-edit"
         )
@@ -9170,7 +9345,8 @@ final class CodexProxyDesktopTests: XCTestCase {
                 upstreamAdapter: .chatCompletions,
                 apiKey: "sk-original",
                 enabled: false,
-                automaticCooldownDisabled: true
+                automaticCooldownDisabled: true,
+                supportsVision: true
             )
         )
         XCTAssertNil(model.manualAPIKeyDraft)
@@ -10722,6 +10898,8 @@ final class CodexProxyDesktopTests: XCTestCase {
     func testAccountBatchRemoveUIAndSettingsGeminiOAuthFieldsAreDeclared() throws {
         let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
         let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
+        let ocrSettingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRSettingsPanel.swift")
+        let manualAPIKeySource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ManualAPIKeyAccountForm.swift")
 
         XCTAssertTrue(accountsSource.contains("account-pool-batch-remove-button"))
         XCTAssertTrue(accountsSource.contains("AccountBatchRemoveBar"))
@@ -10731,6 +10909,16 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains(".sectionGeminiOAuth"))
         XCTAssertTrue(settingsSource.contains("$model.settings.geminiOAuth.clientID"))
         XCTAssertTrue(settingsSource.contains("$model.settings.geminiOAuth.clientSecret"))
+        XCTAssertTrue(settingsSource.contains("case .ocr:"))
+        XCTAssertTrue(settingsSource.contains("SettingsOCRPanel(model: self.model)"))
+        XCTAssertTrue(settingsSource.contains("OCRSettingsPanel(model: self.model)"))
+        XCTAssertTrue(settingsSource.contains(".sectionOCRCache"))
+        XCTAssertTrue(settingsSource.contains("self.model.clearExpiredOCRCache()"))
+        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.enabled"))
+        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.apiKey"))
+        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.prompt"))
+        XCTAssertTrue(manualAPIKeySource.contains(".labelSupportsVision"))
+        XCTAssertTrue(manualAPIKeySource.contains("$draft.supportsVision"))
     }
 
     @MainActor
@@ -11362,6 +11550,115 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(
             model.banners.first?.detail,
             model.localization.successDetail(for: .updateAccountModelRouting, rawDetail: updatedAccount.label)
+        )
+    }
+
+    @MainActor
+    func testAccountReasoningEffortEntryOnlySupportsOpenAIAPIKeyChatCompletionsAccounts() {
+        let model = DesktopAppModel()
+        let chatAccount = Self.makeAccount(
+            id: "chat-effort",
+            label: "Chat Effort",
+            accountID: "acct-chat-effort",
+            authMode: .openAIAPIKey,
+            providerPreset: .genericOpenAICompatible,
+            upstreamAdapter: .chatCompletions,
+            reasoningEffort: AccountReasoningEffortConfig(
+                low: "lite",
+                medium: "normal",
+                high: "deep",
+                xhigh: "max"
+            )
+        )
+        let responsesAccount = Self.makeAccount(
+            id: "responses-effort",
+            label: "Responses Effort",
+            accountID: "acct-responses-effort",
+            authMode: .openAIAPIKey,
+            providerPreset: .genericOpenAICompatible,
+            upstreamAdapter: .responses
+        )
+        let oauthAccount = Self.makeAccount(
+            id: "oauth-effort",
+            label: "OAuth Effort",
+            accountID: "acct-oauth-effort"
+        )
+
+        XCTAssertTrue(model.canEditAccountReasoningEffort(chatAccount))
+        XCTAssertFalse(model.canEditAccountReasoningEffort(responsesAccount))
+        XCTAssertFalse(model.canEditAccountReasoningEffort(oauthAccount))
+
+        model.openAccountReasoningEffortSheet(chatAccount)
+        XCTAssertEqual(model.accountReasoningEffortDraft?.accountID, chatAccount.id)
+        XCTAssertEqual(model.accountReasoningEffortDraft?.low, "lite")
+        XCTAssertEqual(model.accountReasoningEffortDraft?.medium, "normal")
+        XCTAssertEqual(model.accountReasoningEffortDraft?.high, "deep")
+        XCTAssertEqual(model.accountReasoningEffortDraft?.xhigh, "max")
+
+        model.dismissAccountReasoningEffortSheet()
+        XCTAssertNil(model.accountReasoningEffortDraft)
+    }
+
+    @MainActor
+    func testSubmitAccountReasoningEffortUpdateCallsAdminAndReloadsAccounts() async {
+        let updatedEffort = AccountReasoningEffortConfig(
+            low: "lite",
+            medium: "normal",
+            high: "deep",
+            xhigh: "max"
+        )
+        let updatedAccount = Self.makeAccount(
+            id: "account-effort-update",
+            label: "Effort Update",
+            accountID: "acct-effort-update",
+            authMode: .openAIAPIKey,
+            providerPreset: .genericOpenAICompatible,
+            upstreamAdapter: .chatCompletions,
+            reasoningEffort: updatedEffort
+        )
+        let probe = AccountReasoningEffortUpdateProbe()
+        let admin = AdminAPIClient(
+            accountsHandler: { [updatedAccount] in [updatedAccount] },
+            getStatusHandler: { Self.makeProxyStatus(running: false) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            getSettingsHandler: { AppConfig() },
+            getManagedProxySnapshotHandler: { ManagedProxySnapshot() },
+            updateAccountReasoningEffortHandler: { id, input in
+                await probe.record(id: id, input: input)
+                return updatedAccount
+            }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.accountReasoningEffortDraft = DesktopAppModel.AccountReasoningEffortDraft(
+            accountID: updatedAccount.id,
+            accountKey: updatedAccount.accountKey,
+            label: updatedAccount.label,
+            low: " lite ",
+            medium: "normal",
+            high: "deep",
+            xhigh: "max"
+        )
+
+        await model.submitAccountReasoningEffortUpdate()
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.id, updatedAccount.id)
+        XCTAssertEqual(
+            snapshot.input,
+            UpdateAccountReasoningEffortRequest(
+                low: "lite",
+                medium: "normal",
+                high: "deep",
+                xhigh: "max"
+            )
+        )
+        XCTAssertNil(model.accountReasoningEffortDraft)
+        XCTAssertEqual(model.accounts.first?.reasoningEffort, updatedEffort)
+        XCTAssertEqual(model.banners.first?.tone, .success)
+        XCTAssertEqual(model.banners.first?.title, model.localization.successTitle(for: .updateAccountReasoningEffort))
+        XCTAssertEqual(
+            model.banners.first?.detail,
+            model.localization.successDetail(for: .updateAccountReasoningEffort, rawDetail: updatedAccount.label)
         )
     }
 
@@ -14204,15 +14501,56 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertFalse(draft.requestPreview().contains("ignored system"))
     }
 
+    func testImageEditProxyTestDraftBuildsMultipartPayloadWithFileSummaries() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let imageURL = directory.appendingPathComponent("input.png")
+        let imageData = Data("PNGDATA".utf8)
+        try imageData.write(to: imageURL)
+
+        let draft = ProxyTestDraft(
+            endpoint: .imageEdits,
+            model: "",
+            systemPrompt: "ignored system",
+            userPrompt: "Remove the background",
+            toolsJSON: #"[{"name":"ignored"}]"#,
+            stream: true,
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key",
+            imageEditFileURLs: [imageURL]
+        )
+        let requestBody = try draft.requestBody()
+        let body = String(decoding: requestBody.data, as: UTF8.self)
+        let preview = draft.requestPreview()
+
+        XCTAssertTrue(requestBody.contentType.hasPrefix("multipart/form-data; boundary=CodexProxyImageEdit-"))
+        XCTAssertTrue(body.contains(#"name="model""#), body)
+        XCTAssertTrue(body.contains("codex-gpt-image-2"), body)
+        XCTAssertTrue(body.contains(#"name="prompt""#), body)
+        XCTAssertTrue(body.contains("Remove the background"), body)
+        XCTAssertTrue(body.contains(#"name="response_format""#), body)
+        XCTAssertTrue(body.contains("b64_json"), body)
+        XCTAssertTrue(body.contains(#"name="image"; filename="input.png""#), body)
+        XCTAssertTrue(body.contains("PNGDATA"), body)
+        XCTAssertTrue(preview.contains(#""filename" : "input.png""#), preview)
+        XCTAssertTrue(preview.contains(#""size_bytes" : 7"#), preview)
+        XCTAssertFalse(preview.contains("PNGDATA"))
+        XCTAssertFalse(preview.contains("ignored system"))
+        XCTAssertFalse(preview.contains(#""stream""#))
+    }
+
     func testProxyTestModelCatalogSeparatesFamilies() {
         let catalog = ProxyTestModelCatalog.defaultCatalog
         let gptModels = ProxyTestEndpoint.chatCompletions.availableModels(in: catalog)
         let imageModels = ProxyTestEndpoint.imageGenerations.availableModels(in: catalog)
+        let imageEditModels = ProxyTestEndpoint.imageEdits.availableModels(in: catalog)
         let anthropicModels = ProxyTestEndpoint.anthropicMessages.availableModels(in: catalog)
         let geminiModels = ProxyTestEndpoint.geminiGenerateContent.availableModels(in: catalog)
 
         XCTAssertEqual(gptModels, ProxyTranscoder.supportedModels)
         XCTAssertEqual(imageModels, ["codex-gpt-image-2", "gpt-image-2"])
+        XCTAssertEqual(imageEditModels, imageModels)
         XCTAssertTrue(anthropicModels.contains("claude-sonnet-4-6"))
         XCTAssertTrue(anthropicModels.contains("claude-opus-4-6"))
         XCTAssertTrue(anthropicModels.contains("claude-3-5-haiku-latest"))
@@ -14223,8 +14561,11 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(ProxyTestEndpoint.chatCompletions.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.responses.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.imageGenerations.supportsCustomModelEntry)
+        XCTAssertTrue(ProxyTestEndpoint.imageEdits.supportsCustomModelEntry)
         XCTAssertFalse(ProxyTestEndpoint.imageGenerations.supportsStreaming)
+        XCTAssertFalse(ProxyTestEndpoint.imageEdits.supportsStreaming)
         XCTAssertFalse(ProxyTestEndpoint.imageGenerations.supportsSystemPrompt)
+        XCTAssertFalse(ProxyTestEndpoint.imageEdits.supportsSystemPrompt)
         XCTAssertTrue(ProxyTestEndpoint.anthropicMessages.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.geminiGenerateContent.supportsCustomModelEntry)
         XCTAssertTrue(ProxyTestEndpoint.anthropicMessages.prefersAnthropicRootBaseURL)
@@ -14414,6 +14755,56 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(body.contains(#""prompt":"Draw a silver key""#), body)
     }
 
+    func testProxyPublicAPIClientImageEditsUsesMultipartEndpointAndHeaders() async throws {
+        defer { ProxyPublicAPIClientMockURLProtocol.resetHandler() }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let imageURL = directory.appendingPathComponent("edit.webp")
+        try Data("WEBPDATA".utf8).write(to: imageURL)
+
+        let capture = CapturedURLRequest()
+        ProxyPublicAPIClientMockURLProtocol.setHandler { request in
+            capture.record(request)
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+            )
+            return (response, Data(#"{"created":1710000000,"data":[{"b64_json":"AQID"}]}"#.utf8))
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ProxyPublicAPIClientMockURLProtocol.self]
+        let client = ProxyPublicAPIClient(session: URLSession(configuration: configuration))
+        let draft = ProxyTestDraft(
+            endpoint: .imageEdits,
+            model: "codex-gpt-image-2",
+            userPrompt: "Make it brighter",
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key",
+            selectedAccountKey: "key-openai-account",
+            imageEditFileURLs: [imageURL]
+        )
+
+        _ = try await client.executeNonStream(draft: draft)
+
+        let request = try XCTUnwrap(capture.request())
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8787/v1/images/edits")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer proxy-key")
+        XCTAssertEqual(request.value(forHTTPHeaderField: ProxyHeaderName.proxyTestConsole), "1")
+        XCTAssertEqual(request.value(forHTTPHeaderField: ProxyHeaderName.testAccountKey), "key-openai-account")
+        XCTAssertTrue(request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary=CodexProxyImageEdit-") == true)
+        let body = String(decoding: try XCTUnwrap(capture.bodyData()), as: UTF8.self)
+        XCTAssertTrue(body.contains(#"name="image"; filename="edit.webp""#), body)
+        XCTAssertTrue(body.contains("WEBPDATA"), body)
+        XCTAssertTrue(body.contains("Make it brighter"), body)
+    }
+
     func testProxyTestConsoleSourceIncludesImageGenerationUI() throws {
         let source = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ProxyTestConsoleView.swift")
 
@@ -14423,6 +14814,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("labelGeneratedImages"))
         XCTAssertTrue(source.contains("labelImageURL"))
         XCTAssertTrue(source.contains("actionSaveImageAs"))
+        XCTAssertTrue(source.contains("actionViewLargeImage"))
+        XCTAssertTrue(source.contains("labelLargeImagePreview"))
+        XCTAssertTrue(source.contains("actionChooseImages"))
+        XCTAssertTrue(source.contains("actionClearImages"))
+        XCTAssertTrue(source.contains("ProxyTestLargeImagePreviewSheet"))
+        XCTAssertTrue(source.contains("Slider(value: self.$scale"))
         XCTAssertTrue(source.contains("saveOutput"))
         XCTAssertTrue(source.contains("copyButton"))
     }
@@ -14480,6 +14877,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.proxyTestDraft.model, "codex-gpt-image-2")
         XCTAssertFalse(model.proxyTestDraft.stream)
 
+        model.proxyTestDraft.stream = true
+        model.proxyTestDraft.model = "gpt-5.4"
+        model.updateProxyTestEndpoint(.imageEdits)
+        XCTAssertEqual(model.proxyTestDraft.model, "codex-gpt-image-2")
+        XCTAssertFalse(model.proxyTestDraft.stream)
+
         model.updateProxyTestEndpoint(.responses)
         XCTAssertEqual(model.proxyTestDraft.model, ProxyTestModelCatalog.defaultCatalog.responses.defaultModel)
     }
@@ -14503,6 +14906,35 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertNotNil(warning)
         XCTAssertTrue(warning?.detail.contains("gpt-5.4") == true)
         XCTAssertTrue(draft.hasPrompt)
+    }
+
+    @MainActor
+    func testProxyTestImageEditsRequiresSelectedImagesBeforeSending() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let imageURL = directory.appendingPathComponent("edit.png")
+        try Data("PNGDATA".utf8).write(to: imageURL)
+
+        let model = DesktopAppModel(
+            proxyTestImageEditFileSelectionHandler: {
+                [imageURL]
+            }
+        )
+        model.proxyTestConnectionHealthy = true
+        model.proxyTestDraft = ProxyTestDraft(
+            endpoint: .imageEdits,
+            userPrompt: "Edit this image",
+            endpointURL: "http://127.0.0.1:8787/v1",
+            apiKey: "proxy-key"
+        )
+
+        XCTAssertFalse(model.proxyTestCanSend)
+        model.selectProxyTestImageEditFiles()
+        XCTAssertEqual(model.proxyTestDraft.imageEditFileURLs, [imageURL])
+        XCTAssertTrue(model.proxyTestCanSend)
+        model.clearProxyTestImageEditFiles()
+        XCTAssertFalse(model.proxyTestCanSend)
     }
 
     @MainActor
@@ -15992,9 +16424,11 @@ private extension CodexProxyDesktopTests {
         selectionOrder: Int64 = 0,
         authMode: AccountAuthMode = .chatGPT,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         upstreamBaseURL: String? = nil,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
+        reasoningEffort: AccountReasoningEffortConfig = .defaultConfig,
         usage: UsageSnapshot? = nil,
         usageWindowsVisible: Bool = true,
         todayTokenUsage: AccountTodayTokenUsage? = nil,
@@ -16014,9 +16448,11 @@ private extension CodexProxyDesktopTests {
             planType: authMode.isManualAPIKey ? "api_key" : "free",
             authMode: authMode,
             providerPreset: providerPreset,
+            upstreamAdapter: upstreamAdapter,
             upstreamBaseURL: upstreamBaseURL,
             managedProxyNodeName: managedProxyNodeName,
             modelRouting: modelRouting,
+            reasoningEffort: reasoningEffort,
             addedAt: updatedAt - 60,
             updatedAt: updatedAt,
             enabled: enabled,
@@ -16600,6 +17036,20 @@ private actor AccountModelRoutingUpdateProbe {
     }
 
     func snapshot() -> (id: String?, input: UpdateAccountModelRoutingRequest?) {
+        (self.id, self.input)
+    }
+}
+
+private actor AccountReasoningEffortUpdateProbe {
+    private var id: String?
+    private var input: UpdateAccountReasoningEffortRequest?
+
+    func record(id: String, input: UpdateAccountReasoningEffortRequest) {
+        self.id = id
+        self.input = input
+    }
+
+    func snapshot() -> (id: String?, input: UpdateAccountReasoningEffortRequest?) {
         (self.id, self.input)
     }
 }

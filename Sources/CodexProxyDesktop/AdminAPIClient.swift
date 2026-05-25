@@ -74,6 +74,8 @@ final class AdminAPIClient {
     typealias RequestLogsExportHandler = @Sendable (RequestLogQuery) async throws -> Data
     typealias ReasoningCacheSummaryHandler = @Sendable () async throws -> ReasoningCacheSummary
     typealias ClearReasoningCacheHandler = @Sendable (ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult
+    typealias OCRCacheSummaryHandler = @Sendable () async throws -> OCRCacheSummary
+    typealias ClearOCRCacheHandler = @Sendable (ClearOCRCacheRequest) async throws -> ClearOCRCacheResult
     typealias GetStatusHandler = @Sendable () async throws -> ProxyStatus
     typealias GetStatsHandler = @Sendable () async throws -> AdminStatsSummary
     typealias GetStatsForAPIKeyHandler = @Sendable (String?) async throws -> AdminStatsSummary
@@ -98,6 +100,7 @@ final class AdminAPIClient {
     typealias UpdateAccountManagedProxyNodeHandler = @Sendable (String, UpdateAccountManagedProxyNodeRequest) async throws -> AccountSummary
     typealias ClearAccountManagedProxyNodesHandler = @Sendable () async throws -> ClearAccountManagedProxyNodesResult
     typealias UpdateAccountModelRoutingHandler = @Sendable (String, UpdateAccountModelRoutingRequest) async throws -> AccountSummary
+    typealias UpdateAccountReasoningEffortHandler = @Sendable (String, UpdateAccountReasoningEffortRequest) async throws -> AccountSummary
     typealias UpdateAccountOrderHandler = @Sendable (UpdateAccountOrderRequest) async throws -> [AccountSummary]
     typealias BatchRemoveAccountsHandler = @Sendable (BatchDeleteAccountsRequest) async throws -> BatchDeleteAccountsResult
     typealias ProxyTestRunNonStreamHandler = @Sendable (AdminProxyTestRunRequest) async throws -> SimpleHTTPResponse
@@ -118,6 +121,8 @@ final class AdminAPIClient {
     private let requestLogsExportHandler: RequestLogsExportHandler?
     private let reasoningCacheSummaryHandler: ReasoningCacheSummaryHandler?
     private let clearReasoningCacheHandler: ClearReasoningCacheHandler?
+    private let ocrCacheSummaryHandler: OCRCacheSummaryHandler?
+    private let clearOCRCacheHandler: ClearOCRCacheHandler?
     private let getStatusHandler: GetStatusHandler?
     private let getStatsHandler: GetStatsHandler?
     private let getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler?
@@ -142,6 +147,7 @@ final class AdminAPIClient {
     private let updateAccountManagedProxyNodeHandler: UpdateAccountManagedProxyNodeHandler?
     private let clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler?
     private let updateAccountModelRoutingHandler: UpdateAccountModelRoutingHandler?
+    private let updateAccountReasoningEffortHandler: UpdateAccountReasoningEffortHandler?
     private let updateAccountOrderHandler: UpdateAccountOrderHandler?
     private let batchRemoveAccountsHandler: BatchRemoveAccountsHandler?
     private let proxyTestRunNonStreamHandler: ProxyTestRunNonStreamHandler?
@@ -169,6 +175,8 @@ final class AdminAPIClient {
         requestLogsExportHandler: RequestLogsExportHandler? = nil,
         reasoningCacheSummaryHandler: ReasoningCacheSummaryHandler? = nil,
         clearReasoningCacheHandler: ClearReasoningCacheHandler? = nil,
+        ocrCacheSummaryHandler: OCRCacheSummaryHandler? = nil,
+        clearOCRCacheHandler: ClearOCRCacheHandler? = nil,
         getStatusHandler: GetStatusHandler? = nil,
         getStatsHandler: GetStatsHandler? = nil,
         getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler? = nil,
@@ -193,6 +201,7 @@ final class AdminAPIClient {
         updateAccountManagedProxyNodeHandler: UpdateAccountManagedProxyNodeHandler? = nil,
         clearAccountManagedProxyNodesHandler: ClearAccountManagedProxyNodesHandler? = nil,
         updateAccountModelRoutingHandler: UpdateAccountModelRoutingHandler? = nil,
+        updateAccountReasoningEffortHandler: UpdateAccountReasoningEffortHandler? = nil,
         updateAccountOrderHandler: UpdateAccountOrderHandler? = nil,
         batchRemoveAccountsHandler: BatchRemoveAccountsHandler? = nil,
         proxyTestRunNonStreamHandler: ProxyTestRunNonStreamHandler? = nil,
@@ -213,6 +222,8 @@ final class AdminAPIClient {
         self.requestLogsExportHandler = requestLogsExportHandler
         self.reasoningCacheSummaryHandler = reasoningCacheSummaryHandler
         self.clearReasoningCacheHandler = clearReasoningCacheHandler
+        self.ocrCacheSummaryHandler = ocrCacheSummaryHandler
+        self.clearOCRCacheHandler = clearOCRCacheHandler
         self.getStatusHandler = getStatusHandler
         self.getStatsHandler = getStatsHandler
         self.getStatsForAPIKeyHandler = getStatsForAPIKeyHandler
@@ -237,6 +248,7 @@ final class AdminAPIClient {
         self.updateAccountManagedProxyNodeHandler = updateAccountManagedProxyNodeHandler
         self.clearAccountManagedProxyNodesHandler = clearAccountManagedProxyNodesHandler
         self.updateAccountModelRoutingHandler = updateAccountModelRoutingHandler
+        self.updateAccountReasoningEffortHandler = updateAccountReasoningEffortHandler
         self.updateAccountOrderHandler = updateAccountOrderHandler
         self.batchRemoveAccountsHandler = batchRemoveAccountsHandler
         self.proxyTestRunNonStreamHandler = proxyTestRunNonStreamHandler
@@ -395,6 +407,21 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().updateAccountModelRouting(id: id, input: input)
+    }
+
+    func updateAccountReasoningEffort(id: String, input: UpdateAccountReasoningEffortRequest) async throws -> AccountSummary {
+        if let updateAccountReasoningEffortHandler {
+            return try await updateAccountReasoningEffortHandler(id, input)
+        }
+        let encodedID = Self.encodePathComponent(id)
+        if let result: AccountSummary = try await self.httpRequest(
+            "/accounts/\(encodedID)/reasoning-effort",
+            method: "PATCH",
+            body: input
+        ) {
+            return result
+        }
+        return try await self.controller().updateAccountReasoningEffort(id: id, input: input)
     }
 
     func exportAccounts() async throws -> Data {
@@ -719,6 +746,30 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().clearReasoningCache(request)
+    }
+
+    func getOCRCacheSummary() async throws -> OCRCacheSummary {
+        if let ocrCacheSummaryHandler {
+            return try await ocrCacheSummaryHandler()
+        }
+        if let summary: OCRCacheSummary = try await self.httpRequest("/ocr-cache/summary", method: "GET") {
+            return summary
+        }
+        return try await self.controller().ocrCacheSummary()
+    }
+
+    func clearOCRCache(_ request: ClearOCRCacheRequest) async throws -> ClearOCRCacheResult {
+        if let clearOCRCacheHandler {
+            return try await clearOCRCacheHandler(request)
+        }
+        if let result: ClearOCRCacheResult = try await self.httpRequest(
+            "/ocr-cache/clear",
+            method: "POST",
+            body: request
+        ) {
+            return result
+        }
+        return try await self.controller().clearOCRCache(request)
     }
 
     func getProxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {

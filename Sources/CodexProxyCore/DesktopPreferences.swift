@@ -256,6 +256,15 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelStatsRetentionDays
     case labelGeminiOAuthClientID
     case labelGeminiOAuthClientSecret
+    case labelSupportsVision
+    case labelOCRProvider
+    case labelOCRModel
+    case labelOCRAPIKey
+    case labelOCRBaseURL
+    case labelOCRPrompt
+    case labelOCRTimeout
+    case labelOCRMaxImageSize
+    case labelOCRDebugMode
     case labelLanguage
     case labelTheme
     case labelDisplay
@@ -272,6 +281,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelRequestedModel
     case labelActualModel
     case labelReasoningEffort
+    case labelReasoningEffortLow
+    case labelReasoningEffortMedium
+    case labelReasoningEffortHigh
+    case labelReasoningEffortXHigh
     case labelTestAccount
     case labelInterface
     case labelStream
@@ -284,7 +297,13 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelGeneratedImages
     case labelImagePreview
     case labelImageURL
+    case labelImageEditInputs
+    case labelLargeImagePreview
     case actionSaveImageAs
+    case actionViewLargeImage
+    case actionChooseImages
+    case actionClearImages
+    case actionResetZoom
     case labelLatency
     case labelHTTPStatus
     case labelResponseText
@@ -337,6 +356,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionAppearance
     case sectionGeneral
     case sectionGeminiOAuth
+    case sectionOCRModel
+    case sectionOCRCache
     case sectionOutboundProxy
     case sectionBehavior
     case sectionService
@@ -372,6 +393,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionAccountCardEdit
     case actionAccountCardNode
     case actionAccountCardMore
+    case actionEditReasoningEffort
     case actionStopAccountCooldown
     case actionDisableAutomaticCooldown
     case actionEnableAutomaticCooldown
@@ -382,6 +404,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionConfirmProxyModeChange
     case actionSaveManualProxy
     case actionSaveGeneralSettings
+    case actionSaveOCRSettings
     case actionSaveHost
     case actionCreateRemoteHost
     case actionDeleteHost
@@ -442,6 +465,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionClearReasoningCacheOlderThan
     case actionClearAllReasoningCache
     case actionClearReasoningCacheConfirm
+    case actionRefreshOCRCache
+    case actionClearExpiredOCRCache
+    case actionClearOCRCacheOlderThan
+    case actionClearAllOCRCache
+    case actionClearOCRCacheConfirm
     case actionTestProxy
     case actionOpenHelp
     case actionSendTest
@@ -518,6 +546,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperBatchRemoveAccounts
     case helperQuickActionRefreshUsage
     case helperAccountCardLastError
+    case helperAccountReasoningEffort
     case helperSelectionPolicy
     case helperAccountOrderSearch
     case helperManualAPIKeyAccount
@@ -540,6 +569,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperReasoningCacheSelectAccount
     case helperReasoningCacheNoEntries
     case helperGeminiOAuthSettings
+    case helperSupportsVision
+    case helperOCRModelSettings
+    case helperOCRCache
+    case helperOCRCachePrivacy
+    case helperImageEditInputs
     case helperAnthropicConnection
     case helperGeminiConnection
     case helperOutboundProxyGlobalModeDisabled
@@ -647,6 +681,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case optionChatCompletions
     case optionResponses
     case optionImageGenerations
+    case optionImageEdits
     case optionUpstreamAdapterChatCompletions
     case optionUpstreamAdapterResponses
     case optionAnthropicMessages
@@ -726,6 +761,8 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorKeepAwakeFailed
     case errorReasoningCacheFailed
     case errorReasoningCacheClearFailed
+    case errorOCRCacheFailed
+    case errorOCRCacheClearFailed
     case warningAuthImportPartialFailure
     case successDaemonStarted
     case successDaemonStopped
@@ -739,6 +776,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successAccountManagedProxyNodeUpdated
     case successAccountManagedProxyNodesCleared
     case successAccountModelRoutingUpdated
+    case successAccountReasoningEffortUpdated
     case successAccountCooldownStopped
     case successAccountCooldownPolicyUpdated
     case successAccountListRefreshed
@@ -773,6 +811,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successCopiedRowCSV
     case successRequestLogsExported
     case successReasoningCacheCleared
+    case successOCRCacheCleared
     case successHostSaved
     case successAccountEnabled
     case successAccountDisabled
@@ -802,12 +841,18 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case confirmClearReasoningCacheOlderThanTitle
     case confirmClearReasoningCacheAllTitle
     case confirmClearReasoningCacheAllMessage
+    case confirmClearOCRCacheExpiredTitle
+    case confirmClearOCRCacheExpiredMessage
+    case confirmClearOCRCacheOlderThanTitle
+    case confirmClearOCRCacheAllTitle
+    case confirmClearOCRCacheAllMessage
 }
 
 public enum OperationContext: String, Sendable {
     case loadAll
     case loadRequestLogs
     case loadReasoningCache
+    case loadOCRCache
     case startDaemon
     case stopDaemon
     case importCurrentAuth
@@ -820,6 +865,7 @@ public enum OperationContext: String, Sendable {
     case updateAccountManagedProxyNode
     case clearAccountManagedProxyNodes
     case updateAccountModelRouting
+    case updateAccountReasoningEffort
     case stopAccountCooldown
     case updateAccountCooldownPolicy
     case refreshAccountList
@@ -849,6 +895,7 @@ public enum OperationContext: String, Sendable {
     case removeAccount
     case reorderAccounts
     case clearReasoningCache
+    case clearOCRCache
     case runProxyTest
     case loadProxyTestModels
     case generic
@@ -1184,6 +1231,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAccountManagedProxyNodesCleared)
         case .updateAccountModelRouting:
             return self.text(.successAccountModelRoutingUpdated)
+        case .updateAccountReasoningEffort:
+            return self.text(.successAccountReasoningEffortUpdated)
         case .stopAccountCooldown:
             return self.text(.successAccountCooldownStopped)
         case .updateAccountCooldownPolicy:
@@ -1210,6 +1259,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.successAccountOrderUpdated)
         case .clearReasoningCache:
             return self.text(.successReasoningCacheCleared)
+        case .clearOCRCache:
+            return self.text(.successOCRCacheCleared)
         case .startOAuth:
             return self.text(.successOAuthStarted)
         case .completeOAuth:
@@ -1246,6 +1297,8 @@ public struct LocalizationStore: Sendable, Equatable {
             return self.text(.statusReady)
         case .loadReasoningCache:
             return self.text(.statusReady)
+        case .loadOCRCache:
+            return self.text(.statusReady)
         case .runProxyTest:
             return self.text(.successProxyTestCompleted)
         case .loadProxyTestModels:
@@ -1271,6 +1324,9 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .loadReasoningCache {
             return self.text(.errorReasoningCacheFailed)
         }
+        if context == .loadOCRCache {
+            return self.text(.errorOCRCacheFailed)
+        }
         if context == .deployRemote || lower.contains("systemctl") {
             return self.text(.errorRemoteDeployFailed)
         }
@@ -1292,7 +1348,10 @@ public struct LocalizationStore: Sendable, Equatable {
         if context == .clearReasoningCache {
             return self.text(.errorReasoningCacheClearFailed)
         }
-        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .refreshAccountList || context == .reorderAccounts {
+        if context == .clearOCRCache {
+            return self.text(.errorOCRCacheClearFailed)
+        }
+        if context == .enableAccount || context == .disableAccount || context == .removeAccount || context == .manualUpdateAccount || context == .renameAccountLabel || context == .updateAccountManagedProxyNode || context == .clearAccountManagedProxyNodes || context == .updateAccountModelRouting || context == .updateAccountReasoningEffort || context == .stopAccountCooldown || context == .updateAccountCooldownPolicy || context == .refreshAccountList || context == .reorderAccounts {
             return self.text(.errorAccountManagementFailed)
         }
         if context == .copyEndpoint || context == .copyAPIKey || context == .copyClaudeCodeEnv || context == .copyGeminiCLIEnv || context == .copyOAuthLink || context == .copyManagedProxyTerminalCommand {
@@ -1332,6 +1391,8 @@ public struct LocalizationStore: Sendable, Equatable {
             )
         case .updateAccountModelRouting:
             return self.localized(zh: "已更新账号模型转换：\(detail)", en: "Updated account model routing: \(detail)")
+        case .updateAccountReasoningEffort:
+            return self.localized(zh: "已更新账号思考强度：\(detail)", en: "Updated account reasoning effort: \(detail)")
         case .stopAccountCooldown:
             return self.localized(zh: "已停止账号冷却：\(detail)", en: "Stopped account cooldown: \(detail)")
         case .enableAccount:
@@ -2036,6 +2097,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRequestedModel: "Requested Model",
             .labelActualModel: "Actual Model",
             .labelReasoningEffort: "Reasoning Effort",
+            .labelReasoningEffortLow: "Low",
+            .labelReasoningEffortMedium: "Medium",
+            .labelReasoningEffortHigh: "High",
+            .labelReasoningEffortXHigh: "Extra High",
             .labelTestAccount: "Test Account",
             .labelInterface: "Interface",
             .labelUpstreamURL: "Upstream URL",
@@ -2050,7 +2115,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelGeneratedImages: "Generated Images",
             .labelImagePreview: "Image Preview",
             .labelImageURL: "Image URL",
+            .labelImageEditInputs: "Edit Images",
+            .labelLargeImagePreview: "Large Image Preview",
             .actionSaveImageAs: "Save As",
+            .actionViewLargeImage: "View Large",
+            .actionChooseImages: "Choose Images",
+            .actionClearImages: "Clear Images",
+            .actionResetZoom: "Reset Zoom",
             .labelLatency: "Latency",
             .labelHTTPStatus: "HTTP Status",
             .labelResponseText: "Response Text",
@@ -2080,6 +2151,15 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelStatsRetentionDays: "Stats Retention Days",
             .labelGeminiOAuthClientID: "Client ID",
             .labelGeminiOAuthClientSecret: "Client Secret",
+            .labelSupportsVision: "Supports Image Context",
+            .labelOCRProvider: "OCR Provider",
+            .labelOCRModel: "OCR Model",
+            .labelOCRAPIKey: "OCR API Key",
+            .labelOCRBaseURL: "OCR Base URL",
+            .labelOCRPrompt: "OCR Prompt",
+            .labelOCRTimeout: "Timeout (seconds)",
+            .labelOCRMaxImageSize: "Max Image Size (bytes)",
+            .labelOCRDebugMode: "OCR Debug Mode",
             .labelLanguage: "Language",
             .labelTheme: "Theme",
             .labelDisplay: "Display",
@@ -2147,6 +2227,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionAppearance: "Appearance",
             .sectionGeneral: "General",
             .sectionGeminiOAuth: "Google / Gemini OAuth",
+            .sectionOCRModel: "OCR Model",
+            .sectionOCRCache: "OCR Cache",
             .sectionOutboundProxy: "Outbound Proxy",
             .sectionBehavior: "Behavior",
             .sectionService: "Service",
@@ -2182,6 +2264,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardEdit: "Edit",
             .actionAccountCardNode: "Outbound Node",
             .actionAccountCardMore: "More",
+            .actionEditReasoningEffort: "Reasoning Effort",
             .actionStopAccountCooldown: "Stop Cooldown",
             .actionDisableAutomaticCooldown: "Disable Cooldown",
             .actionEnableAutomaticCooldown: "Restore Cooldown",
@@ -2192,6 +2275,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionConfirmProxyModeChange: "Confirm Proxy Mode",
             .actionSaveManualProxy: "Save Manual Proxy",
             .actionSaveGeneralSettings: "Save Settings",
+            .actionSaveOCRSettings: "Save OCR Settings",
             .actionSaveHost: "Save Host",
             .actionCreateRemoteHost: "New Host",
             .actionDeleteHost: "Delete Host",
@@ -2252,6 +2336,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearReasoningCacheOlderThan: "Clear Older Than",
             .actionClearAllReasoningCache: "Clear All",
             .actionClearReasoningCacheConfirm: "Clear Cache",
+            .actionRefreshOCRCache: "Refresh OCR Cache",
+            .actionClearExpiredOCRCache: "Clear Expired",
+            .actionClearOCRCacheOlderThan: "Clear Older Than",
+            .actionClearAllOCRCache: "Clear All",
+            .actionClearOCRCacheConfirm: "Clear OCR Cache",
             .actionTestProxy: "Test Proxy",
             .actionOpenHelp: "Help",
             .actionSendTest: "Send Test",
@@ -2328,6 +2417,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperBatchRemoveAccounts: "Select multiple accounts and remove their saved local authorizations after confirmation.",
             .helperQuickActionRefreshUsage: "Refresh quota and usage state for every imported account.",
             .helperAccountCardLastError: "Click to view the full error message.",
+            .helperAccountReasoningEffort: "Account-level mapping from Codex low / medium / high / xhigh to the provider's `reasoning_effort` value. Unknown values and empty mappings are passed through unchanged.",
             .helperSelectionPolicy: "Drag to define the routing order. Requests try enabled accounts from top to bottom and skip quota-blocked or cooling API key accounts.",
             .helperAccountOrderSearch: "Search only narrows what you see here. Move actions update the full account pool order.",
             .helperManualAPIKeyAccount: "Add a compatible API key account with its own upstream base URL and API key. OAuth accounts still use browser authorization.",
@@ -2350,6 +2440,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheSelectAccount: "Select an account that has reasoning backfill cache entries.",
             .helperReasoningCacheNoEntries: "There are no reasoning backfill cache entries to clean up.",
             .helperGeminiOAuthSettings: "Configure the Google OAuth client used by Google / Gemini Login. Environment variables remain available as a fallback.",
+            .helperSupportsVision: "Turn this on for models that can read image inputs directly. Turn it off to let the proxy inject OCR text when OCR is enabled.",
+            .helperOCRModelSettings: "Configure an independent OpenAI-compatible OCR model. It runs only when an account is marked as not supporting image context.",
+            .helperOCRCache: "Encrypted OCR result cache keyed by image content hash. It lets the same image reuse one recognition result across text-only model accounts.",
+            .helperOCRCachePrivacy: "Only the image SHA-256 hash, safe metadata, and encrypted OCR text are stored. Original images, URLs, base64 payloads, and API keys are not stored or shown here.",
+            .helperImageEditInputs: "Choose one or more PNG, JPEG, or WebP images for the Images edits request. The preview shows only file summaries, not image bytes.",
             .helperAnthropicConnection: "Point Claude Code to the root address. The same Anthropic-routed local API key can also be used by Codex or another OpenAI-compatible client against the OpenAI-compatible base URL when you want requests to stay on the Anthropic account pool.",
             .helperGeminiConnection: "Point Gemini CLI to the proxy root through `GOOGLE_GEMINI_BASE_URL`, and reuse the same local API key through `GEMINI_API_KEY`. Gemini CLI requests now execute only through accounts imported from `Google / Gemini Login`. `Google Gemini Compatible` remains available for API-key compatibility routes, but it is no longer used as the Gemini CLI backend path.",
             .helperOutboundProxyGlobalModeDisabled: "If your local proxy app is already running in global mode, keep Proxy Mode set to `Disabled` here to avoid adding an extra proxy hop.",
@@ -2457,6 +2552,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionChatCompletions: "Chat",
             .optionResponses: "Responses",
             .optionImageGenerations: "Images",
+            .optionImageEdits: "Image Edits",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
             .optionAnthropicMessages: "Anthropic",
@@ -2536,6 +2632,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorKeepAwakeFailed: "Keep awake failed",
             .errorReasoningCacheFailed: "Reasoning cache failed to load",
             .errorReasoningCacheClearFailed: "Reasoning cache cleanup failed",
+            .errorOCRCacheFailed: "OCR cache failed to load",
+            .errorOCRCacheClearFailed: "OCR cache cleanup failed",
             .successDaemonStarted: "Daemon started",
             .successDaemonStopped: "Daemon stopped",
             .successAuthImported: "Current auth imported",
@@ -2549,6 +2647,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodeUpdated: "Account outbound node updated",
             .successAccountManagedProxyNodesCleared: "Account outbound nodes cleared",
             .successAccountModelRoutingUpdated: "Account model routing updated",
+            .successAccountReasoningEffortUpdated: "Account reasoning effort updated",
             .successAccountCooldownStopped: "Account cooldown stopped",
             .successAccountCooldownPolicyUpdated: "Account cooldown policy updated",
             .successAccountListRefreshed: "Account list refreshed",
@@ -2583,6 +2682,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successCopiedRowCSV: "CSV row copied",
             .successRequestLogsExported: "Request logs exported",
             .successReasoningCacheCleared: "Reasoning cache cleared",
+            .successOCRCacheCleared: "OCR cache cleared",
             .successHostSaved: "Remote host saved",
             .successAccountEnabled: "Account enabled",
             .successAccountDisabled: "Account disabled",
@@ -2606,6 +2706,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearReasoningCacheOlderThanTitle: "Clear older reasoning cache?",
             .confirmClearReasoningCacheAllTitle: "Clear all reasoning cache?",
             .confirmClearReasoningCacheAllMessage: "All encrypted reasoning backfill cache entries will be removed. This does not delete accounts, API keys, or request logs.",
+            .confirmClearOCRCacheExpiredTitle: "Clear expired OCR cache?",
+            .confirmClearOCRCacheExpiredMessage: "Expired encrypted OCR results will be removed. Active cache entries remain available for image hash reuse.",
+            .confirmClearOCRCacheOlderThanTitle: "Clear older OCR cache?",
+            .confirmClearOCRCacheAllTitle: "Clear all OCR cache?",
+            .confirmClearOCRCacheAllMessage: "All encrypted OCR result cache entries will be removed. This does not delete accounts, API keys, request logs, or original images.",
         ],
         .zhHans: [
             .brandName: "AI Coding Proxy",
@@ -2719,6 +2824,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelRequestedModel: "请求模型",
             .labelActualModel: "真实访问模型",
             .labelReasoningEffort: "思维等级",
+            .labelReasoningEffortLow: "低",
+            .labelReasoningEffortMedium: "中",
+            .labelReasoningEffortHigh: "高",
+            .labelReasoningEffortXHigh: "超高",
             .labelTestAccount: "测试账号",
             .labelInterface: "接口",
             .labelUpstreamURL: "上游地址",
@@ -2733,7 +2842,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelGeneratedImages: "生成图片",
             .labelImagePreview: "图片预览",
             .labelImageURL: "图片 URL",
+            .labelImageEditInputs: "编辑图片",
+            .labelLargeImagePreview: "大图预览",
             .actionSaveImageAs: "另存为",
+            .actionViewLargeImage: "查看大图",
+            .actionChooseImages: "选择图片",
+            .actionClearImages: "清空图片",
+            .actionResetZoom: "重置缩放",
             .labelLatency: "耗时",
             .labelHTTPStatus: "HTTP 状态",
             .labelResponseText: "响应文本",
@@ -2763,6 +2878,15 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelStatsRetentionDays: "统计保留天数",
             .labelGeminiOAuthClientID: "Client ID",
             .labelGeminiOAuthClientSecret: "Client Secret",
+            .labelSupportsVision: "支持图片上下文",
+            .labelOCRProvider: "OCR 服务商",
+            .labelOCRModel: "OCR 模型",
+            .labelOCRAPIKey: "OCR API Key",
+            .labelOCRBaseURL: "OCR Base URL",
+            .labelOCRPrompt: "OCR Prompt",
+            .labelOCRTimeout: "超时时间（秒）",
+            .labelOCRMaxImageSize: "最大图片大小（字节）",
+            .labelOCRDebugMode: "OCR 调试模式",
             .labelLanguage: "语言",
             .labelTheme: "主题",
             .labelDisplay: "显示",
@@ -2830,6 +2954,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionAppearance: "外观",
             .sectionGeneral: "通用",
             .sectionGeminiOAuth: "Google / Gemini OAuth",
+            .sectionOCRModel: "OCR 模型",
+            .sectionOCRCache: "OCR 缓存",
             .sectionOutboundProxy: "出站代理",
             .sectionBehavior: "行为",
             .sectionService: "服务",
@@ -2865,6 +2991,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionAccountCardEdit: "编辑",
             .actionAccountCardNode: "出站节点",
             .actionAccountCardMore: "更多",
+            .actionEditReasoningEffort: "思考强度",
             .actionStopAccountCooldown: "停止冷却",
             .actionDisableAutomaticCooldown: "禁用冷却",
             .actionEnableAutomaticCooldown: "恢复冷却",
@@ -2875,6 +3002,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionConfirmProxyModeChange: "确认切换模式",
             .actionSaveManualProxy: "保存手工代理",
             .actionSaveGeneralSettings: "保存设置",
+            .actionSaveOCRSettings: "保存 OCR 设置",
             .actionSaveHost: "保存主机",
             .actionCreateRemoteHost: "新建主机",
             .actionDeleteHost: "删除主机",
@@ -2935,6 +3063,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearReasoningCacheOlderThan: "清理早于",
             .actionClearAllReasoningCache: "全部清理",
             .actionClearReasoningCacheConfirm: "确认清理",
+            .actionRefreshOCRCache: "刷新 OCR 缓存",
+            .actionClearExpiredOCRCache: "清理过期",
+            .actionClearOCRCacheOlderThan: "清理早于",
+            .actionClearAllOCRCache: "全部清理",
+            .actionClearOCRCacheConfirm: "确认清理 OCR 缓存",
             .actionTestProxy: "测试代理",
             .actionOpenHelp: "帮助",
             .actionSendTest: "发送测试",
@@ -3011,6 +3144,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperBatchRemoveAccounts: "勾选多个账号后统一移除本地保存的授权记录，执行前会再次确认。",
             .helperQuickActionRefreshUsage: "刷新所有已导入账号的额度和用量状态。",
             .helperAccountCardLastError: "点击查看完整错误信息。",
+            .helperAccountReasoningEffort: "账号级映射，用于把 Codex 的 low / medium / high / xhigh 转成供应商自己的 `reasoning_effort` 值。未知值和空映射会按原值透传。",
             .helperSelectionPolicy: "拖拽定义账号调用顺序。请求会按顺序依次尝试已启用账号，并自动跳过额度阻塞或冷却中的 API Key 账号。",
             .helperAccountOrderSearch: "搜索只缩小这里显示的账号范围。移动操作会更新完整账号池顺序。",
             .helperManualAPIKeyAccount: "手动添加兼容 API Key 账号，并为该账号单独保存上游根地址。OAuth 账号仍只支持浏览器授权登录。",
@@ -3033,6 +3167,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheSelectAccount: "请选择一个有 reasoning 回传缓存的账号。",
             .helperReasoningCacheNoEntries: "当前没有可清理的 reasoning 回传缓存。",
             .helperGeminiOAuthSettings: "配置 Google / Gemini 登录使用的 Google OAuth 客户端；环境变量仍会作为兼容 fallback。",
+            .helperSupportsVision: "开启后图片会直接透传给上游模型；关闭后在 OCR 已启用时会自动识别图片并把结果作为文本上下文注入。",
+            .helperOCRModelSettings: "配置独立的 OpenAI 兼容 OCR 模型。只有账号标记为不支持图片上下文，且请求包含图片时才会调用。",
+            .helperOCRCache: "按图片内容哈希索引的加密 OCR 结果缓存。相同图片可在不同纯文本模型账号之间复用同一次识别结果。",
+            .helperOCRCachePrivacy: "这里只保存图片 SHA-256 哈希、安全元数据和加密后的 OCR 文本。不会保存或展示原图、URL、base64 内容或 API Key。",
+            .helperImageEditInputs: "选择一张或多张 PNG、JPEG 或 WebP 图片用于 Images edits 请求。预览区只展示文件摘要，不展示图片二进制内容。",
             .helperAnthropicConnection: "Claude Code 只需要使用根地址接入；如果你希望 Codex 或其它 OpenAI-compatible 客户端也固定走 Anthropic 账号池，也可以在 OpenAI 兼容 Base URL 上复用这把 Anthropic 路由的本地 API Key。",
             .helperGeminiConnection: "Gemini CLI 通过 `GOOGLE_GEMINI_BASE_URL` 指向代理根地址，并通过 `GEMINI_API_KEY` 复用同一份本地 API Key。Gemini CLI 请求现在只会通过账号页 `Google / Gemini Login` 导入的账号执行。`Google Gemini Compatible` 仍可用于 API key 兼容路由，但不再作为 Gemini CLI 的后端路径。",
             .helperOutboundProxyGlobalModeDisabled: "如果你本机运行的代理软件已经开启全局代理，这里的代理模式应选择 `关闭`，避免请求再次经过一层代理。",
@@ -3140,6 +3279,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionChatCompletions: "Chat",
             .optionResponses: "Responses",
             .optionImageGenerations: "图片生成",
+            .optionImageEdits: "图片编辑",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
             .optionAnthropicMessages: "Anthropic",
@@ -3219,6 +3359,8 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorKeepAwakeFailed: "常亮开启失败",
             .errorReasoningCacheFailed: "Reasoning 缓存加载失败",
             .errorReasoningCacheClearFailed: "Reasoning 缓存清理失败",
+            .errorOCRCacheFailed: "OCR 缓存加载失败",
+            .errorOCRCacheClearFailed: "OCR 缓存清理失败",
             .successDaemonStarted: "服务已启动",
             .successDaemonStopped: "服务已停止",
             .successAuthImported: "当前授权已导入",
@@ -3232,6 +3374,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successAccountManagedProxyNodeUpdated: "账号出站节点已更新",
             .successAccountManagedProxyNodesCleared: "账号出站节点已清空",
             .successAccountModelRoutingUpdated: "账号模型转换已更新",
+            .successAccountReasoningEffortUpdated: "账号思考强度已更新",
             .successAccountCooldownStopped: "账号冷却已停止",
             .successAccountCooldownPolicyUpdated: "账号冷却策略已更新",
             .successAccountListRefreshed: "账号列表已刷新",
@@ -3266,6 +3409,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successCopiedRowCSV: "CSV 行已复制",
             .successRequestLogsExported: "请求日志已导出",
             .successReasoningCacheCleared: "Reasoning 缓存已清理",
+            .successOCRCacheCleared: "OCR 缓存已清理",
             .successHostSaved: "远程主机已保存",
             .successAccountEnabled: "账号已启用",
             .successAccountDisabled: "账号已停用",
@@ -3289,6 +3433,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearReasoningCacheOlderThanTitle: "清理较早的 reasoning 缓存？",
             .confirmClearReasoningCacheAllTitle: "清理全部 reasoning 缓存？",
             .confirmClearReasoningCacheAllMessage: "将删除所有加密 reasoning 回传缓存。不会删除账号、API Key 或请求日志。",
+            .confirmClearOCRCacheExpiredTitle: "清理过期 OCR 缓存？",
+            .confirmClearOCRCacheExpiredMessage: "将删除已经过期的加密 OCR 结果，仍在有效期内的缓存会继续用于图片哈希复用。",
+            .confirmClearOCRCacheOlderThanTitle: "清理较早的 OCR 缓存？",
+            .confirmClearOCRCacheAllTitle: "清理全部 OCR 缓存？",
+            .confirmClearOCRCacheAllMessage: "将删除所有加密 OCR 结果缓存。不会删除账号、API Key、请求日志或原始图片。",
         ],
     ]
 }

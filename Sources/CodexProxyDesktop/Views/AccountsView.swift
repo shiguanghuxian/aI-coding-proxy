@@ -146,6 +146,15 @@ struct AccountsView: View {
             AccountModelRoutingSheet(model: self.model)
                 .interactiveDismissDisabled(self.model.accountModelRoutingIsSubmitting)
         }
+        .sheet(
+            item: Binding(
+                get: { self.model.accountReasoningEffortDraft },
+                set: { newValue in self.model.accountReasoningEffortDraft = newValue }
+            )
+        ) { _ in
+            AccountReasoningEffortSheet(model: self.model)
+                .interactiveDismissDisabled(self.model.accountReasoningEffortIsSubmitting)
+        }
     }
 
     @ViewBuilder
@@ -1528,6 +1537,7 @@ struct AccountPoolDetailSidebar: View {
                                 self.editActionButton(for: account)
                                 self.outboundNodeButton(for: account)
                                 self.modelRoutingButton(for: account)
+                                self.reasoningEffortButton(for: account)
                                 self.cooldownPolicyButton(for: account)
                                 self.stopCooldownButton(for: account)
                                 self.enableToggleButton(for: account)
@@ -1697,6 +1707,16 @@ struct AccountPoolDetailSidebar: View {
             self.model.openAccountModelRoutingSheet(account)
         }
         .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+    }
+
+    @ViewBuilder
+    private func reasoningEffortButton(for account: AccountSummary) -> some View {
+        if self.model.canEditAccountReasoningEffort(account) {
+            Button(self.model.text(.actionEditReasoningEffort)) {
+                self.model.openAccountReasoningEffortSheet(account)
+            }
+            .buttonStyle(AccountCardCompactActionButtonStyle(kind: .secondary))
+        }
     }
 
     private func enableToggleButton(for account: AccountSummary) -> some View {
@@ -2667,6 +2687,157 @@ private struct AccountModelRoutingSheet: View {
     }
 }
 
+private struct AccountReasoningEffortSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ObservedObject var model: DesktopAppModel
+
+    private var draftBinding: Binding<DesktopAppModel.AccountReasoningEffortDraft> {
+        Binding(
+            get: {
+                self.model.accountReasoningEffortDraft
+                    ?? DesktopAppModel.AccountReasoningEffortDraft(
+                        accountID: "",
+                        accountKey: "",
+                        label: "",
+                        low: "low",
+                        medium: "medium",
+                        high: "high",
+                        xhigh: "xhigh"
+                    )
+            },
+            set: { newValue in
+                self.model.accountReasoningEffortDraft = newValue
+            }
+        )
+    }
+
+    var body: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+        let draft = self.draftBinding.wrappedValue
+
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(self.model.accountReasoningEffortSheetTitle)
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(palette.textPrimary)
+                            Text(draft.label)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(palette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        StatusPill(text: self.model.text(.labelUpstreamAdapter), tone: .accent)
+                    }
+
+                    Text(self.model.accountReasoningEffortHint())
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 12) {
+                            self.effortField(title: self.model.text(.labelReasoningEffortLow), keyPath: \.low)
+                            self.effortField(title: self.model.text(.labelReasoningEffortMedium), keyPath: \.medium)
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            self.effortField(title: self.model.text(.labelReasoningEffortLow), keyPath: \.low)
+                            self.effortField(title: self.model.text(.labelReasoningEffortMedium), keyPath: \.medium)
+                        }
+                    }
+
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 12) {
+                            self.effortField(title: self.model.text(.labelReasoningEffortHigh), keyPath: \.high)
+                            self.effortField(title: self.model.text(.labelReasoningEffortXHigh), keyPath: \.xhigh)
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            self.effortField(title: self.model.text(.labelReasoningEffortHigh), keyPath: \.high)
+                            self.effortField(title: self.model.text(.labelReasoningEffortXHigh), keyPath: \.xhigh)
+                        }
+                    }
+
+                    Text(self.model.accountReasoningEffortStatusText(for: draft))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button(self.model.text(.commonCancel)) {
+                    self.model.dismissAccountReasoningEffortSheet()
+                }
+                .buttonStyle(AppActionButtonStyle(kind: .secondary))
+                .disabled(self.model.accountReasoningEffortIsSubmitting)
+
+                Spacer(minLength: 0)
+
+                Button(self.model.text(.actionSaveAccount)) {
+                    Task { await self.model.submitAccountReasoningEffortUpdate() }
+                }
+                .buttonStyle(AppActionButtonStyle(kind: .primary))
+                .disabled(self.model.accountReasoningEffortIsSubmitting)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(palette.panelRaised.opacity(self.colorScheme == .dark ? 0.98 : 0.96))
+        }
+        .frame(minWidth: 480, idealWidth: 560, maxWidth: 660, minHeight: 330, idealHeight: 420, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(palette.panel)
+        )
+        .compactOverlayScrollbars()
+    }
+
+    private func effortField(
+        title: String,
+        keyPath: WritableKeyPath<DesktopAppModel.AccountReasoningEffortDraft, String>
+    ) -> some View {
+        FormFieldPanel(title: title) {
+            TextField(title, text: self.binding(for: keyPath))
+                .textFieldStyle(.plain)
+                .dashboardFieldChrome()
+        }
+    }
+
+    private func binding(
+        for keyPath: WritableKeyPath<DesktopAppModel.AccountReasoningEffortDraft, String>
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                self.model.accountReasoningEffortDraft?[keyPath: keyPath]
+                    ?? DesktopAppModel.AccountReasoningEffortDraft(
+                        accountID: "",
+                        accountKey: "",
+                        label: "",
+                        low: "low",
+                        medium: "medium",
+                        high: "high",
+                        xhigh: "xhigh"
+                    )[keyPath: keyPath]
+            },
+            set: { newValue in
+                guard var draft = self.model.accountReasoningEffortDraft else { return }
+                draft[keyPath: keyPath] = newValue
+                self.model.accountReasoningEffortDraft = draft
+            }
+        )
+    }
+}
+
 private struct AccountOrderRow: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var targetPosition = ""
@@ -3105,6 +3276,14 @@ private struct AccountCard: View {
 
     private var moreActionsMenu: some View {
         Menu {
+            if self.model.canEditAccountReasoningEffort(self.account) {
+                Button(self.model.text(.actionEditReasoningEffort)) {
+                    self.model.openAccountReasoningEffortSheet(self.account)
+                }
+
+                Divider()
+            }
+
             if self.model.canUpdateAccountCooldownPolicy(self.account) {
                 Button(self.model.accountCooldownPolicyActionTitle(self.account)) {
                     Task { await self.model.toggleAccountCooldownPolicy(self.account) }

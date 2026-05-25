@@ -982,6 +982,126 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testGenericChatCompletionsAdapterMapsReasoningEffortAndPreservesThinking() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["gpt-5.4"],
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Reasoning Effort Chat",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-chat-effort",
+                    enabled: true
+                )
+            )
+            _ = try await harness.controller.updateAccountReasoningEffort(
+                id: added.id,
+                input: UpdateAccountReasoningEffortRequest(
+                    low: "",
+                    medium: "balanced",
+                    high: "vendor-deep",
+                    xhigh: "vendor-ultra"
+                )
+            )
+
+            let chatResponse = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","thinking":{"type":"enabled","budget_tokens":256},"stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let chatBody = try await Self.data(from: chatResponse.body)
+            XCTAssertEqual(chatResponse.statusCode, 200, Self.string(from: chatBody))
+
+            var snapshot = await probe.snapshot()
+            let lastChatBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let chatPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lastChatBody.utf8)) as? [String: Any])
+            XCTAssertEqual(chatPayload["reasoning_effort"] as? String, "vendor-deep")
+            let thinking = try XCTUnwrap(chatPayload["thinking"] as? [String: Any])
+            XCTAssertEqual(thinking["type"] as? String, "enabled")
+
+            let lowResponse = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"low","stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let lowBody = try await Self.data(from: lowResponse.body)
+            XCTAssertEqual(lowResponse.statusCode, 200, Self.string(from: lowBody))
+
+            snapshot = await probe.snapshot()
+            let lowChatBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let lowPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lowChatBody.utf8)) as? [String: Any])
+            XCTAssertEqual(lowPayload["reasoning_effort"] as? String, "low")
+        }
+    }
+
+    func testResponsesToChatCompletionsAdapterMapsReasoningEffort() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["gpt-5.4"],
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Reasoning Effort Responses",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-responses-effort",
+                    enabled: true
+                )
+            )
+            _ = try await harness.controller.updateAccountReasoningEffort(
+                id: added.id,
+                input: UpdateAccountReasoningEffortRequest(xhigh: "vendor-ultra")
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"{"model":"gpt-5.4","input":"hello","reasoning":{"effort":"xhigh"},"stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let snapshot = await probe.snapshot()
+            let lastChatBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lastChatBody.utf8)) as? [String: Any])
+            XCTAssertEqual(payload["reasoning_effort"] as? String, "vendor-ultra")
+        }
+    }
+
     func testGenericChatCompletionsRestoresDeepSeekReasoningCache() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -8725,6 +8845,644 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertEqual(clearAll.summary.totalCount, 0)
     }
 
+    func testAdminOCRCacheSummaryAndClearRoutesDoNotExposeOCRContent() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let now = Helpers.now()
+        try harness.controller.store.upsertOCRResultCacheEntry(
+            imageHash: Helpers.sha256(Data("ocr-admin-image".utf8)),
+            entry: OCRResultCacheEntry(
+                text: "[OCR识别结果]\n文字内容：admin route secret OCR text",
+                mimeType: "image/png",
+                byteCount: 15,
+                touchedAt: now,
+                expiresAt: now + 600
+            ),
+            capacity: 8
+        )
+        try harness.controller.store.upsertOCRResultCacheEntry(
+            imageHash: Helpers.sha256(Data("ocr-admin-expired".utf8)),
+            entry: OCRResultCacheEntry(
+                text: "[OCR识别结果]\n文字内容：expired OCR text",
+                mimeType: "image/png",
+                byteCount: 17,
+                touchedAt: now - 120,
+                expiresAt: now - 10
+            ),
+            capacity: 8
+        )
+
+        let summaryResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "GET",
+                path: "/admin/ocr-cache/summary",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let summaryBody = try await Self.data(from: summaryResponse.body)
+        XCTAssertEqual(summaryResponse.statusCode, 200, Self.string(from: summaryBody))
+        XCTAssertFalse(Self.string(from: summaryBody).contains("admin route secret OCR text"))
+        let summary = try Helpers.readJSON(OCRCacheSummary.self, from: summaryBody)
+        XCTAssertEqual(summary.totalCount, 2)
+        XCTAssertEqual(summary.expiredCount, 1)
+
+        let clearExpiredResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/ocr-cache/clear",
+                body: #"{"expiredOnly":true}"#,
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let clearExpiredBody = try await Self.data(from: clearExpiredResponse.body)
+        XCTAssertEqual(clearExpiredResponse.statusCode, 200, Self.string(from: clearExpiredBody))
+        let clearExpired = try Helpers.readJSON(ClearOCRCacheResult.self, from: clearExpiredBody)
+        XCTAssertEqual(clearExpired.deletedCount, 1)
+        XCTAssertEqual(clearExpired.summary.totalCount, 1)
+
+        let clearAllResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/ocr-cache/clear",
+                body: #"{"clearAll":true}"#,
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let clearAllBody = try await Self.data(from: clearAllResponse.body)
+        XCTAssertEqual(clearAllResponse.statusCode, 200, Self.string(from: clearAllBody))
+        let clearAll = try Helpers.readJSON(ClearOCRCacheResult.self, from: clearAllBody)
+        XCTAssertEqual(clearAll.deletedCount, 1)
+        XCTAssertEqual(clearAll.summary.totalCount, 0)
+    }
+
+    func testChatCompletionsTextOnlyAccountAppliesOCRAndCachesImageResult() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let targetProbe = GenericOpenAICompatibilityProbe()
+        let ocrProbe = OCRProxyProbe()
+        let targetUpstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: targetProbe,
+            responsesAvailable: false
+        )
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await targetUpstream.test(.ahc()) { targetClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let account = try await harness.controller.manualAddAPIKeyAccount(
+                    ManualAPIKeyAccountInput(
+                        label: "Text Only Chat",
+                        baseURL: "http://localhost:\(targetClient.port ?? 0)/v1",
+                        upstreamAdapter: .chatCompletions,
+                        apiKey: "sk-target",
+                        enabled: true,
+                        supportsVision: false
+                    )
+                )
+                let requestJSON = """
+                {
+                  "model": "gpt-5.4",
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {"type": "text", "text": "请分析第1张图片"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}},
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,aW1hZ2U="}}
+                      ]
+                    }
+                  ],
+                  "stream": false
+                }
+                """
+
+                for _ in 0..<2 {
+                    let response = await harness.service.handle(
+                        Self.makePublicRequest(
+                            path: "/v1/chat/completions",
+                            body: requestJSON,
+                            proxyKey: harness.config.proxyAPIKey,
+                            extraHeaders: [ProxyHeaderName.testAccountKey: account.accountKey]
+                        ),
+                        kind: .publicAPI
+                    )
+                    let body = try await Self.data(from: response.body)
+                    XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+                }
+
+                let targetSnapshot = await targetProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                let forwardedBody = try XCTUnwrap(targetSnapshot.chatRequestBodies.last)
+
+                XCTAssertEqual(ocrSnapshot.chatHits, 1)
+                XCTAssertEqual(ocrSnapshot.lastAuthorization, "Bearer sk-ocr")
+                XCTAssertTrue(forwardedBody.contains("<image_ocr_context>"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("[图片1 OCR识别结果]"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("[图片2 OCR识别结果]"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("OCR 测试截图"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("用户原始消息"), forwardedBody)
+                XCTAssertFalse(forwardedBody.contains("image_url"), forwardedBody)
+
+                let restartedController = try Self.makeController(dataDirectory: harness.dataDirectory)
+                try await restartedController.bootstrap()
+                let restartedService = DaemonHTTPService(
+                    controller: restartedController,
+                    publicHost: "127.0.0.1",
+                    publicPort: 8787,
+                    adminPort: 8788
+                )
+                let restartedResponse = await restartedService.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/chat/completions",
+                        body: requestJSON,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: [ProxyHeaderName.testAccountKey: account.accountKey]
+                    ),
+                    kind: .publicAPI
+                )
+                let restartedBody = try await Self.data(from: restartedResponse.body)
+                XCTAssertEqual(restartedResponse.statusCode, 200, Self.string(from: restartedBody))
+                let restartedOCRSnapshot = await ocrProbe.snapshot()
+                XCTAssertEqual(restartedOCRSnapshot.chatHits, 1)
+            }
+        }
+    }
+
+    func testResponsesTextOnlyAccountAppliesOCRBeforeForwarding() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let targetProbe = GenericOpenAICompatibilityProbe()
+        let ocrProbe = OCRProxyProbe()
+        let targetUpstream = Self.makeGenericOpenAICompatibilityApplication(probe: targetProbe)
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await targetUpstream.test(.ahc()) { targetClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let account = try await harness.controller.manualAddAPIKeyAccount(
+                    ManualAPIKeyAccountInput(
+                        label: "Text Only Responses",
+                        baseURL: "http://localhost:\(targetClient.port ?? 0)/v1",
+                        upstreamAdapter: .responses,
+                        apiKey: "sk-target",
+                        enabled: true,
+                        supportsVision: false
+                    )
+                )
+                let requestJSON = """
+                {
+                  "model": "gpt-5.4",
+                  "input": [
+                    {
+                      "type": "message",
+                      "role": "user",
+                      "content": [
+                        {"type": "input_text", "text": "请分析图片里的报错"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="}
+                      ]
+                    }
+                  ],
+                  "stream": false
+                }
+                """
+
+                let response = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/responses",
+                        body: requestJSON,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: [ProxyHeaderName.testAccountKey: account.accountKey]
+                    ),
+                    kind: .publicAPI
+                )
+                let body = try await Self.data(from: response.body)
+                XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+                let targetSnapshot = await targetProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                let forwardedBody = try XCTUnwrap(targetSnapshot.responsesRequestBodies.last)
+
+                XCTAssertEqual(ocrSnapshot.chatHits, 1)
+                XCTAssertTrue(forwardedBody.contains("<image_ocr_context>"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("OCR 测试截图"), forwardedBody)
+                XCTAssertFalse(forwardedBody.contains("input_image"), forwardedBody)
+            }
+        }
+    }
+
+    func testResponsesVisionAccountPassesImagesWithoutOCR() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let targetProbe = GenericOpenAICompatibilityProbe()
+        let ocrProbe = OCRProxyProbe()
+        let targetUpstream = Self.makeGenericOpenAICompatibilityApplication(probe: targetProbe)
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await targetUpstream.test(.ahc()) { targetClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let account = try await harness.controller.manualAddAPIKeyAccount(
+                    ManualAPIKeyAccountInput(
+                        label: "Vision Responses",
+                        baseURL: "http://localhost:\(targetClient.port ?? 0)/v1",
+                        upstreamAdapter: .responses,
+                        apiKey: "sk-target",
+                        enabled: true,
+                        supportsVision: true
+                    )
+                )
+                let requestJSON = """
+                {
+                  "model": "gpt-5.4",
+                  "input": [
+                    {
+                      "type": "message",
+                      "role": "user",
+                      "content": [
+                        {"type": "input_text", "text": "请分析图片"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="}
+                      ]
+                    }
+                  ],
+                  "stream": false
+                }
+                """
+
+                let response = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/responses",
+                        body: requestJSON,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: [ProxyHeaderName.testAccountKey: account.accountKey]
+                    ),
+                    kind: .publicAPI
+                )
+                let body = try await Self.data(from: response.body)
+                XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+                let targetSnapshot = await targetProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                let forwardedBody = try XCTUnwrap(targetSnapshot.responsesRequestBodies.last)
+
+                XCTAssertEqual(ocrSnapshot.chatHits, 0)
+                XCTAssertTrue(forwardedBody.contains("input_image"), forwardedBody)
+                XCTAssertFalse(forwardedBody.contains("<image_ocr_context>"), forwardedBody)
+            }
+        }
+    }
+
+    func testAnthropicNativeTextOnlyAccountAppliesOCRForMessagesAndCountTokens() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let anthropicProbe = AnthropicAPIKeyProbe()
+        let ocrProbe = OCRProxyProbe()
+        let anthropicUpstream = Self.makeAnthropicAPIKeyUpstreamApplication(probe: anthropicProbe)
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await anthropicUpstream.test(.ahc()) { anthropicClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.proxyAPIKeys = [
+                    ProxyAPIKeyRecord(
+                        id: "anthropic-ocr",
+                        label: "Anthropic OCR",
+                        key: harness.config.proxyAPIKey,
+                        dataSource: .anthropic,
+                        enabled: true,
+                        createdAt: 1
+                    ),
+                ]
+                config.primaryProxyAPIKeyID = "anthropic-ocr"
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let account = try await harness.controller.manualAddAPIKeyAccount(
+                    ManualAPIKeyAccountInput(
+                        label: "Text Only Anthropic",
+                        providerPreset: .anthropicAPICompatible,
+                        baseURL: "http://localhost:\(anthropicClient.port ?? 0)/v1",
+                        apiKey: "sk-anthropic",
+                        enabled: true,
+                        supportsVision: false
+                    )
+                )
+
+                let requestJSON = #"""
+                {
+                  "model": "claude-sonnet-4-5",
+                  "max_tokens": 64,
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {"type": "text", "text": "请分析第1张图片"},
+                        {
+                          "type": "image",
+                          "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "aW1hZ2U="
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """#
+
+                let messages = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/messages",
+                        body: requestJSON,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: [
+                            ProxyHeaderName.testAccountKey: account.accountKey,
+                            "anthropic-version": AnthropicTranscoder.defaultAnthropicVersion,
+                        ]
+                    ),
+                    kind: .publicAPI
+                )
+                let messagesBody = try await Self.data(from: messages.body)
+                XCTAssertEqual(messages.statusCode, 200, Self.string(from: messagesBody))
+
+                let countTokens = await harness.service.handle(
+                    Self.makePublicRequest(
+                        path: "/v1/messages/count_tokens",
+                        body: requestJSON,
+                        proxyKey: harness.config.proxyAPIKey,
+                        extraHeaders: [
+                            ProxyHeaderName.testAccountKey: account.accountKey,
+                            "anthropic-version": AnthropicTranscoder.defaultAnthropicVersion,
+                        ]
+                    ),
+                    kind: .publicAPI
+                )
+                let countTokensBody = try await Self.data(from: countTokens.body)
+                XCTAssertEqual(countTokens.statusCode, 200, Self.string(from: countTokensBody))
+
+                let anthropicSnapshot = await anthropicProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                XCTAssertEqual(ocrSnapshot.chatHits, 1)
+                XCTAssertEqual(anthropicSnapshot.messagesHits, 1)
+                XCTAssertEqual(anthropicSnapshot.countTokensHits, 1)
+                for body in anthropicSnapshot.requestBodies.suffix(2) {
+                    XCTAssertTrue(body.contains("<image_ocr_context>"), body)
+                    XCTAssertTrue(body.contains("OCR 测试截图"), body)
+                    XCTAssertFalse(body.contains(#""type":"image""#), body)
+                    XCTAssertFalse(body.contains("aW1hZ2U="), body)
+                }
+            }
+        }
+    }
+
+    func testGeminiNativeTextOnlyAccountAppliesOCRBeforeGenerateAndCountTokens() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let geminiProbe = GeminiOAuthProbe()
+        let ocrProbe = OCRProxyProbe()
+        let geminiUpstream = Self.makeGeminiOAuthProviderApplication(probe: geminiProbe)
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await geminiUpstream.test(.ahc()) { geminiClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.proxyAPIKeys = [
+                    ProxyAPIKeyRecord(
+                        id: "gemini-ocr",
+                        label: "Gemini OCR",
+                        key: "sk-local-gemini-ocr",
+                        dataSource: .gemini,
+                        enabled: true,
+                        createdAt: 1
+                    ),
+                ]
+                config.primaryProxyAPIKeyID = "gemini-ocr"
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let secretRef = try harness.controller.secretStore.saveGeminiOAuthSecret(
+                    GeminiOAuthSecretBundle(
+                        accessToken: "gemini-access-live",
+                        refreshToken: "gemini-refresh-live",
+                        expiresAt: Helpers.now() + 3_600,
+                        tokenType: "Bearer",
+                        scope: GeminiAuthService.defaultOAuthScopes
+                    )
+                )
+                _ = try await harness.controller.importAuthJSONAccounts([
+                    .init(
+                        source: "gemini-oauth-auth.json",
+                        content: Self.geminiOAuthAuthJSON(
+                            secretRef: secretRef,
+                            baseURL: "http://localhost:\(geminiClient.port ?? 0)",
+                            projectID: "gemini-project",
+                            supportsVision: false
+                        ),
+                        label: "Gemini OCR OAuth"
+                    ),
+                ])
+                let accounts = try await harness.controller.listAccounts()
+                let account = try XCTUnwrap(accounts.first)
+                let requestJSON = #"""
+                {
+                  "contents": [
+                    {
+                      "role": "user",
+                      "parts": [
+                        {"text": "请分析图片"},
+                        {
+                          "inlineData": {
+                            "mimeType": "image/png",
+                            "data": "aW1hZ2U="
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """#
+
+                let generate = await harness.service.handle(
+                    Self.makePublicGeminiRequest(
+                        path: "/v1beta/models/gemini-2.5-flash:generateContent",
+                        body: requestJSON,
+                        proxyKey: "sk-local-gemini-ocr",
+                        extraHeaders: [
+                            ProxyHeaderName.testAccountKey: account.accountKey,
+                            "x-gemini-api-privileged-user-id": "gemini-cli-user-ocr",
+                        ]
+                    ),
+                    kind: .publicAPI
+                )
+                let generateBody = try await Self.data(from: generate.body)
+                XCTAssertEqual(generate.statusCode, 200, Self.string(from: generateBody))
+
+                let countTokens = await harness.service.handle(
+                    Self.makePublicGeminiRequest(
+                        path: "/v1beta/models/gemini-2.5-flash:countTokens",
+                        body: requestJSON,
+                        proxyKey: "sk-local-gemini-ocr",
+                        extraHeaders: [
+                            ProxyHeaderName.testAccountKey: account.accountKey,
+                            "x-gemini-api-privileged-user-id": "gemini-cli-user-ocr",
+                        ]
+                    ),
+                    kind: .publicAPI
+                )
+                let countTokensBody = try await Self.data(from: countTokens.body)
+                XCTAssertEqual(countTokens.statusCode, 200, Self.string(from: countTokensBody))
+
+                let geminiSnapshot = await geminiProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                XCTAssertEqual(ocrSnapshot.chatHits, 1)
+                XCTAssertEqual(geminiSnapshot.generateHits, 1)
+                XCTAssertEqual(geminiSnapshot.countTokensHits, 1)
+                for body in (geminiSnapshot.generateBodies + geminiSnapshot.countTokenBodies) {
+                    XCTAssertTrue(body.contains("<image_ocr_context>"), body)
+                    XCTAssertTrue(body.contains("OCR 测试截图"), body)
+                    XCTAssertFalse(body.contains("inlineData"), body)
+                    XCTAssertFalse(body.contains("aW1hZ2U="), body)
+                }
+            }
+        }
+    }
+
+    func testGeminiNativeVisionAccountPassesImagesWithoutOCR() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let geminiProbe = GeminiOAuthProbe()
+        let ocrProbe = OCRProxyProbe()
+        let geminiUpstream = Self.makeGeminiOAuthProviderApplication(probe: geminiProbe)
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+
+        try await geminiUpstream.test(.ahc()) { geminiClient in
+            try await ocrUpstream.test(.ahc()) { ocrClient in
+                var config = harness.config
+                config.proxyAPIKeys = [
+                    ProxyAPIKeyRecord(
+                        id: "gemini-vision",
+                        label: "Gemini Vision",
+                        key: "sk-local-gemini-vision",
+                        dataSource: .gemini,
+                        enabled: true,
+                        createdAt: 1
+                    ),
+                ]
+                config.primaryProxyAPIKeyID = "gemini-vision"
+                config.ocrModel = OCRModelConfig(
+                    model: "ocr-vision",
+                    apiKey: "sk-ocr",
+                    baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                    enabled: true
+                )
+                _ = try await harness.controller.saveConfig(config)
+                let secretRef = try harness.controller.secretStore.saveGeminiOAuthSecret(
+                    GeminiOAuthSecretBundle(
+                        accessToken: "gemini-access-live",
+                        refreshToken: "gemini-refresh-live",
+                        expiresAt: Helpers.now() + 3_600,
+                        tokenType: "Bearer",
+                        scope: GeminiAuthService.defaultOAuthScopes
+                    )
+                )
+                _ = try await harness.controller.importAuthJSONAccounts([
+                    .init(
+                        source: "gemini-oauth-auth.json",
+                        content: Self.geminiOAuthAuthJSON(
+                            secretRef: secretRef,
+                            baseURL: "http://localhost:\(geminiClient.port ?? 0)",
+                            projectID: "gemini-project",
+                            supportsVision: true
+                        ),
+                        label: "Gemini Vision OAuth"
+                    ),
+                ])
+                let accounts = try await harness.controller.listAccounts()
+                let account = try XCTUnwrap(accounts.first)
+                let requestJSON = #"""
+                {
+                  "contents": [
+                    {
+                      "role": "user",
+                      "parts": [
+                        {"text": "请分析图片"},
+                        {
+                          "inlineData": {
+                            "mimeType": "image/png",
+                            "data": "aW1hZ2U="
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """#
+
+                let generate = await harness.service.handle(
+                    Self.makePublicGeminiRequest(
+                        path: "/v1beta/models/gemini-2.5-flash:generateContent",
+                        body: requestJSON,
+                        proxyKey: "sk-local-gemini-vision",
+                        extraHeaders: [
+                            ProxyHeaderName.testAccountKey: account.accountKey,
+                            "x-gemini-api-privileged-user-id": "gemini-cli-user-vision",
+                        ]
+                    ),
+                    kind: .publicAPI
+                )
+                let generateBody = try await Self.data(from: generate.body)
+                XCTAssertEqual(generate.statusCode, 200, Self.string(from: generateBody))
+
+                let geminiSnapshot = await geminiProbe.snapshot()
+                let ocrSnapshot = await ocrProbe.snapshot()
+                XCTAssertEqual(ocrSnapshot.chatHits, 0)
+                let forwardedBody = try XCTUnwrap(geminiSnapshot.generateBodies.last)
+                XCTAssertTrue(forwardedBody.contains("inlineData"), forwardedBody)
+                XCTAssertTrue(forwardedBody.contains("aW1hZ2U="), forwardedBody)
+                XCTAssertFalse(forwardedBody.contains("<image_ocr_context>"), forwardedBody)
+            }
+        }
+    }
+
     private static func makeHarness() async throws -> Harness {
         let dataDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -10428,6 +11186,50 @@ final class CodexProxyDaemonTests: XCTestCase {
         return Application(router: router)
     }
 
+    private static func makeOCRUpstreamApplication(
+        probe: OCRProxyProbe
+    ) -> Application<RouterResponder<BasicRequestContext>> {
+        let router = Router()
+        router.post("v1/chat/completions") { request, _ async throws -> Response in
+            await probe.recordChatHit(
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(
+                    byteBuffer: ByteBuffer(
+                        string: """
+                        {
+                          "id": "chatcmpl_ocr",
+                          "object": "chat.completion",
+                          "created": 1710000000,
+                          "model": "ocr-vision",
+                          "choices": [
+                            {
+                              "index": 0,
+                              "message": {
+                                "role": "assistant",
+                                "content": "[OCR识别结果]\\n图片类型：OCR 测试截图\\n主要内容：一个用于测试的图片\\n文字内容：sample\\n关键细节：图片被 OCR 识别\\n结构化信息：编号图片"
+                              },
+                              "finish_reason": "stop"
+                            }
+                          ],
+                          "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 20,
+                            "total_tokens": 30
+                          }
+                        }
+                        """
+                    )
+                )
+            )
+        }
+        return Application(router: router)
+    }
+
     private static func makeGenericOpenAICompatibilityApplication(
         probe: GenericOpenAICompatibilityProbe,
         routePrefix: String = "v1",
@@ -10957,6 +11759,62 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testAdminAccountReasoningEffortUpdateRoutePersistsConfig() async throws {
+        let dataDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataDirectory) }
+
+        let controller = try Self.makeController(dataDirectory: dataDirectory, manageManagedProxyRuntime: false)
+        let config = try await controller.loadConfig()
+        let service = DaemonHTTPService(
+            controller: controller,
+            publicHost: "127.0.0.1",
+            publicPort: 8787,
+            adminPort: 8788
+        )
+
+        let upstream = Self.makeUpstreamApplication()
+        try await upstream.test(.ahc()) { upstreamClient in
+            let added = try await controller.manualAddAPIKeyAccount(
+                .init(
+                    label: "Reasoning Effort",
+                    baseURL: "http://localhost:\(upstreamClient.port ?? 0)",
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-route-effort"
+                )
+            )
+
+            let response = await service.handle(
+                Self.makeAdminRequest(
+                    method: "PATCH",
+                    path: "/admin/accounts/\(added.id)/reasoning-effort",
+                    body: """
+                    {
+                      "low": "  lite  ",
+                      "medium": "normal",
+                      "high": "deep",
+                      "xhigh": "max"
+                    }
+                    """,
+                    adminToken: config.adminToken
+                ),
+                kind: .admin
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let updated = try Helpers.readJSON(AccountSummary.self, from: body)
+            XCTAssertEqual(updated.reasoningEffort.low, "lite")
+            XCTAssertEqual(updated.reasoningEffort.medium, "normal")
+            XCTAssertEqual(updated.reasoningEffort.high, "deep")
+            XCTAssertEqual(updated.reasoningEffort.xhigh, "max")
+
+            let accounts = try await controller.listAccounts()
+            XCTAssertEqual(accounts.first?.reasoningEffort, updated.reasoningEffort)
+        }
+    }
+
     func testAccountModelRoutingOverridesAliyunPresetForResponsesAndChatCompletions() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -11435,6 +12293,151 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testOpenAIImagesOAuthEditsUploadsInputImageAndUsesChatGPTWebConversation() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesOAuthWebImageUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            var config = harness.config
+            config.chatGPTBaseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            _ = try await harness.controller.saveConfig(config)
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(source: "oauth-auth", content: Self.chatGPTAuthJSON(), label: "OAuth Images")
+            ])
+
+            let boundary = "OAuthImageEditBoundary"
+            let multipart = """
+            --\(boundary)\r
+            Content-Disposition: form-data; name="model"\r
+            \r
+            codex-gpt-image-2\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="prompt"\r
+            \r
+            Remove the background\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="response_format"\r
+            \r
+            b64_json\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="image"; filename="input.png"\r
+            Content-Type: image/png\r
+            \r
+            PNGDATA\r
+            --\(boundary)--\r
+
+            """
+            let response = await harness.service.handle(
+                DaemonHTTPService.Request(
+                    method: "POST",
+                    target: OpenAIImagesEndpoint.edits.rawValue,
+                    path: OpenAIImagesEndpoint.edits.rawValue,
+                    headers: [
+                        "x-api-key": harness.config.proxyAPIKey,
+                        "content-type": "multipart/form-data; boundary=\(boundary)",
+                    ],
+                    body: Data(multipart.utf8)
+                ),
+                kind: .publicAPI
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+            let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let images = try XCTUnwrap(payload["data"] as? [[String: String]])
+            XCTAssertEqual(images.first?["b64_json"], Data("OAUTH-IMAGE".utf8).base64EncodedString())
+
+            let hits = await probe.snapshot()
+            XCTAssertEqual(hits.map(\.path), [
+                "/",
+                "/backend-api/sentinel/chat-requirements",
+                "/backend-api/files",
+                "/mock-upload/input_image.png",
+                "/backend-api/files/file_upload/uploaded",
+                "/backend-api/f/conversation/prepare",
+                "/backend-api/f/conversation",
+                "/backend-api/files/file_image/download",
+                "/mock-download/file_image.png",
+            ])
+            XCTAssertTrue(hits.first(where: { $0.path == "/backend-api/files" })?.body.contains(#""use_case":"multimodal""#) == true)
+            XCTAssertEqual(hits.first(where: { $0.path == "/mock-upload/input_image.png" })?.body, "PNGDATA")
+            let conversationBody = try XCTUnwrap(hits.first(where: { $0.path == "/backend-api/f/conversation" })?.body)
+            XCTAssertTrue(conversationBody.contains(#""content_type":"image_asset_pointer""#), conversationBody)
+            XCTAssertTrue(
+                conversationBody.contains(#""asset_pointer":"file-service:\/\/file_upload""#)
+                    || conversationBody.contains(#""asset_pointer":"file-service://file_upload""#),
+                conversationBody
+            )
+            XCTAssertTrue(conversationBody.contains("Remove the background"), conversationBody)
+        }
+    }
+
+    func testAdminProxyTestRunSupportsImageEditsMultipartBodyBase64() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = ImagesProxyProbe()
+        let upstream = Self.makeImagesAPIKeyUpstreamApplication(probe: probe)
+        try await upstream.test(.ahc()) { upstreamClient in
+            _ = try await harness.controller.importAuthJSONAccounts([
+                .init(
+                    source: "images-api-key",
+                    content: Self.openAIAPIKeyAuthJSON(baseURL: "http://localhost:\(upstreamClient.port ?? 0)/v1"),
+                    label: "Images API Key"
+                )
+            ])
+            let accounts = try await harness.controller.listAccounts()
+            let accountKey = try XCTUnwrap(accounts.first?.accountKey)
+            let boundary = "AdminImageEditBoundary"
+            let multipart = """
+            --\(boundary)\r
+            Content-Disposition: form-data; name="model"\r
+            \r
+            gpt-image-2\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="prompt"\r
+            \r
+            Sharpen it\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="image"; filename="input.png"\r
+            Content-Type: image/png\r
+            \r
+            ADMINPNG\r
+            --\(boundary)--\r
+
+            """
+            let payload = AdminProxyTestRunRequest(
+                endpoint: .imageEdits,
+                model: "gpt-image-2",
+                payloadJSON: #"{"preview":"multipart"}"#,
+                stream: false,
+                selectedAccountKey: accountKey,
+                proxyAPIKey: harness.config.proxyAPIKey,
+                contentType: "multipart/form-data; boundary=\(boundary)",
+                bodyBase64: Data(multipart.utf8).base64EncodedString()
+            )
+            let encodedPayload = try Helpers.encodeJSON(payload, pretty: false)
+
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/proxy-test/run",
+                    body: String(decoding: encodedPayload, as: UTF8.self),
+                    adminToken: harness.config.adminToken
+                ),
+                kind: .admin
+            )
+            let data = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: data))
+            let hits = await probe.snapshot()
+            let hit = try XCTUnwrap(hits.first)
+            XCTAssertEqual(hit.path, OpenAIImagesEndpoint.edits.rawValue)
+            XCTAssertEqual(hit.contentType, "multipart/form-data; boundary=\(boundary)")
+            XCTAssertTrue(hit.body.contains("ADMINPNG"), hit.body)
+        }
+    }
+
     func testOpenAIImagesOAuthGPTImage2UsesChatGPTWebImageConversation() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -11755,6 +12758,41 @@ final class CodexProxyDaemonTests: XCTestCase {
                 headers: Self.jsonHeaders(),
                 body: .init(byteBuffer: ByteBuffer(string: requirementsBody?(body) ?? #"{"token":"requirements-token"}"#))
             )
+        }
+        router.post("backend-api/files") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(
+                status: .ok,
+                headers: Self.jsonHeaders(),
+                body: .init(byteBuffer: ByteBuffer(string: #"{"file_id":"file_upload","upload_url":"/mock-upload/input_image.png"}"#))
+            )
+        }
+        router.put("mock-upload/input_image.png") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? ""
+            )
+            return Response(status: .created)
+        }
+        router.post("backend-api/files/file_upload/uploaded") { request, _ async throws -> Response in
+            await probe.record(
+                path: request.uri.path,
+                body: try await Self.string(from: request.body),
+                authorization: request.headers[.authorization] ?? "",
+                contentType: request.headers[.contentType] ?? "",
+                deviceID: request.headers[deviceHeaderName] ?? "",
+                sessionID: request.headers[sessionHeaderName] ?? ""
+            )
+            return Response(status: .ok, headers: Self.jsonHeaders(), body: .init(byteBuffer: ByteBuffer(string: #"{}"#)))
         }
         router.post("backend-api/f/conversation/prepare") { request, _ async throws -> Response in
             await probe.record(
@@ -12580,9 +13618,11 @@ final class CodexProxyDaemonTests: XCTestCase {
         clientID: String = GeminiAuthService.defaultOAuthClientID,
         scopes: String = GeminiAuthService.defaultOAuthScopes,
         tokenURL: String? = nil,
-        authorizeURL: String = GeminiAuthService.defaultAuthorizeURL
+        authorizeURL: String = GeminiAuthService.defaultAuthorizeURL,
+        supportsVision: Bool? = nil
     ) -> String {
         let resolvedTokenURL = tokenURL ?? "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/token"
+        let supportsVisionJSON = supportsVision.map { ",\n          \"supportsVision\": \($0)" } ?? ""
         return """
         {
           "auth_mode": "gemini_api_oauth",
@@ -12603,7 +13643,7 @@ final class CodexProxyDaemonTests: XCTestCase {
           "gemini_current_tier_name": "Google AI Pro",
           "gemini_paid_tier_id": "google_ai_pro",
           "gemini_paid_tier_name": "Google AI Pro",
-          "gemini_google_one_ai_credit_balance": "99"
+          "gemini_google_one_ai_credit_balance": "99"\(supportsVisionJSON)
         }
         """
     }
@@ -13347,6 +14387,30 @@ final class CodexProxyDaemonTests: XCTestCase {
                 self.responsesHits,
                 self.chatRequestBodies,
                 self.responsesRequestBodies,
+                self.lastAuthorization
+            )
+        }
+    }
+
+    private actor OCRProxyProbe {
+        private var chatHits = 0
+        private var requestBodies: [String] = []
+        private var lastAuthorization = ""
+
+        func recordChatHit(body: String, authorization: String) {
+            self.chatHits += 1
+            self.requestBodies.append(body)
+            self.lastAuthorization = authorization
+        }
+
+        func snapshot() -> (
+            chatHits: Int,
+            requestBodies: [String],
+            lastAuthorization: String
+        ) {
+            (
+                self.chatHits,
+                self.requestBodies,
                 self.lastAuthorization
             )
         }

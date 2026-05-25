@@ -582,7 +582,11 @@ public enum GeminiTranscoder {
 
                 if part["inlineData"] != nil || part["inline_data"] != nil
                     || part["fileData"] != nil || part["file_data"] != nil
-                    || part["executableCode"] != nil || part["executable_code"] != nil
+                {
+                    continue
+                }
+
+                if part["executableCode"] != nil || part["executable_code"] != nil
                     || part["codeExecutionResult"] != nil || part["code_execution_result"] != nil
                 {
                     throw ProxyError.message("Gemini non-text multimodal parts are not supported at `$.contents[\(contentIndex)].parts[\(partIndex)]`.")

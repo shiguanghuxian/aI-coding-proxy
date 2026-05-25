@@ -130,6 +130,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let modelRoutingJSON = try record.modelRouting.map {
             String(decoding: try Helpers.encodeJSON($0), as: UTF8.self)
         }
+        let reasoningEffortJSON = String(decoding: try Helpers.encodeJSON(record.reasoningEffort), as: UTF8.self)
         let selectionOrder: Int64
         let nextSelectionOrder = try self.nextAccountSelectionOrder()
         if let existingSelectionOrder = existing?.selectionOrder {
@@ -145,14 +146,16 @@ public final class SQLiteStore: @unchecked Sendable {
         let usageWindowsVisible = existing?.usageWindowsVisible ?? record.usageWindowsVisible
         let managedProxyNodeName = existing?.managedProxyNodeName ?? record.managedProxyNodeName
         let modelRouting = existing?.modelRouting ?? modelRoutingJSON
+        let reasoningEffort = existing?.reasoningEffort ?? reasoningEffortJSON
+        let supportsVision = existing?.supportsVision ?? record.supportsVision
 
         let sql = """
         INSERT OR REPLACE INTO accounts (
             id, label, principal_id, email, account_id, plan_type, auth_blob, added_at, updated_at,
             enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
             auth_refresh_blocked, auth_refresh_error, auth_mode, provider_preset, upstream_base_url, usage_windows_visible,
-            managed_proxy_node_name, model_routing_json, automatic_cooldown_disabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            managed_proxy_node_name, model_routing_json, reasoning_effort_json, automatic_cooldown_disabled, supports_vision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         try self.execute(sql, bindings: [
             .text(existing?.id ?? record.id),
@@ -178,7 +181,9 @@ public final class SQLiteStore: @unchecked Sendable {
             .int(usageWindowsVisible ? 1 : 0),
             .text(managedProxyNodeName),
             .text(modelRouting),
+            .text(reasoningEffort),
             .int(automaticCooldownDisabled ? 1 : 0),
+            .int(supportsVision ? 1 : 0),
         ])
         return existing != nil
     }
@@ -255,6 +260,17 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func updateAccountReasoningEffort(id: String, reasoningEffort: AccountReasoningEffortConfig) throws {
+        let reasoningEffortJSON = String(decoding: try Helpers.encodeJSON(reasoningEffort), as: UTF8.self)
+        try self.execute(
+            "UPDATE accounts SET reasoning_effort_json = ?, updated_at = ? WHERE id = ?;",
+            bindings: [.text(reasoningEffortJSON), .int(Helpers.now()), .text(id)]
+        )
+        guard sqlite3_changes(self.db) > 0 else {
+            throw ProxyError.message("未找到要更新的账号")
+        }
+    }
+
     public func setAccountEnabled(id: String, enabled: Bool) throws {
         try self.execute(
             "UPDATE accounts SET enabled = ?, updated_at = ? WHERE id = ?;",
@@ -287,6 +303,7 @@ public final class SQLiteStore: @unchecked Sendable {
             let modelRoutingJSON = try record.modelRouting.map {
                 String(decoding: try Helpers.encodeJSON($0), as: UTF8.self)
             }
+            let reasoningEffortJSON = String(decoding: try Helpers.encodeJSON(record.reasoningEffort), as: UTF8.self)
 
             try self.execute(
                 """
@@ -295,7 +312,7 @@ public final class SQLiteStore: @unchecked Sendable {
                     enabled = ?, selection_order = ?, consecutive_failure_count = ?, cooldown_until = ?, usage_json = ?,
                     usage_error = ?, auth_refresh_blocked = ?, auth_refresh_error = ?, auth_mode = ?, provider_preset = ?,
                     upstream_base_url = ?, usage_windows_visible = ?, managed_proxy_node_name = ?, model_routing_json = ?,
-                    automatic_cooldown_disabled = ?
+                    reasoning_effort_json = ?, automatic_cooldown_disabled = ?, supports_vision = ?
                 WHERE id = ?;
                 """,
                 bindings: [
@@ -320,7 +337,9 @@ public final class SQLiteStore: @unchecked Sendable {
                     .int(record.usageWindowsVisible ? 1 : 0),
                     .text(record.managedProxyNodeName),
                     .text(modelRoutingJSON),
+                    .text(reasoningEffortJSON),
                     .int(record.automaticCooldownDisabled ? 1 : 0),
+                    .int(record.supportsVision ? 1 : 0),
                     .text(id),
                 ]
             )
@@ -454,8 +473,8 @@ public final class SQLiteStore: @unchecked Sendable {
             SELECT id, label, principal_id, email, account_id, plan_type, auth_blob, added_at, updated_at,
                    enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
                    auth_refresh_blocked, auth_refresh_error, auth_mode, provider_preset, upstream_base_url,
-                   managed_proxy_node_name, model_routing_json,
-                   usage_windows_visible, automatic_cooldown_disabled
+                   managed_proxy_node_name, model_routing_json, reasoning_effort_json,
+                   usage_windows_visible, automatic_cooldown_disabled, supports_vision
             FROM accounts
             ORDER BY selection_order ASC, label COLLATE NOCASE ASC, id ASC;
             """
@@ -478,6 +497,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 fallbackUpstreamBaseURL: row.optionalText("upstream_base_url")
             )
             let modelRouting = try self.accountModelRouting(from: row.optionalText("model_routing_json"))
+            let reasoningEffort = try self.accountReasoningEffort(from: row.optionalText("reasoning_effort_json"))
             return AccountRecord(
                 id: row.text("id"),
                 label: row.text("label"),
@@ -491,6 +511,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 upstreamBaseURL: metadata.upstreamBaseURL,
                 managedProxyNodeName: row.optionalText("managed_proxy_node_name"),
                 modelRouting: modelRouting,
+                reasoningEffort: reasoningEffort,
+                supportsVision: row.int("supports_vision") == 1,
                 authJSON: authJSON,
                 addedAt: row.int("added_at"),
                 updatedAt: row.int("updated_at"),
@@ -518,8 +540,8 @@ public final class SQLiteStore: @unchecked Sendable {
             SELECT id, label, principal_id, email, account_id, plan_type, added_at, updated_at,
                    enabled, selection_order, consecutive_failure_count, cooldown_until, usage_json, usage_error,
                    auth_refresh_blocked, auth_refresh_error, auth_blob, auth_mode, provider_preset, upstream_base_url,
-                   managed_proxy_node_name, model_routing_json,
-                   usage_windows_visible, automatic_cooldown_disabled
+                   managed_proxy_node_name, model_routing_json, reasoning_effort_json,
+                   usage_windows_visible, automatic_cooldown_disabled, supports_vision
             FROM accounts
             ORDER BY selection_order ASC, label COLLATE NOCASE ASC, id ASC;
             """
@@ -543,6 +565,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 fallbackUpstreamBaseURL: row.optionalText("upstream_base_url")
             )
             let modelRouting = try self.accountModelRouting(from: row.optionalText("model_routing_json"))
+            let reasoningEffort = try self.accountReasoningEffort(from: row.optionalText("reasoning_effort_json"))
             let accountKey = "\(row.text("principal_id"))|\(row.text("account_id"))"
             let todayTokenUsage = (
                 metadata.authMode.isManualAPIKey
@@ -561,9 +584,12 @@ public final class SQLiteStore: @unchecked Sendable {
                 providerFamily: metadata.providerFamily,
                 authMode: metadata.authMode,
                 providerPreset: metadata.providerPreset,
+                upstreamAdapter: metadata.upstreamAdapter,
                 upstreamBaseURL: metadata.upstreamBaseURL,
                 managedProxyNodeName: row.optionalText("managed_proxy_node_name"),
                 modelRouting: modelRouting,
+                reasoningEffort: reasoningEffort,
+                supportsVision: row.int("supports_vision") == 1,
                 addedAt: row.int("added_at"),
                 updatedAt: row.int("updated_at"),
                 enabled: row.int("enabled") == 1,
@@ -628,6 +654,7 @@ public final class SQLiteStore: @unchecked Sendable {
             var authJSON: String
             var managedProxyNodeName: String?
             var modelRouting: AccountModelRoutingConfig?
+            var reasoningEffort: AccountReasoningEffortConfig
             var addedAt: Int64
             var updatedAt: Int64
             var enabled: Bool
@@ -652,6 +679,7 @@ public final class SQLiteStore: @unchecked Sendable {
                     authJSON: $0.authJSON,
                     managedProxyNodeName: $0.managedProxyNodeName,
                     modelRouting: $0.modelRouting,
+                    reasoningEffort: $0.reasoningEffort,
                     addedAt: $0.addedAt,
                     updatedAt: $0.updatedAt,
                     enabled: $0.enabled,
@@ -703,6 +731,7 @@ public final class SQLiteStore: @unchecked Sendable {
             providerFamily: AccountProviderFamily,
             authMode: AccountAuthMode,
             providerPreset: OpenAICompatibleProviderPreset,
+            upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
             upstreamBaseURL: String?
         )?
         if let authJSON {
@@ -1174,6 +1203,171 @@ public final class SQLiteStore: @unchecked Sendable {
         )
     }
 
+    func upsertOCRResultCacheEntry(
+        imageHash: String,
+        entry: OCRResultCacheEntry,
+        capacity: Int
+    ) throws {
+        let key = try self.secretStore.masterKey()
+        let plaintext = try JSONEncoder().encode(entry)
+        let cipher = try CryptoBox.seal(plaintext, using: key)
+        let storedAt = entry.touchedAt
+        try self.execute(
+            """
+            INSERT INTO ocr_result_cache (
+                image_hash, result_cipher, mime_type, byte_count, expires_at, touched_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(image_hash) DO UPDATE SET
+                result_cipher = excluded.result_cipher,
+                mime_type = excluded.mime_type,
+                byte_count = excluded.byte_count,
+                expires_at = excluded.expires_at,
+                touched_at = excluded.touched_at,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(imageHash),
+                .blob(cipher),
+                .text(entry.mimeType),
+                .int(Int64(entry.byteCount)),
+                .int(entry.expiresAt),
+                .int(entry.touchedAt),
+                .int(storedAt),
+                .int(storedAt),
+            ]
+        )
+        try self.pruneExpiredOCRResultCache(now: storedAt)
+        try self.enforceOCRResultCacheCapacity(capacity)
+    }
+
+    func loadOCRResultCacheEntry(
+        imageHash: String,
+        now: Int64 = Helpers.now()
+    ) throws -> OCRResultCacheEntry? {
+        guard let row = try self.querySingle(
+            """
+            SELECT image_hash, result_cipher, expires_at
+            FROM ocr_result_cache
+            WHERE image_hash = ?
+            LIMIT 1;
+            """,
+            bindings: [.text(imageHash)]
+        ) else {
+            return nil
+        }
+        if row.int("expires_at") <= now {
+            _ = try self.clearOCRResultCache(ClearOCRCacheRequest(expiredOnly: true), now: now)
+            return nil
+        }
+        do {
+            let key = try self.secretStore.masterKey()
+            let plaintext = try CryptoBox.open(row.blob("result_cipher"), using: key)
+            var entry = try JSONDecoder().decode(OCRResultCacheEntry.self, from: plaintext)
+            entry.touchedAt = now
+            try self.execute(
+                "UPDATE ocr_result_cache SET touched_at = ?, updated_at = ? WHERE image_hash = ?;",
+                bindings: [.int(now), .int(now), .text(imageHash)]
+            )
+            return entry
+        } catch {
+            _ = try self.clearOCRResultCache(imageHash: row.text("image_hash"))
+            throw error
+        }
+    }
+
+    func touchOCRResultCacheEntry(imageHash: String, now: Int64 = Helpers.now()) throws {
+        try self.execute(
+            "UPDATE ocr_result_cache SET touched_at = ?, updated_at = ? WHERE image_hash = ?;",
+            bindings: [.int(now), .int(now), .text(imageHash)]
+        )
+    }
+
+    func ocrResultCacheSummary(now: Int64 = Helpers.now()) throws -> OCRCacheSummary {
+        let row = try self.querySingle(
+            """
+            SELECT COUNT(*) AS total_count,
+                   SUM(CASE WHEN expires_at <= ? THEN 1 ELSE 0 END) AS expired_count,
+                   MIN(touched_at) AS oldest_touched_at,
+                   MAX(touched_at) AS newest_touched_at
+            FROM ocr_result_cache;
+            """,
+            bindings: [.int(now)]
+        )
+        return OCRCacheSummary(
+            totalCount: Int(row?.int("total_count") ?? 0),
+            expiredCount: Int(row?.int("expired_count") ?? 0),
+            oldestTouchedAt: row?.optionalInt("oldest_touched_at"),
+            newestTouchedAt: row?.optionalInt("newest_touched_at")
+        )
+    }
+
+    @discardableResult
+    func pruneExpiredOCRResultCache(now: Int64 = Helpers.now()) throws -> Int {
+        try self.deleteOCRResultCache(whereSQL: "expires_at <= ?", bindings: [.int(now)])
+    }
+
+    @discardableResult
+    func clearOCRResultCache(_ request: ClearOCRCacheRequest, now: Int64 = Helpers.now()) throws -> Int {
+        if request.clearAll {
+            return try self.deleteOCRResultCache(whereSQL: nil, bindings: [])
+        }
+
+        var clauses: [String] = []
+        var bindings: [Binding] = []
+        if request.expiredOnly {
+            clauses.append("expires_at <= ?")
+            bindings.append(.int(now))
+        }
+        if let olderThanSeconds = request.olderThanSeconds {
+            clauses.append("touched_at < ?")
+            bindings.append(.int(max(0, now - olderThanSeconds)))
+        }
+        guard clauses.isEmpty == false else {
+            throw ProxyError.message("请选择要清理的 OCR 缓存范围。")
+        }
+        return try self.deleteOCRResultCache(whereSQL: clauses.joined(separator: " AND "), bindings: bindings)
+    }
+
+    @discardableResult
+    private func clearOCRResultCache(imageHash: String) throws -> Int {
+        try self.deleteOCRResultCache(whereSQL: "image_hash = ?", bindings: [.text(imageHash)])
+    }
+
+    @discardableResult
+    private func deleteOCRResultCache(whereSQL: String?, bindings: [Binding]) throws -> Int {
+        let sql: String
+        if let whereSQL, whereSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            sql = "DELETE FROM ocr_result_cache WHERE \(whereSQL);"
+        } else {
+            sql = "DELETE FROM ocr_result_cache;"
+        }
+        return try self.withDatabaseLock {
+            try self.execute(sql, bindings: bindings)
+            return Int(sqlite3_changes(self.db))
+        }
+    }
+
+    private func enforceOCRResultCacheCapacity(_ capacity: Int) throws {
+        let capacity = max(1, capacity)
+        let count = Int((try self.querySingle(
+            "SELECT COUNT(*) AS entry_count FROM ocr_result_cache;"
+        ))?.int("entry_count") ?? 0)
+        guard count > capacity else { return }
+        let overflow = count - capacity
+        try self.execute(
+            """
+            DELETE FROM ocr_result_cache
+            WHERE image_hash IN (
+                SELECT image_hash
+                FROM ocr_result_cache
+                ORDER BY touched_at ASC, updated_at ASC
+                LIMIT ?
+            );
+            """,
+            bindings: [.int(Int64(overflow))]
+        )
+    }
+
     private static func sqlPlaceholders(count: Int) -> String {
         Array(repeating: "?", count: max(0, count)).joined(separator: ", ")
     }
@@ -1216,6 +1410,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 upstream_base_url TEXT,
                 managed_proxy_node_name TEXT,
                 model_routing_json TEXT,
+                reasoning_effort_json TEXT,
+                supports_vision INTEGER NOT NULL DEFAULT 1,
                 usage_windows_visible INTEGER NOT NULL DEFAULT 1
             );
             """,
@@ -1255,8 +1451,14 @@ public final class SQLiteStore: @unchecked Sendable {
         if try !self.columnExists("model_routing_json", in: "accounts", on: db) {
             try self.execute("ALTER TABLE accounts ADD COLUMN model_routing_json TEXT;", on: db)
         }
+        if try !self.columnExists("reasoning_effort_json", in: "accounts", on: db) {
+            try self.execute("ALTER TABLE accounts ADD COLUMN reasoning_effort_json TEXT;", on: db)
+        }
         if try !self.columnExists("usage_windows_visible", in: "accounts", on: db) {
             try self.execute("ALTER TABLE accounts ADD COLUMN usage_windows_visible INTEGER NOT NULL DEFAULT 1;", on: db)
+        }
+        if try !self.columnExists("supports_vision", in: "accounts", on: db) {
+            try self.execute("ALTER TABLE accounts ADD COLUMN supports_vision INTEGER NOT NULL DEFAULT 1;", on: db)
         }
         try self.execute("UPDATE accounts SET enabled = 1 WHERE enabled IS NULL;", on: db)
         try self.execute("UPDATE accounts SET consecutive_failure_count = 0 WHERE consecutive_failure_count IS NULL;", on: db)
@@ -1266,6 +1468,7 @@ public final class SQLiteStore: @unchecked Sendable {
             on: db
         )
         try self.execute("UPDATE accounts SET usage_windows_visible = 1 WHERE usage_windows_visible IS NULL;", on: db)
+        try self.execute("UPDATE accounts SET supports_vision = 1 WHERE supports_vision IS NULL;", on: db)
         try self.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_account_key ON accounts(principal_id, account_id);", on: db)
         try self.execute(
             """
@@ -1384,6 +1587,23 @@ public final class SQLiteStore: @unchecked Sendable {
             on: db
         )
         try self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ocr_result_cache (
+                image_hash TEXT PRIMARY KEY,
+                result_cipher BLOB NOT NULL,
+                mime_type TEXT NOT NULL DEFAULT '',
+                byte_count INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER NOT NULL,
+                touched_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """,
+            on: db
+        )
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_ocr_result_cache_touched_at ON ocr_result_cache(touched_at);", on: db)
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_ocr_result_cache_expires_at ON ocr_result_cache(expires_at);", on: db)
+        try self.execute(
             "CREATE INDEX IF NOT EXISTS idx_reasoning_cache_expires_at ON chat_completions_reasoning_cache(expires_at);",
             on: db
         )
@@ -1473,12 +1693,15 @@ public final class SQLiteStore: @unchecked Sendable {
         automaticCooldownDisabled: Bool,
         usageWindowsVisible: Bool,
         managedProxyNodeName: String?,
-        modelRouting: String?
+        modelRouting: String?,
+        reasoningEffort: String?,
+        supportsVision: Bool
     )? {
         guard let row = try self.querySingle(
             """
             SELECT id, enabled, added_at, selection_order, consecutive_failure_count, cooldown_until,
-                   automatic_cooldown_disabled, usage_windows_visible, managed_proxy_node_name, model_routing_json
+                   automatic_cooldown_disabled, usage_windows_visible, managed_proxy_node_name, model_routing_json,
+                   reasoning_effort_json, supports_vision
             FROM accounts
             WHERE principal_id || '|' || account_id = ?;
             """,
@@ -1496,7 +1719,9 @@ public final class SQLiteStore: @unchecked Sendable {
             row.int("automatic_cooldown_disabled") == 1,
             row.int("usage_windows_visible") == 1,
             row.optionalText("managed_proxy_node_name"),
-            row.optionalText("model_routing_json")
+            row.optionalText("model_routing_json"),
+            row.optionalText("reasoning_effort_json"),
+            row.int("supports_vision") == 1
         )
     }
 
@@ -1506,6 +1731,14 @@ public final class SQLiteStore: @unchecked Sendable {
             return nil
         }
         return AccountSummary.normalizedModelRouting(try Helpers.readJSON(AccountModelRoutingConfig.self, from: data))
+    }
+
+    private func accountReasoningEffort(from value: String?) throws -> AccountReasoningEffortConfig {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.isEmpty == false, let data = trimmed.data(using: .utf8) else {
+            return .defaultConfig
+        }
+        return try Helpers.readJSON(AccountReasoningEffortConfig.self, from: data)
     }
 
     private static func columnExists(_ column: String, in table: String, on db: OpaquePointer?) throws -> Bool {
@@ -1536,6 +1769,7 @@ public final class SQLiteStore: @unchecked Sendable {
         providerFamily: AccountProviderFamily,
         authMode: AccountAuthMode,
         providerPreset: OpenAICompatibleProviderPreset,
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
         upstreamBaseURL: String?
     ) {
         let metadata = AuthService.extractAuthMetadata(from: authJSON)
@@ -1549,6 +1783,7 @@ public final class SQLiteStore: @unchecked Sendable {
             metadata.providerFamily,
             authMode,
             providerPreset,
+            metadata.upstreamAdapter,
             metadata.upstreamBaseURL ?? fallbackUpstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }

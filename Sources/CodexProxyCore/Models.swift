@@ -390,6 +390,143 @@ public struct GeminiOAuthConfig: Codable, Sendable, Equatable {
     }
 }
 
+public enum OCRModelProvider: String, Codable, Sendable, Equatable, CaseIterable {
+    case openAICompatible = "openai_compatible"
+}
+
+public struct OCRModelConfig: Codable, Sendable, Equatable {
+    public static let defaultPrompt = """
+    你是一个专业的图片内容识别助手。
+
+    你的任务：
+    准确提取图片中的所有关键信息，并输出适合大模型理解的结构化文本。
+
+    要求：
+
+    1. 描述图片主体内容
+    2. 如果图片中有文字，需要完整提取
+    3. 如果是代码截图，需要保留代码结构
+    4. 如果是报错截图，需要重点提取：
+
+       * 错误信息
+       * 文件名
+       * 行号
+       * 调用栈
+    5. 如果是界面截图，需要描述：
+
+       * 页面结构
+       * 按钮
+       * 输入框
+       * 状态提示
+    6. 不要输出“可能”“猜测”等模糊描述
+    7. 使用简洁、结构化输出
+    8. 不要遗漏细节
+    9. 输出必须适合作为大模型上下文
+
+    输出格式：
+
+    [OCR识别结果]
+    图片类型：
+    主要内容：
+    文字内容：
+    关键细节：
+    结构化信息：
+    """
+
+    public var provider: OCRModelProvider
+    public var model: String
+    public var apiKey: String
+    public var baseURL: String
+    public var prompt: String
+    public var timeout: Int
+    public var maxImageSize: Int
+    public var enabled: Bool
+    public var debugMode: Bool
+
+    public init(
+        provider: OCRModelProvider = .openAICompatible,
+        model: String = "",
+        apiKey: String = "",
+        baseURL: String = OpenAICompatibleUpstream.defaultBaseURL,
+        prompt: String = OCRModelConfig.defaultPrompt,
+        timeout: Int = 60,
+        maxImageSize: Int = 4 * 1024 * 1024,
+        enabled: Bool = false,
+        debugMode: Bool = false
+    ) {
+        self.provider = provider
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.prompt = trimmedPrompt.isEmpty ? Self.defaultPrompt : trimmedPrompt
+        self.timeout = max(timeout, 1)
+        self.maxImageSize = max(maxImageSize, 64 * 1024)
+        self.enabled = enabled
+        self.debugMode = debugMode
+    }
+
+    public var isReadyForRecognition: Bool {
+        self.enabled
+            && self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            && self.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case model
+        case apiKey
+        case apiKeySnake = "api_key"
+        case baseURL
+        case baseUrl
+        case baseURLSnake = "base_url"
+        case prompt
+        case timeout
+        case maxImageSize
+        case maxImageSizeSnake = "max_image_size"
+        case enabled
+        case debugMode
+        case debugModeSnake = "debug_mode"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            provider: try container.decodeIfPresent(OCRModelProvider.self, forKey: .provider) ?? .openAICompatible,
+            model: try container.decodeIfPresent(String.self, forKey: .model) ?? "",
+            apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey)
+                ?? container.decodeIfPresent(String.self, forKey: .apiKeySnake)
+                ?? "",
+            baseURL: try container.decodeIfPresent(String.self, forKey: .baseURL)
+                ?? container.decodeIfPresent(String.self, forKey: .baseUrl)
+                ?? container.decodeIfPresent(String.self, forKey: .baseURLSnake)
+                ?? OpenAICompatibleUpstream.defaultBaseURL,
+            prompt: try container.decodeIfPresent(String.self, forKey: .prompt) ?? Self.defaultPrompt,
+            timeout: try container.decodeIfPresent(Int.self, forKey: .timeout) ?? 60,
+            maxImageSize: try container.decodeIfPresent(Int.self, forKey: .maxImageSize)
+                ?? container.decodeIfPresent(Int.self, forKey: .maxImageSizeSnake)
+                ?? 4 * 1024 * 1024,
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false,
+            debugMode: try container.decodeIfPresent(Bool.self, forKey: .debugMode)
+                ?? container.decodeIfPresent(Bool.self, forKey: .debugModeSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.provider, forKey: .provider)
+        try container.encode(self.model, forKey: .model)
+        try container.encode(self.apiKey, forKey: .apiKey)
+        try container.encode(self.baseURL, forKey: .baseURL)
+        try container.encode(self.prompt, forKey: .prompt)
+        try container.encode(self.timeout, forKey: .timeout)
+        try container.encode(self.maxImageSize, forKey: .maxImageSize)
+        try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.debugMode, forKey: .debugMode)
+    }
+}
+
 public struct AuthenticatedProxyKeyContext: Sendable, Equatable {
     public var apiKeyHash: String
     public var proxyKeyID: String
@@ -433,6 +570,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
     public var anthropicDefaultTargetModel: String
     public var anthropicModelMappings: [AnthropicModelMapping]
     public var geminiOAuth: GeminiOAuthConfig
+    public var ocrModel: OCRModelConfig
 
     public init(
         publicHost: String = "127.0.0.1",
@@ -453,7 +591,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         daemonBinaryOverride: String = "",
         anthropicDefaultTargetModel: String = AppConfig.defaultAnthropicTargetModel,
         anthropicModelMappings: [AnthropicModelMapping] = [],
-        geminiOAuth: GeminiOAuthConfig = .init()
+        geminiOAuth: GeminiOAuthConfig = .init(),
+        ocrModel: OCRModelConfig = .init()
     ) {
         self.publicHost = publicHost
         self.publicPort = publicPort
@@ -474,6 +613,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.anthropicDefaultTargetModel = anthropicDefaultTargetModel
         self.anthropicModelMappings = anthropicModelMappings
         self.geminiOAuth = geminiOAuth
+        self.ocrModel = ocrModel
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -498,6 +638,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         case geminiOAuth
         case geminiOauth
         case geminiOAuthSnake = "gemini_oauth"
+        case ocrModel
+        case ocrModelSnake = "ocr_model"
     }
 
     public init(from decoder: Decoder) throws {
@@ -527,6 +669,9 @@ public struct AppConfig: Codable, Sendable, Equatable {
             geminiOAuth: try container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOAuth)
                 ?? container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOauth)
                 ?? container.decodeIfPresent(GeminiOAuthConfig.self, forKey: .geminiOAuthSnake)
+                ?? .init(),
+            ocrModel: try container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModel)
+                ?? container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModelSnake)
                 ?? .init()
         )
     }
@@ -552,6 +697,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         try container.encode(self.anthropicDefaultTargetModel, forKey: .anthropicDefaultTargetModel)
         try container.encode(self.anthropicModelMappings, forKey: .anthropicModelMappings)
         try container.encode(self.geminiOAuth, forKey: .geminiOauth)
+        try container.encode(self.ocrModel, forKey: .ocrModel)
     }
 
     public func normalizedModelRoutingConfig() -> AppConfig {
@@ -589,7 +735,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
                 self.anthropicModelMappings,
                 defaultTargetModel: normalizedDefaultTargetModel
             ),
-            geminiOAuth: self.geminiOAuth
+            geminiOAuth: self.geminiOAuth,
+            ocrModel: self.ocrModel
         )
     }
 
@@ -796,6 +943,77 @@ public struct AccountModelRoutingConfig: Codable, Sendable, Equatable {
     }
 }
 
+public struct AccountReasoningEffortConfig: Codable, Sendable, Equatable {
+    public static let defaultConfig = AccountReasoningEffortConfig()
+
+    public var low: String
+    public var medium: String
+    public var high: String
+    public var xhigh: String
+
+    public init(
+        low: String = "low",
+        medium: String = "medium",
+        high: String = "high",
+        xhigh: String = "xhigh"
+    ) {
+        self.low = low.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.medium = medium.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.high = high.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.xhigh = xhigh.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case low
+        case medium
+        case high
+        case xhigh
+        case extraHigh
+        case extraHighSnake = "extra_high"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            low: try container.decodeIfPresent(String.self, forKey: .low) ?? "low",
+            medium: try container.decodeIfPresent(String.self, forKey: .medium) ?? "medium",
+            high: try container.decodeIfPresent(String.self, forKey: .high) ?? "high",
+            xhigh: try container.decodeIfPresent(String.self, forKey: .xhigh)
+                ?? container.decodeIfPresent(String.self, forKey: .extraHigh)
+                ?? container.decodeIfPresent(String.self, forKey: .extraHighSnake)
+                ?? "xhigh"
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.low, forKey: .low)
+        try container.encode(self.medium, forKey: .medium)
+        try container.encode(self.high, forKey: .high)
+        try container.encode(self.xhigh, forKey: .xhigh)
+    }
+
+    public func mappedReasoningEffort(for rawEffort: String?) -> String? {
+        let trimmed = rawEffort?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmed.isEmpty == false else { return nil }
+        let mapped: String?
+        switch trimmed.lowercased() {
+        case "low":
+            mapped = self.low
+        case "medium":
+            mapped = self.medium
+        case "high":
+            mapped = self.high
+        case "xhigh":
+            mapped = self.xhigh
+        default:
+            return trimmed
+        }
+        let normalized = mapped?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return normalized.isEmpty ? trimmed : normalized
+    }
+}
+
 public struct UsageWindow: Codable, Sendable, Equatable {
     public var usedPercent: Double
     public var windowSeconds: Int
@@ -866,9 +1084,12 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
     public var providerFamily: AccountProviderFamily
     public var authMode: AccountAuthMode
     public var providerPreset: OpenAICompatibleProviderPreset
+    public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
     public var upstreamBaseURL: String?
     public var managedProxyNodeName: String?
     public var modelRouting: AccountModelRoutingConfig?
+    public var reasoningEffort: AccountReasoningEffortConfig
+    public var supportsVision: Bool
     public var addedAt: Int64
     public var updatedAt: Int64
     public var enabled: Bool
@@ -894,9 +1115,12 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         providerFamily: AccountProviderFamily? = nil,
         authMode: AccountAuthMode = .chatGPT,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         upstreamBaseURL: String? = nil,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
+        reasoningEffort: AccountReasoningEffortConfig = .defaultConfig,
+        supportsVision: Bool = true,
         addedAt: Int64,
         updatedAt: Int64,
         enabled: Bool = true,
@@ -921,9 +1145,12 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         self.providerFamily = providerFamily ?? authMode.providerFamily
         self.authMode = authMode
         self.providerPreset = providerPreset
+        self.upstreamAdapter = upstreamAdapter
         self.upstreamBaseURL = upstreamBaseURL
         self.managedProxyNodeName = Self.normalizedManagedProxyNodeName(managedProxyNodeName)
         self.modelRouting = Self.normalizedModelRouting(modelRouting)
+        self.reasoningEffort = reasoningEffort
+        self.supportsVision = supportsVision
         self.addedAt = addedAt
         self.updatedAt = updatedAt
         self.enabled = enabled
@@ -952,12 +1179,18 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         case authMode
         case providerPreset
         case providerPresetSnake = "provider_preset"
+        case upstreamAdapter
+        case upstreamAdapterSnake = "upstream_adapter"
         case upstreamBaseURL
         case upstreamBaseUrl
         case managedProxyNodeName
         case managedProxyNodeNameSnake = "managed_proxy_node_name"
         case modelRouting
         case modelRoutingSnake = "model_routing"
+        case reasoningEffort
+        case reasoningEffortSnake = "reasoning_effort"
+        case supportsVision
+        case supportsVisionSnake = "supports_vision"
         case addedAt
         case updatedAt
         case enabled
@@ -990,12 +1223,20 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
             providerPreset: try container.decodeIfPresent(OpenAICompatibleProviderPreset.self, forKey: .providerPreset)
                 ?? container.decodeIfPresent(OpenAICompatibleProviderPreset.self, forKey: .providerPresetSnake)
                 ?? .genericOpenAICompatible,
+            upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
+                ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
             upstreamBaseURL: try container.decodeIfPresent(String.self, forKey: .upstreamBaseURL)
                 ?? container.decodeIfPresent(String.self, forKey: .upstreamBaseUrl),
             managedProxyNodeName: try container.decodeIfPresent(String.self, forKey: .managedProxyNodeName)
                 ?? container.decodeIfPresent(String.self, forKey: .managedProxyNodeNameSnake),
             modelRouting: try container.decodeIfPresent(AccountModelRoutingConfig.self, forKey: .modelRouting)
                 ?? container.decodeIfPresent(AccountModelRoutingConfig.self, forKey: .modelRoutingSnake),
+            reasoningEffort: try container.decodeIfPresent(AccountReasoningEffortConfig.self, forKey: .reasoningEffort)
+                ?? container.decodeIfPresent(AccountReasoningEffortConfig.self, forKey: .reasoningEffortSnake)
+                ?? .defaultConfig,
+            supportsVision: try container.decodeIfPresent(Bool.self, forKey: .supportsVision)
+                ?? container.decodeIfPresent(Bool.self, forKey: .supportsVisionSnake)
+                ?? true,
             addedAt: try container.decode(Int64.self, forKey: .addedAt),
             updatedAt: try container.decode(Int64.self, forKey: .updatedAt),
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
@@ -1026,9 +1267,12 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         try container.encode(self.providerFamily, forKey: .providerFamily)
         try container.encode(self.authMode, forKey: .authMode)
         try container.encode(self.providerPreset, forKey: .providerPreset)
+        try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
         try container.encodeIfPresent(self.upstreamBaseURL, forKey: .upstreamBaseURL)
         try container.encodeIfPresent(self.managedProxyNodeName, forKey: .managedProxyNodeName)
         try container.encodeIfPresent(self.modelRouting, forKey: .modelRouting)
+        try container.encode(self.reasoningEffort, forKey: .reasoningEffort)
+        try container.encode(self.supportsVision, forKey: .supportsVision)
         try container.encode(self.addedAt, forKey: .addedAt)
         try container.encode(self.updatedAt, forKey: .updatedAt)
         try container.encode(self.enabled, forKey: .enabled)
@@ -1660,6 +1904,7 @@ public enum AdminProxyTestEndpoint: String, Codable, Sendable, Equatable {
     case chatCompletions = "chatCompletions"
     case responses = "responses"
     case imageGenerations = "imageGenerations"
+    case imageEdits = "imageEdits"
     case anthropicMessages = "anthropicMessages"
     case geminiGenerateContent = "geminiGenerateContent"
 }
@@ -1673,6 +1918,8 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
     public var proxyAPIKey: String?
     public var anthropicVersion: String?
     public var anthropicBeta: String?
+    public var contentType: String?
+    public var bodyBase64: String?
 
     public init(
         endpoint: AdminProxyTestEndpoint,
@@ -1682,7 +1929,9 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
         selectedAccountKey: String? = nil,
         proxyAPIKey: String? = nil,
         anthropicVersion: String? = nil,
-        anthropicBeta: String? = nil
+        anthropicBeta: String? = nil,
+        contentType: String? = nil,
+        bodyBase64: String? = nil
     ) {
         self.endpoint = endpoint
         self.model = model
@@ -1692,6 +1941,8 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
         self.proxyAPIKey = proxyAPIKey
         self.anthropicVersion = anthropicVersion
         self.anthropicBeta = anthropicBeta
+        self.contentType = contentType
+        self.bodyBase64 = bodyBase64
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1710,6 +1961,10 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
         case anthropicVersionSnake = "anthropic_version"
         case anthropicBeta
         case anthropicBetaSnake = "anthropic_beta"
+        case contentType
+        case contentTypeSnake = "content_type"
+        case bodyBase64
+        case bodyBase64Snake = "body_base64"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1731,7 +1986,11 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
             anthropicVersion: try container.decodeIfPresent(String.self, forKey: .anthropicVersion)
                 ?? container.decodeIfPresent(String.self, forKey: .anthropicVersionSnake),
             anthropicBeta: try container.decodeIfPresent(String.self, forKey: .anthropicBeta)
-                ?? container.decodeIfPresent(String.self, forKey: .anthropicBetaSnake)
+                ?? container.decodeIfPresent(String.self, forKey: .anthropicBetaSnake),
+            contentType: try container.decodeIfPresent(String.self, forKey: .contentType)
+                ?? container.decodeIfPresent(String.self, forKey: .contentTypeSnake),
+            bodyBase64: try container.decodeIfPresent(String.self, forKey: .bodyBase64)
+                ?? container.decodeIfPresent(String.self, forKey: .bodyBase64Snake)
         )
     }
 
@@ -1745,6 +2004,8 @@ public struct AdminProxyTestRunRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(self.proxyAPIKey, forKey: .proxyAPIKey)
         try container.encodeIfPresent(self.anthropicVersion, forKey: .anthropicVersion)
         try container.encodeIfPresent(self.anthropicBeta, forKey: .anthropicBeta)
+        try container.encodeIfPresent(self.contentType, forKey: .contentType)
+        try container.encodeIfPresent(self.bodyBase64, forKey: .bodyBase64)
     }
 }
 
@@ -2786,6 +3047,81 @@ public struct ClearReasoningCacheResult: Codable, Sendable, Equatable {
     }
 }
 
+public struct OCRCacheSummary: Codable, Sendable, Equatable {
+    public var totalCount: Int
+    public var expiredCount: Int
+    public var oldestTouchedAt: Int64?
+    public var newestTouchedAt: Int64?
+
+    public init(
+        totalCount: Int = 0,
+        expiredCount: Int = 0,
+        oldestTouchedAt: Int64? = nil,
+        newestTouchedAt: Int64? = nil
+    ) {
+        self.totalCount = max(0, totalCount)
+        self.expiredCount = max(0, expiredCount)
+        self.oldestTouchedAt = oldestTouchedAt
+        self.newestTouchedAt = newestTouchedAt
+    }
+}
+
+public struct ClearOCRCacheRequest: Codable, Sendable, Equatable {
+    public var expiredOnly: Bool
+    public var olderThanSeconds: Int64?
+    public var clearAll: Bool
+
+    public init(
+        expiredOnly: Bool = false,
+        olderThanSeconds: Int64? = nil,
+        clearAll: Bool = false
+    ) {
+        self.expiredOnly = expiredOnly
+        self.olderThanSeconds = olderThanSeconds.flatMap { $0 > 0 ? $0 : nil }
+        self.clearAll = clearAll
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiredOnly
+        case expiredOnlySnake = "expired_only"
+        case olderThanSeconds
+        case olderThanSecondsSnake = "older_than_seconds"
+        case clearAll
+        case clearAllSnake = "clear_all"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            expiredOnly: try container.decodeIfPresent(Bool.self, forKey: .expiredOnly)
+                ?? container.decodeIfPresent(Bool.self, forKey: .expiredOnlySnake)
+                ?? false,
+            olderThanSeconds: try container.decodeIfPresent(Int64.self, forKey: .olderThanSeconds)
+                ?? container.decodeIfPresent(Int64.self, forKey: .olderThanSecondsSnake),
+            clearAll: try container.decodeIfPresent(Bool.self, forKey: .clearAll)
+                ?? container.decodeIfPresent(Bool.self, forKey: .clearAllSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.expiredOnly, forKey: .expiredOnly)
+        try container.encodeIfPresent(self.olderThanSeconds, forKey: .olderThanSeconds)
+        try container.encode(self.clearAll, forKey: .clearAll)
+    }
+}
+
+public struct ClearOCRCacheResult: Codable, Sendable, Equatable {
+    public var deletedCount: Int
+    public var summary: OCRCacheSummary
+
+    public init(deletedCount: Int, summary: OCRCacheSummary) {
+        self.deletedCount = max(0, deletedCount)
+        self.summary = summary
+    }
+}
+
 public struct PreparedOAuthLogin: Codable, Sendable, Equatable {
     public var providerFamily: AccountProviderFamily
     public var authURL: String
@@ -2897,6 +3233,7 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
     public var enabled: Bool?
     public var managedProxyNodeName: String?
     public var modelRouting: AccountModelRoutingConfig?
+    public var reasoningEffort: AccountReasoningEffortConfig?
     public var automaticCooldownDisabled: Bool?
 
     public init(
@@ -2906,6 +3243,7 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
         enabled: Bool? = nil,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
+        reasoningEffort: AccountReasoningEffortConfig? = nil,
         automaticCooldownDisabled: Bool? = nil
     ) {
         self.source = source
@@ -2914,6 +3252,7 @@ public struct AuthJsonImportInput: Codable, Sendable, Equatable {
         self.enabled = enabled
         self.managedProxyNodeName = AccountSummary.normalizedManagedProxyNodeName(managedProxyNodeName)
         self.modelRouting = AccountSummary.normalizedModelRouting(modelRouting)
+        self.reasoningEffort = reasoningEffort
         self.automaticCooldownDisabled = automaticCooldownDisabled
     }
 }
@@ -2937,6 +3276,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
+    public var supportsVision: Bool
 
     public init(
         label: String? = nil,
@@ -2946,7 +3286,8 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         apiKey: String,
         enabled: Bool = true,
-        automaticCooldownDisabled: Bool = false
+        automaticCooldownDisabled: Bool = false,
+        supportsVision: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -2956,6 +3297,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
+        self.supportsVision = supportsVision
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2973,6 +3315,8 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         case enabled
         case automaticCooldownDisabled
         case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
+        case supportsVision
+        case supportsVisionSnake = "supports_vision"
     }
 
     public init(from decoder: Decoder) throws {
@@ -2993,6 +3337,9 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
                 ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false,
+            supportsVision: try container.decodeIfPresent(Bool.self, forKey: .supportsVision)
+                ?? container.decodeIfPresent(Bool.self, forKey: .supportsVisionSnake)
                 ?? false
         )
     }
@@ -3007,6 +3354,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
+        try container.encode(self.supportsVision, forKey: .supportsVision)
     }
 }
 
@@ -3019,6 +3367,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
+    public var supportsVision: Bool
 
     public init(
         label: String? = nil,
@@ -3028,7 +3377,8 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         apiKey: String,
         enabled: Bool = true,
-        automaticCooldownDisabled: Bool = false
+        automaticCooldownDisabled: Bool = false,
+        supportsVision: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -3038,6 +3388,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
+        self.supportsVision = supportsVision
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -3055,6 +3406,8 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         case enabled
         case automaticCooldownDisabled
         case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
+        case supportsVision
+        case supportsVisionSnake = "supports_vision"
     }
 
     public init(from decoder: Decoder) throws {
@@ -3075,6 +3428,9 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
                 ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false,
+            supportsVision: try container.decodeIfPresent(Bool.self, forKey: .supportsVision)
+                ?? container.decodeIfPresent(Bool.self, forKey: .supportsVisionSnake)
                 ?? false
         )
     }
@@ -3089,6 +3445,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
+        try container.encode(self.supportsVision, forKey: .supportsVision)
     }
 }
 
@@ -3101,6 +3458,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
+    public var supportsVision: Bool
 
     public init(
         label: String,
@@ -3110,7 +3468,8 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
         apiKey: String,
         enabled: Bool,
-        automaticCooldownDisabled: Bool = false
+        automaticCooldownDisabled: Bool = false,
+        supportsVision: Bool = false
     ) {
         self.label = label
         self.providerPreset = providerPreset
@@ -3120,6 +3479,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
+        self.supportsVision = supportsVision
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -3137,6 +3497,8 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         case enabled
         case automaticCooldownDisabled
         case automaticCooldownDisabledSnake = "automatic_cooldown_disabled"
+        case supportsVision
+        case supportsVisionSnake = "supports_vision"
     }
 
     public init(from decoder: Decoder) throws {
@@ -3157,6 +3519,9 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
                 ?? container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabledSnake)
+                ?? false,
+            supportsVision: try container.decodeIfPresent(Bool.self, forKey: .supportsVision)
+                ?? container.decodeIfPresent(Bool.self, forKey: .supportsVisionSnake)
                 ?? false
         )
     }
@@ -3171,6 +3536,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
+        try container.encode(self.supportsVision, forKey: .supportsVision)
     }
 }
 
@@ -3304,6 +3670,70 @@ public struct UpdateAccountModelRoutingRequest: Codable, Sendable, Equatable {
             defaultTargetModel: self.defaultTargetModel,
             mappings: self.mappings
         ).normalizedOrNil
+    }
+}
+
+public struct UpdateAccountReasoningEffortRequest: Codable, Sendable, Equatable {
+    public var low: String
+    public var medium: String
+    public var high: String
+    public var xhigh: String
+
+    public init(
+        low: String = "low",
+        medium: String = "medium",
+        high: String = "high",
+        xhigh: String = "xhigh"
+    ) {
+        let normalized = AccountReasoningEffortConfig(
+            low: low,
+            medium: medium,
+            high: high,
+            xhigh: xhigh
+        )
+        self.low = normalized.low
+        self.medium = normalized.medium
+        self.high = normalized.high
+        self.xhigh = normalized.xhigh
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case low
+        case medium
+        case high
+        case xhigh
+        case extraHigh
+        case extraHighSnake = "extra_high"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            low: try container.decodeIfPresent(String.self, forKey: .low) ?? "low",
+            medium: try container.decodeIfPresent(String.self, forKey: .medium) ?? "medium",
+            high: try container.decodeIfPresent(String.self, forKey: .high) ?? "high",
+            xhigh: try container.decodeIfPresent(String.self, forKey: .xhigh)
+                ?? container.decodeIfPresent(String.self, forKey: .extraHigh)
+                ?? container.decodeIfPresent(String.self, forKey: .extraHighSnake)
+                ?? "xhigh"
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.low, forKey: .low)
+        try container.encode(self.medium, forKey: .medium)
+        try container.encode(self.high, forKey: .high)
+        try container.encode(self.xhigh, forKey: .xhigh)
+    }
+
+    public var reasoningEffort: AccountReasoningEffortConfig {
+        AccountReasoningEffortConfig(
+            low: self.low,
+            medium: self.medium,
+            high: self.high,
+            xhigh: self.xhigh
+        )
     }
 }
 
@@ -3945,6 +4375,8 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
     public var upstreamBaseURL: String?
     public var managedProxyNodeName: String?
     public var modelRouting: AccountModelRoutingConfig?
+    public var reasoningEffort: AccountReasoningEffortConfig
+    public var supportsVision: Bool
     public var authJSON: String
     public var addedAt: Int64
     public var updatedAt: Int64
@@ -3972,6 +4404,8 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
         upstreamBaseURL: String? = nil,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
+        reasoningEffort: AccountReasoningEffortConfig = .defaultConfig,
+        supportsVision: Bool = true,
         authJSON: String,
         addedAt: Int64 = Int64(Date().timeIntervalSince1970),
         updatedAt: Int64 = Int64(Date().timeIntervalSince1970),
@@ -3998,6 +4432,8 @@ public struct AccountRecord: Sendable, Equatable, Identifiable {
         self.upstreamBaseURL = upstreamBaseURL
         self.managedProxyNodeName = AccountSummary.normalizedManagedProxyNodeName(managedProxyNodeName)
         self.modelRouting = AccountSummary.normalizedModelRouting(modelRouting)
+        self.reasoningEffort = reasoningEffort
+        self.supportsVision = supportsVision
         self.authJSON = authJSON
         self.addedAt = addedAt
         self.updatedAt = updatedAt
