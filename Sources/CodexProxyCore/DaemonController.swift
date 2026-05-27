@@ -583,6 +583,8 @@ public final class DaemonController: @unchecked Sendable {
     private let accountModelDiscoveryCache: AccountModelDiscoveryCache
     private let chatCompletionsReasoningCache: ChatCompletionsReasoningCache
     private let ocrImageProcessor: OCRImageProcessor
+    private let localOCRModelManager: LocalOCRModelManager
+    private let localMLXOCRRuntime: LocalMLXOCRRuntimeService
     private let adminEventHub: AdminEventHub
 
     public convenience init(
@@ -621,7 +623,16 @@ public final class DaemonController: @unchecked Sendable {
         self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
         self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
         self.chatCompletionsReasoningCache = ChatCompletionsReasoningCache(store: self.store)
-        self.ocrImageProcessor = OCRImageProcessor(cache: OCRResultCache(store: self.store), store: self.store)
+        self.localOCRModelManager = LocalOCRModelManager(dataDirectory: dataDirectory)
+        self.localMLXOCRRuntime = LocalMLXOCRRuntimeService(
+            dataDirectory: dataDirectory,
+            manager: self.localOCRModelManager
+        )
+        self.ocrImageProcessor = OCRImageProcessor(
+            cache: OCRResultCache(store: self.store),
+            store: self.store,
+            localMLXRuntime: self.localMLXOCRRuntime
+        )
         self.adminEventHub = AdminEventHub()
         self.managedProxyRuntime = manageManagedProxyRuntime
             ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
@@ -983,6 +994,35 @@ public final class DaemonController: @unchecked Sendable {
 
     public func ocrRecognitionResult(logID: Int64) async throws -> OCRRecognitionResultLookupResponse {
         try self.store.loadOCRRecognitionResult(logID: logID)
+    }
+
+    public func localOCRModels() async throws -> LocalOCRModelsResponse {
+        let config = try await self.loadConfig()
+        let runtime = await self.localMLXOCRRuntime.status()
+        return await self.localOCRModelManager.models(
+            config: config.ocrModel,
+            runtime: runtime
+        )
+    }
+
+    public func downloadLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        let config = try await self.loadConfig()
+        return try await self.localOCRModelManager.startDownload(id: id, config: config.ocrModel)
+    }
+
+    public func verifyLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        let config = try await self.loadConfig()
+        return try await self.localOCRModelManager.verify(id: id, config: config.ocrModel)
+    }
+
+    public func deleteLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        let config = try await self.loadConfig()
+        return try await self.localOCRModelManager.delete(id: id, config: config.ocrModel)
+    }
+
+    public func stopLocalOCRRuntime() async throws -> LocalMLXOCRRuntimeStatus {
+        await self.localMLXOCRRuntime.stop()
+        return await self.localMLXOCRRuntime.status()
     }
 
     public func proxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {

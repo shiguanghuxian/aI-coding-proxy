@@ -9188,6 +9188,78 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertNil(missingResult.text)
     }
 
+    func testAdminLocalOCRModelRoutesRequireAuthListVerifyAndDeleteModels() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let unauthorized = await harness.service.handle(
+            DaemonHTTPService.Request(
+                method: "GET",
+                target: "/admin/ocr-local-models",
+                path: "/admin/ocr-local-models",
+                headers: [:],
+                body: Data()
+            ),
+            kind: .admin
+        )
+        XCTAssertEqual(unauthorized.statusCode, 401)
+
+        let listResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "GET",
+                path: "/admin/ocr-local-models",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let listBody = try await Self.data(from: listResponse.body)
+        XCTAssertEqual(listResponse.statusCode, 200, Self.string(from: listBody))
+        let models = try Helpers.readJSON(LocalOCRModelsResponse.self, from: listBody)
+        XCTAssertEqual(models.selectedModelID, LocalMLXOCRConfig.defaultSelectedModelID)
+        XCTAssertTrue(models.models.contains { $0.descriptor.id == "mlx-community/Qwen3-VL-4B-Instruct-4bit" })
+        XCTAssertTrue(models.models.contains { $0.descriptor.id == "FakeRockert543/gemma-4-e2b-it-MLX-4bit" })
+        XCTAssertTrue(models.models.contains { $0.descriptor.id == "mlx-community/DeepSeek-OCR-4bit" && $0.descriptor.experimental })
+
+        let descriptor = try XCTUnwrap(LocalOCRModelDescriptor.descriptor(id: LocalMLXOCRConfig.defaultSelectedModelID))
+        let modelDirectory = Paths.localOCRModelsDirectoryURL(in: harness.dataDirectory)
+            .appendingPathComponent(descriptor.snapshotDirectoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: modelDirectory.appendingPathComponent("config.json"))
+        try Data("{}".utf8).write(to: modelDirectory.appendingPathComponent("tokenizer_config.json"))
+        try Data("{}".utf8).write(to: modelDirectory.appendingPathComponent("tokenizer.json"))
+        try Data("weights".utf8).write(to: modelDirectory.appendingPathComponent("model.safetensors"))
+        try Data("{}".utf8).write(to: modelDirectory.appendingPathComponent(LocalOCRModelManager.snapshotManifestFilename))
+
+        let encodedID = Self.pathComponent(LocalMLXOCRConfig.defaultSelectedModelID)
+        let verifyResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "POST",
+                path: "/admin/ocr-local-models/\(encodedID)/verify",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let verifyBody = try await Self.data(from: verifyResponse.body)
+        XCTAssertEqual(verifyResponse.statusCode, 200, Self.string(from: verifyBody))
+        let verified = try Helpers.readJSON(LocalOCRModelActionResult.self, from: verifyBody)
+        XCTAssertEqual(verified.status.phase, .installed)
+        XCTAssertEqual(verified.status.compatibility, .compatible)
+
+        let deleteResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "DELETE",
+                path: "/admin/ocr-local-models/\(encodedID)",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let deleteBody = try await Self.data(from: deleteResponse.body)
+        XCTAssertEqual(deleteResponse.statusCode, 200, Self.string(from: deleteBody))
+        let deleted = try Helpers.readJSON(LocalOCRModelActionResult.self, from: deleteBody)
+        XCTAssertEqual(deleted.status.phase, .notInstalled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelDirectory.path))
+    }
+
     func testChatCompletionsTextOnlyAccountAppliesOCRAndCachesImageResult() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -13375,6 +13447,12 @@ final class CodexProxyDaemonTests: XCTestCase {
             ],
             body: Data()
         )
+    }
+
+    private static func pathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
     private static func data(from body: DaemonHTTPService.Response.Body) async throws -> Data {

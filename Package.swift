@@ -66,6 +66,7 @@ var targets: [Target] = [
 
 #if os(macOS)
 products.append(.executable(name: "CodexProxyDesktop", targets: ["CodexProxyDesktop"]))
+products.append(.executable(name: "CodexProxyMLXOCRServer", targets: ["CodexProxyMLXOCRServer"]))
 targets.append(
     .executableTarget(
         name: "CodexProxyDesktop",
@@ -77,6 +78,22 @@ targets.append(
             .linkedFramework("AppKit"),
             .linkedFramework("IOKit"),
             .linkedFramework("SwiftUI"),
+        ]
+    )
+)
+targets.append(
+    .executableTarget(
+        name: "CodexProxyMLXOCRServer",
+        dependencies: [
+            .product(name: "MLXLLM", package: "mlx-swift-lm"),
+            .product(name: "MLXVLM", package: "mlx-swift-lm"),
+            .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+            .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+            .product(name: "MLX", package: "mlx-swift"),
+            .product(name: "Tokenizers", package: "swift-transformers"),
+        ],
+        linkerSettings: [
+            .linkedFramework("Network"),
         ]
     )
 )
@@ -99,6 +116,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.4.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.22.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.33.1"),
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", exact: "0.31.3"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", exact: "3.31.3"),
+        .package(url: "https://github.com/huggingface/swift-transformers.git", exact: "1.3.0"),
     ],
     targets: targets,
     swiftLanguageModes: [.v6]

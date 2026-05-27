@@ -528,6 +528,10 @@ final class DesktopAppModel: ObservableObject {
     @Published var ocrRecognitionResult: OCRRecognitionResultLookupResponse?
     @Published var isOCRCacheLogsPresented = false
     @Published var isOCRRecognitionResultPresented = false
+    @Published var localOCRModelsResponse = LocalOCRModelsResponse()
+    @Published var localOCRModelsIsRefreshing = false
+    @Published var localOCRModelOperationIDs: Set<String> = []
+    @Published var localOCRRuntimeIsStopping = false
     @Published var diagnosticRequestBodySummary = DiagnosticRequestBodySummary()
     @Published var diagnosticRequestBodyIsRefreshing = false
     @Published var diagnosticRequestBodyIsClearing = false

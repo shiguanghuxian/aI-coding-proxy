@@ -125,6 +125,10 @@ public enum Paths {
         dataDirectory.appendingPathComponent("diagnostic-request-bodies", isDirectory: true)
     }
 
+    public static func localOCRModelsDirectoryURL(in dataDirectory: URL) -> URL {
+        dataDirectory.appendingPathComponent("ocr-mlx-models", isDirectory: true)
+    }
+
 }
 
 public enum RuntimeInfo {

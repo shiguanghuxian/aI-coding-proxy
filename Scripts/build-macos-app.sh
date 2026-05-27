@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ICON_SCRIPT="$ROOT_DIR/Scripts/render-app-icon.sh"
 FETCH_MIHOMO_SCRIPT="$ROOT_DIR/Scripts/fetch-mihomo.sh"
 BUILD_LINUX_ARTIFACTS_SCRIPT="$ROOT_DIR/Scripts/build-linux-artifacts.sh"
+BUILD_MLX_METALLIB_SCRIPT="$ROOT_DIR/Scripts/build-mlx-metallib.sh"
 THIRD_PARTY_NOTICE="$ROOT_DIR/Packaging/macOS/mihomo-third-party-notice.txt"
 REMOTE_ARTIFACTS_DIR="${CODEX_PROXY_REMOTE_ARTIFACTS_DIR:-$ROOT_DIR/Artifacts}"
 FORCE_REFRESH=0
@@ -92,10 +93,42 @@ case "$TARGET_ARCH" in
     ;;
 esac
 
+SWIFT_BUILD_ARGS=(build -c "$CONFIGURATION" --arch "$TARGET_ARCH" --resolver-fingerprint-checking warn)
+
+clean_swiftpm_arch_build_cache() {
+  echo "Cleaning SwiftPM $CONFIGURATION cache for $TARGET_ARCH before retry..." >&2
+  rm -rf \
+    "$ROOT_DIR/.build/$TARGET_ARCH-apple-macosx/$CONFIGURATION" \
+    "$ROOT_DIR/.build/$CONFIGURATION.yaml" \
+    "$ROOT_DIR/.build/build.db"
+}
+
+run_swift_build_for_bundle() {
+  local log_file
+  log_file="$(mktemp "${TMPDIR:-/tmp}/codex-proxy-swift-build.XXXXXX")"
+  if "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" 2>&1 | tee "$log_file"; then
+    rm -f "$log_file"
+    return 0
+  fi
+
+  local status="${PIPESTATUS[0]}"
+  if grep -q "missing required module '_NumericsShims'" "$log_file"; then
+    echo "SwiftPM reported missing _NumericsShims; retrying once after clearing stale arch build cache." >&2
+    rm -f "$log_file"
+    clean_swiftpm_arch_build_cache
+    "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}"
+    return $?
+  fi
+
+  rm -f "$log_file"
+  return "$status"
+}
+
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 APP_DIR="$OUTPUT_DIR/AI Coding Proxy.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
+HELPERS_DIR="$APP_DIR/Contents/Helpers"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 REMOTE_RESOURCES_DIR="$RESOURCES_DIR/RemoteArtifacts"
 
@@ -107,8 +140,9 @@ if [[ "$BUNDLE_PROFILE" == "full" && "${CODEX_PROXY_SKIP_REMOTE_ARTIFACT_PREPARE
   fi
 fi
 
-"$SWIFT_EXEC" build -c "$CONFIGURATION" --arch "$TARGET_ARCH"
-BUILD_DIR="$("$SWIFT_EXEC" build -c "$CONFIGURATION" --arch "$TARGET_ARCH" --show-bin-path)"
+run_swift_build_for_bundle
+BUILD_DIR="$("$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)"
+"$BUILD_MLX_METALLIB_SCRIPT"
 "$ICON_SCRIPT"
 if [[ "$FORCE_REFRESH" == "1" ]]; then
   "$FETCH_MIHOMO_SCRIPT" --force-refresh "$ROOT_DIR/ThirdParty/mihomo/$MIHOMO_ARCH" "$TARGET_ARCH"
@@ -129,6 +163,15 @@ if [[ ! -x "$BUILD_DIR/codex-proxyd" ]]; then
   echo "Daemon binary not found: $BUILD_DIR/codex-proxyd" >&2
   exit 1
 fi
+if [[ ! -x "$BUILD_DIR/CodexProxyMLXOCRServer" ]]; then
+  echo "Local MLX OCR helper not found: $BUILD_DIR/CodexProxyMLXOCRServer" >&2
+  exit 1
+fi
+MLX_METALLIB="$ROOT_DIR/.build/codex-proxy-mlx-metallib/mlx.metallib"
+if [[ ! -f "$MLX_METALLIB" ]]; then
+  echo "MLX Metal library not found: $MLX_METALLIB" >&2
+  exit 1
+fi
 if [[ "$BUNDLE_PROFILE" == "full" ]]; then
   for REMOTE_ARCH in linux-amd64 linux-arm64; do
     if [[ ! -x "$REMOTE_ARTIFACTS_DIR/$REMOTE_ARCH/codex-proxyd" ]]; then
@@ -143,7 +186,7 @@ if [[ "$BUNDLE_PROFILE" == "full" ]]; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR"
 if [[ "$BUNDLE_PROFILE" == "full" ]]; then
   mkdir -p "$REMOTE_RESOURCES_DIR"
 fi
@@ -152,8 +195,14 @@ cp "$ROOT_DIR/Packaging/macOS/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ROOT_DIR/Packaging/macOS/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 cp "$BUILD_DIR/CodexProxyDesktop" "$MACOS_DIR/CodexProxyDesktop"
 cp "$BUILD_DIR/codex-proxyd" "$MACOS_DIR/codex-proxyd"
+cp "$BUILD_DIR/CodexProxyMLXOCRServer" "$HELPERS_DIR/CodexProxyMLXOCRServer"
+cp "$MLX_METALLIB" "$HELPERS_DIR/mlx.metallib"
 cp "$MIHOMO_BINARY" "$MACOS_DIR/mihomo"
-chmod +x "$MACOS_DIR/CodexProxyDesktop" "$MACOS_DIR/codex-proxyd" "$MACOS_DIR/mihomo"
+chmod +x \
+  "$MACOS_DIR/CodexProxyDesktop" \
+  "$MACOS_DIR/codex-proxyd" \
+  "$MACOS_DIR/mihomo" \
+  "$HELPERS_DIR/CodexProxyMLXOCRServer"
 if [[ "$BUNDLE_PROFILE" == "full" ]]; then
   cp -R "$REMOTE_ARTIFACTS_DIR/linux-amd64" "$REMOTE_RESOURCES_DIR/linux-amd64"
   cp -R "$REMOTE_ARTIFACTS_DIR/linux-arm64" "$REMOTE_RESOURCES_DIR/linux-arm64"

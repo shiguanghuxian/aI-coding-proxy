@@ -155,6 +155,125 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertTrue(config.ocrModel.prompt.contains("[OCR识别结果]"))
     }
 
+    func testOCRModelConfigSupportsLocalMLXProviderAndSnakeCaseFields() throws {
+        let json = """
+        {
+          "ocr_model": {
+            "provider": "local_mlx",
+            "enabled": true,
+            "timeout": 45,
+            "local_mlx": {
+              "selected_model_id": "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+              "custom_hf_repo": "custom/vision-mlx",
+              "model_cache_path": "~/Library/Application Support/CodexProxy/OCR",
+              "hf_base_url": "https://hf-mirror.example.com",
+              "hf_token": "hf_test",
+              "runtime_path": "/Applications/CodexProxyMLXOCRServer",
+              "auto_start": false,
+              "max_tokens": 1536,
+              "idle_shutdown_seconds": 5,
+              "max_concurrent_recognitions": 2
+            }
+          }
+        }
+        """
+
+        let config = try Helpers.readJSON(AppConfig.self, from: Data(json.utf8))
+
+        XCTAssertEqual(config.ocrModel.provider, .localMLX)
+        XCTAssertTrue(config.ocrModel.enabled)
+        XCTAssertTrue(config.ocrModel.isReadyForRecognition)
+        XCTAssertEqual(config.ocrModel.timeout, 45)
+        XCTAssertEqual(config.ocrModel.localMLX.selectedModelID, "mlx-community/Qwen2.5-VL-3B-Instruct-4bit")
+        XCTAssertEqual(config.ocrModel.localMLX.customHFRepo, "custom/vision-mlx")
+        XCTAssertEqual(config.ocrModel.localMLX.hfBaseURL, "https://hf-mirror.example.com")
+        XCTAssertEqual(config.ocrModel.localMLX.hfToken, "hf_test")
+        XCTAssertEqual(config.ocrModel.localMLX.runtimePath, "/Applications/CodexProxyMLXOCRServer")
+        XCTAssertFalse(config.ocrModel.localMLX.autoStart)
+        XCTAssertEqual(config.ocrModel.localMLX.maxTokens, 1536)
+        XCTAssertEqual(config.ocrModel.localMLX.idleShutdownSeconds, 5)
+        XCTAssertEqual(config.ocrModel.localMLX.maxConcurrentRecognitions, 2)
+        XCTAssertEqual(config.ocrModel.recognitionModelLabel, "Local MLX · mlx-community/Qwen2.5-VL-3B-Instruct-4bit")
+
+        let notReadyCustom = OCRModelConfig(
+            provider: .localMLX,
+            enabled: true,
+            localMLX: LocalMLXOCRConfig(selectedModelID: LocalOCRModelDescriptor.customModelID, customHFRepo: "")
+        )
+        XCTAssertFalse(notReadyCustom.isReadyForRecognition)
+
+        let defaults = LocalMLXOCRConfig()
+        XCTAssertEqual(defaults.maxTokens, 1_024)
+        XCTAssertEqual(defaults.idleShutdownSeconds, 60)
+        XCTAssertEqual(defaults.maxConcurrentRecognitions, 1)
+    }
+
+    func testLocalOCRRecommendedModelsAndSnapshotValidation() throws {
+        let ids = LocalOCRModelDescriptor.recommendedModels.map(\.id)
+        XCTAssertEqual(ids.first, "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+        XCTAssertTrue(ids.contains("mlx-community/Qwen2.5-VL-3B-Instruct-4bit"))
+        XCTAssertTrue(ids.contains("mlx-community/Qwen2.5-VL-7B-Instruct-4bit"))
+        XCTAssertTrue(ids.contains("FakeRockert543/gemma-4-e2b-it-MLX-4bit"))
+        XCTAssertTrue(ids.contains("FakeRockert543/gemma-4-e4b-it-MLX-4bit"))
+        XCTAssertTrue(ids.contains("mlx-community/DeepSeek-OCR-4bit"))
+        XCTAssertTrue(LocalOCRModelDescriptor.recommendedModels.first?.recommended == true)
+        XCTAssertTrue(LocalOCRModelDescriptor.recommendedModels.first { $0.id == "mlx-community/DeepSeek-OCR-4bit" }?.experimental == true)
+        XCTAssertTrue(LocalOCRModelManager.isAllowedSnapshotFile("config.json"))
+        XCTAssertTrue(LocalOCRModelManager.isAllowedSnapshotFile("model-00001-of-00002.safetensors"))
+        XCTAssertFalse(LocalOCRModelManager.isAllowedSnapshotFile("README.md"))
+        XCTAssertFalse(LocalOCRModelManager.isAllowedSnapshotFile(".git/config"))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("config.json"))
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("tokenizer_config.json"))
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("tokenizer.json"))
+        try Data("weights".utf8).write(to: directory.appendingPathComponent("model.safetensors"))
+        try Data("{}".utf8).write(to: directory.appendingPathComponent(LocalOCRModelManager.snapshotManifestFilename))
+
+        XCTAssertNoThrow(try LocalOCRModelManager.validateSnapshot(at: directory))
+
+        let sharded = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sharded) }
+        try FileManager.default.createDirectory(at: sharded, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: sharded.appendingPathComponent("config.json"))
+        try Data("{}".utf8).write(to: sharded.appendingPathComponent("tokenizer_config.json"))
+        try Data("{}".utf8).write(to: sharded.appendingPathComponent("tokenizer.json"))
+        try Data("weights".utf8).write(to: sharded.appendingPathComponent("model-00001-of-00002.safetensors"))
+        try Data("{}".utf8).write(to: sharded.appendingPathComponent(LocalOCRModelManager.snapshotManifestFilename))
+        XCTAssertThrowsError(try LocalOCRModelManager.validateSnapshot(at: sharded)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("safetensors index"))
+        }
+    }
+
+    func testLocalMLXOCRRuntimeBuildsOpenAICompatibleOCRRequest() throws {
+        let body = try LocalMLXOCRRuntimeService.makeChatCompletionsBody(
+            request: LocalMLXOCRRequest(
+                prompt: "system ocr prompt",
+                imageURL: "data:image/png;base64,aW1hZ2U=",
+                detail: "high",
+                modelID: "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+                maxTokens: 777,
+                timeout: 12
+            )
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        let userContent = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+        let imageBlock = try XCTUnwrap(userContent.first { ($0["type"] as? String) == "image_url" })
+        let imageURL = try XCTUnwrap(imageBlock["image_url"] as? [String: Any])
+
+        XCTAssertEqual(object["model"] as? String, "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+        XCTAssertEqual(object["stream"] as? Bool, false)
+        XCTAssertEqual(object["max_tokens"] as? Int, 777)
+        XCTAssertEqual(object["temperature"] as? Int, 0)
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        XCTAssertEqual(messages.first?["content"] as? String, "system ocr prompt")
+        XCTAssertEqual(imageURL["url"] as? String, "data:image/png;base64,aW1hZ2U=")
+        XCTAssertEqual(imageURL["detail"] as? String, "high")
+    }
+
     func testDiagnosticRequestBodyCaptureConfigDecodesSnakeCaseAndDefaultsDisabled() throws {
         XCTAssertFalse(AppConfig().diagnosticRequestBodyCapture.enabled)
         XCTAssertEqual(
@@ -436,6 +555,123 @@ final class CodexProxyCoreTests: XCTestCase {
 
         XCTAssertTrue(text.contains("图片类型：缓存截图"))
         XCTAssertFalse(String(describing: updated).contains("input_image"))
+    }
+
+    func testOCRImageProcessorUsesLocalMLXRuntimeAndContentHashCache() async throws {
+        let imageURL = "data:image/png;base64,aW1hZ2U="
+        let runtime = LocalMLXOCRRuntimeProbe(result: "[OCR识别结果]\n图片类型：本地 MLX 截图")
+        let processor = OCRImageProcessor(cache: OCRResultCache(), localMLXRuntime: runtime)
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "请分析这两张图"],
+                        ["type": "input_image", "image_url": imageURL],
+                        ["type": "input_image", "image_url": imageURL],
+                    ],
+                ],
+            ],
+        ]
+        let config = AppConfig(
+            ocrModel: OCRModelConfig(
+                provider: .localMLX,
+                timeout: 9,
+                enabled: true,
+                localMLX: LocalMLXOCRConfig(
+                    selectedModelID: "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+                    maxTokens: 1024
+                )
+            )
+        )
+
+        let updated = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+        let calls = await runtime.requests()
+        let input = try XCTUnwrap(updated["input"] as? [[String: Any]])
+        let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.modelID, "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+        XCTAssertEqual(calls.first?.maxTokens, 1024)
+        XCTAssertEqual(calls.first?.timeout, 9)
+        XCTAssertEqual(calls.first?.imageURL, imageURL)
+        XCTAssertTrue(calls.first?.prompt.contains("你是一个专业的图片内容识别助手") == true)
+        XCTAssertTrue(text.contains("[图片1 OCR识别结果]"))
+        XCTAssertTrue(text.contains("[图片2 OCR识别结果]"))
+        XCTAssertTrue(text.contains("本地 MLX 截图"))
+        XCTAssertFalse(String(describing: updated).contains("input_image"))
+    }
+
+    func testOCRImageProcessorLocalMLXCacheHitDoesNotStartRuntime() async throws {
+        let imageURL = "data:image/png;base64,aW1hZ2U="
+        let cache = OCRResultCache()
+        await cache.store("[OCR识别结果]\n图片类型：本地缓存", for: Helpers.sha256(Data("image".utf8)))
+        let runtime = LocalMLXOCRRuntimeProbe(result: "[OCR识别结果]\n图片类型：不应调用")
+        let processor = OCRImageProcessor(cache: cache, localMLXRuntime: runtime)
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "这是什么"],
+                        ["type": "input_image", "image_url": imageURL],
+                    ],
+                ],
+            ],
+        ]
+        let config = AppConfig(
+            ocrModel: OCRModelConfig(
+                provider: .localMLX,
+                enabled: true,
+                localMLX: LocalMLXOCRConfig(selectedModelID: "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+            )
+        )
+
+        let updated = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+        let calls = await runtime.requests()
+        let input = try XCTUnwrap(updated["input"] as? [[String: Any]])
+        let content = try XCTUnwrap(input.first?["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+
+        XCTAssertEqual(calls.count, 0)
+        XCTAssertTrue(text.contains("图片类型：本地缓存"))
+    }
+
+    func testOCRImageProcessorLocalMLXRecognitionsAreSerialByDefault() async throws {
+        let runtime = LocalMLXOCRRuntimeProbe(result: "[OCR识别结果]\n图片类型：本地 MLX 截图")
+        let processor = OCRImageProcessor(cache: OCRResultCache(), localMLXRuntime: runtime)
+        let request: [String: Any] = [
+            "model": "text-only",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "请分析这些图"],
+                        ["type": "input_image", "image_url": "data:image/png;base64,aW1hZ2Ux"],
+                        ["type": "input_image", "image_url": "data:image/png;base64,aW1hZ2Uy"],
+                    ],
+                ],
+            ],
+        ]
+        let config = AppConfig(
+            ocrModel: OCRModelConfig(
+                provider: .localMLX,
+                enabled: true,
+                localMLX: LocalMLXOCRConfig(selectedModelID: "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+            )
+        )
+
+        _ = await processor.requestByApplyingOCRIfNeeded(request, config: config)
+        let snapshot = await runtime.snapshot()
+
+        XCTAssertEqual(snapshot.totalHits, 2)
+        XCTAssertEqual(snapshot.maxActiveHits, 1)
     }
 
     func testOCRResultCachePersistsEncryptedEntriesByImageHash() async throws {
@@ -14379,6 +14615,44 @@ private actor ConcurrentRequestProbe {
 
     func end() {
         self.activeHits -= 1
+    }
+
+    func snapshot() -> (totalHits: Int, maxActiveHits: Int) {
+        (self.totalHits, self.maxActiveHits)
+    }
+}
+
+private actor LocalMLXOCRRuntimeProbe: LocalMLXOCRServing {
+    private let result: String
+    private var storedRequests: [LocalMLXOCRRequest] = []
+    private var activeHits = 0
+    private var totalHits = 0
+    private var maxActiveHits = 0
+
+    init(result: String) {
+        self.result = result
+    }
+
+    func recognize(_ request: LocalMLXOCRRequest, config: OCRModelConfig, networkConfig: AppConfig) async throws -> String {
+        _ = config
+        _ = networkConfig
+        self.storedRequests.append(request)
+        self.activeHits += 1
+        self.totalHits += 1
+        self.maxActiveHits = max(self.maxActiveHits, self.activeHits)
+        defer { self.activeHits -= 1 }
+        try await Task.sleep(for: .milliseconds(30))
+        return self.result
+    }
+
+    func status() -> LocalMLXOCRRuntimeStatus {
+        LocalMLXOCRRuntimeStatus(running: true, modelID: self.storedRequests.last?.modelID)
+    }
+
+    func stop() {}
+
+    func requests() -> [LocalMLXOCRRequest] {
+        self.storedRequests
     }
 
     func snapshot() -> (totalHits: Int, maxActiveHits: Int) {

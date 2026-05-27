@@ -392,6 +392,515 @@ public struct GeminiOAuthConfig: Codable, Sendable, Equatable {
 
 public enum OCRModelProvider: String, Codable, Sendable, Equatable, CaseIterable {
     case openAICompatible = "openai_compatible"
+    case localMLX = "local_mlx"
+}
+
+public struct LocalMLXOCRConfig: Codable, Sendable, Equatable {
+    public static let defaultSelectedModelID = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    public static let defaultMaxTokens = 1_024
+    public static let defaultIdleShutdownSeconds = 60
+    public static let defaultMaxConcurrentRecognitions = 1
+
+    public var selectedModelID: String
+    public var customHFRepo: String
+    public var modelCachePath: String
+    public var hfBaseURL: String
+    public var hfToken: String
+    public var runtimePath: String
+    public var autoStart: Bool
+    public var maxTokens: Int
+    public var idleShutdownSeconds: Int
+    public var maxConcurrentRecognitions: Int
+
+    public init(
+        selectedModelID: String = Self.defaultSelectedModelID,
+        customHFRepo: String = "",
+        modelCachePath: String = "",
+        hfBaseURL: String = "https://huggingface.co",
+        hfToken: String = "",
+        runtimePath: String = "",
+        autoStart: Bool = true,
+        maxTokens: Int = Self.defaultMaxTokens,
+        idleShutdownSeconds: Int = Self.defaultIdleShutdownSeconds,
+        maxConcurrentRecognitions: Int = Self.defaultMaxConcurrentRecognitions
+    ) {
+        self.selectedModelID = selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.customHFRepo = customHFRepo.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.modelCachePath = modelCachePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.hfBaseURL = hfBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "https://huggingface.co"
+            : hfBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.hfToken = hfToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.runtimePath = runtimePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.autoStart = autoStart
+        self.maxTokens = max(maxTokens, 128)
+        self.idleShutdownSeconds = max(idleShutdownSeconds, 0)
+        self.maxConcurrentRecognitions = min(max(maxConcurrentRecognitions, 1), 8)
+    }
+
+    public var selectedModelIsCustom: Bool {
+        self.selectedModelID == LocalOCRModelDescriptor.customModelID
+    }
+
+    public func effectiveModelID() -> String {
+        let trimmedSelected = self.selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedSelected == LocalOCRModelDescriptor.customModelID {
+            return self.customHFRepo.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmedSelected
+    }
+
+    public func effectiveCacheDirectory(dataDirectory: URL) -> URL {
+        let trimmed = self.modelCachePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return Paths.localOCRModelsDirectoryURL(in: dataDirectory)
+        }
+        return URL(fileURLWithPath: NSString(string: trimmed).expandingTildeInPath, isDirectory: true)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedModelID = "selectedModelId"
+        case selectedModelIDLegacy = "selectedModelID"
+        case selectedModelIDSnake = "selected_model_id"
+        case customHFRepo = "customHFRepo"
+        case customHfRepo = "customHfRepo"
+        case customHFRepoLegacy = "customHFRepository"
+        case customHFRepoSnake = "custom_hf_repo"
+        case modelCachePath
+        case modelCachePathSnake = "model_cache_path"
+        case hfBaseURL = "hfBaseURL"
+        case hfBaseUrl = "hfBaseUrl"
+        case hfBaseURLSnake = "hf_base_url"
+        case hfToken
+        case hfTokenSnake = "hf_token"
+        case runtimePath
+        case runtimePathSnake = "runtime_path"
+        case autoStart
+        case autoStartSnake = "auto_start"
+        case maxTokens
+        case maxTokensSnake = "max_tokens"
+        case idleShutdownSeconds
+        case idleShutdownSecondsSnake = "idle_shutdown_seconds"
+        case maxConcurrentRecognitions
+        case maxConcurrentRecognitionsSnake = "max_concurrent_recognitions"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            selectedModelID: try container.decodeIfPresent(String.self, forKey: .selectedModelID)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedModelIDLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedModelIDSnake)
+                ?? Self.defaultSelectedModelID,
+            customHFRepo: try container.decodeIfPresent(String.self, forKey: .customHFRepo)
+                ?? container.decodeIfPresent(String.self, forKey: .customHfRepo)
+                ?? container.decodeIfPresent(String.self, forKey: .customHFRepoLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .customHFRepoSnake)
+                ?? "",
+            modelCachePath: try container.decodeIfPresent(String.self, forKey: .modelCachePath)
+                ?? container.decodeIfPresent(String.self, forKey: .modelCachePathSnake)
+                ?? "",
+            hfBaseURL: try container.decodeIfPresent(String.self, forKey: .hfBaseURL)
+                ?? container.decodeIfPresent(String.self, forKey: .hfBaseUrl)
+                ?? container.decodeIfPresent(String.self, forKey: .hfBaseURLSnake)
+                ?? "https://huggingface.co",
+            hfToken: try container.decodeIfPresent(String.self, forKey: .hfToken)
+                ?? container.decodeIfPresent(String.self, forKey: .hfTokenSnake)
+                ?? "",
+            runtimePath: try container.decodeIfPresent(String.self, forKey: .runtimePath)
+                ?? container.decodeIfPresent(String.self, forKey: .runtimePathSnake)
+                ?? "",
+            autoStart: try container.decodeIfPresent(Bool.self, forKey: .autoStart)
+                ?? container.decodeIfPresent(Bool.self, forKey: .autoStartSnake)
+                ?? true,
+            maxTokens: try container.decodeIfPresent(Int.self, forKey: .maxTokens)
+                ?? container.decodeIfPresent(Int.self, forKey: .maxTokensSnake)
+                ?? Self.defaultMaxTokens,
+            idleShutdownSeconds: try container.decodeIfPresent(Int.self, forKey: .idleShutdownSeconds)
+                ?? container.decodeIfPresent(Int.self, forKey: .idleShutdownSecondsSnake)
+                ?? Self.defaultIdleShutdownSeconds,
+            maxConcurrentRecognitions: try container.decodeIfPresent(Int.self, forKey: .maxConcurrentRecognitions)
+                ?? container.decodeIfPresent(Int.self, forKey: .maxConcurrentRecognitionsSnake)
+                ?? Self.defaultMaxConcurrentRecognitions
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.selectedModelID, forKey: .selectedModelID)
+        try container.encode(self.customHFRepo, forKey: .customHFRepo)
+        try container.encode(self.modelCachePath, forKey: .modelCachePath)
+        try container.encode(self.hfBaseURL, forKey: .hfBaseURL)
+        try container.encode(self.hfToken, forKey: .hfToken)
+        try container.encode(self.runtimePath, forKey: .runtimePath)
+        try container.encode(self.autoStart, forKey: .autoStart)
+        try container.encode(self.maxTokens, forKey: .maxTokens)
+        try container.encode(self.idleShutdownSeconds, forKey: .idleShutdownSeconds)
+        try container.encode(self.maxConcurrentRecognitions, forKey: .maxConcurrentRecognitions)
+    }
+}
+
+public struct LocalOCRModelDescriptor: Codable, Sendable, Equatable, Identifiable {
+    public static let customModelID = "__custom_hf_repo__"
+
+    public var id: String
+    public var displayName: String
+    public var huggingFaceRepo: String
+    public var snapshotDirectoryName: String
+    public var sizeBytes: Int64
+    public var quantization: String
+    public var minimumMemoryGB: Int
+    public var licenseName: String
+    public var licenseURL: String
+    public var recommended: Bool
+    public var experimental: Bool
+    public var notes: String
+
+    public init(
+        id: String,
+        displayName: String,
+        huggingFaceRepo: String,
+        snapshotDirectoryName: String? = nil,
+        sizeBytes: Int64,
+        quantization: String,
+        minimumMemoryGB: Int,
+        licenseName: String,
+        licenseURL: String,
+        recommended: Bool = false,
+        experimental: Bool = false,
+        notes: String = ""
+    ) {
+        let repo = huggingFaceRepo.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.huggingFaceRepo = repo
+        self.snapshotDirectoryName = (snapshotDirectoryName ?? Self.defaultSnapshotDirectoryName(for: repo))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sizeBytes = max(0, sizeBytes)
+        self.quantization = quantization.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.minimumMemoryGB = max(0, minimumMemoryGB)
+        self.licenseName = licenseName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.licenseURL = licenseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.recommended = recommended
+        self.experimental = experimental
+        self.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case huggingFaceRepo
+        case snapshotDirectoryName
+        case sizeBytes
+        case quantization
+        case minimumMemoryGB = "minimumMemoryGb"
+        case minimumMemoryGBLegacy = "minimumMemoryGB"
+        case minimumMemoryGBSnake = "minimum_memory_gb"
+        case licenseName
+        case licenseURL = "licenseUrl"
+        case licenseURLLegacy = "licenseURL"
+        case licenseURLSnake = "license_url"
+        case recommended
+        case experimental
+        case notes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            displayName: try container.decodeIfPresent(String.self, forKey: .displayName) ?? "",
+            huggingFaceRepo: try container.decodeIfPresent(String.self, forKey: .huggingFaceRepo) ?? "",
+            snapshotDirectoryName: try container.decodeIfPresent(String.self, forKey: .snapshotDirectoryName),
+            sizeBytes: try container.decodeIfPresent(Int64.self, forKey: .sizeBytes) ?? 0,
+            quantization: try container.decodeIfPresent(String.self, forKey: .quantization) ?? "",
+            minimumMemoryGB: try container.decodeIfPresent(Int.self, forKey: .minimumMemoryGB)
+                ?? container.decodeIfPresent(Int.self, forKey: .minimumMemoryGBLegacy)
+                ?? container.decodeIfPresent(Int.self, forKey: .minimumMemoryGBSnake)
+                ?? 0,
+            licenseName: try container.decodeIfPresent(String.self, forKey: .licenseName) ?? "",
+            licenseURL: try container.decodeIfPresent(String.self, forKey: .licenseURL)
+                ?? container.decodeIfPresent(String.self, forKey: .licenseURLLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .licenseURLSnake)
+                ?? "",
+            recommended: try container.decodeIfPresent(Bool.self, forKey: .recommended) ?? false,
+            experimental: try container.decodeIfPresent(Bool.self, forKey: .experimental) ?? false,
+            notes: try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.displayName, forKey: .displayName)
+        try container.encode(self.huggingFaceRepo, forKey: .huggingFaceRepo)
+        try container.encode(self.snapshotDirectoryName, forKey: .snapshotDirectoryName)
+        try container.encode(self.sizeBytes, forKey: .sizeBytes)
+        try container.encode(self.quantization, forKey: .quantization)
+        try container.encode(self.minimumMemoryGB, forKey: .minimumMemoryGB)
+        try container.encode(self.licenseName, forKey: .licenseName)
+        try container.encode(self.licenseURL, forKey: .licenseURL)
+        try container.encode(self.recommended, forKey: .recommended)
+        try container.encode(self.experimental, forKey: .experimental)
+        try container.encode(self.notes, forKey: .notes)
+    }
+
+    public static let recommendedModels: [LocalOCRModelDescriptor] = [
+        .init(
+            id: "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            displayName: "Qwen3-VL 4B Instruct 4bit",
+            huggingFaceRepo: "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            sizeBytes: 3_200_000_000,
+            quantization: "4bit",
+            minimumMemoryGB: 8,
+            licenseName: "Qwen License",
+            licenseURL: "https://huggingface.co/mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            recommended: true,
+            notes: "默认推荐，适合截图 OCR 与结构化图片理解。"
+        ),
+        .init(
+            id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+            displayName: "Qwen2.5-VL 3B Instruct 4bit",
+            huggingFaceRepo: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+            sizeBytes: 2_500_000_000,
+            quantization: "4bit",
+            minimumMemoryGB: 8,
+            licenseName: "Qwen License",
+            licenseURL: "https://huggingface.co/mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+            notes: "轻量备选，速度更快。"
+        ),
+        .init(
+            id: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            displayName: "Qwen2.5-VL 7B Instruct 4bit",
+            huggingFaceRepo: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            sizeBytes: 5_300_000_000,
+            quantization: "4bit",
+            minimumMemoryGB: 16,
+            licenseName: "Qwen License",
+            licenseURL: "https://huggingface.co/mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            notes: "质量备选，占用更高。"
+        ),
+        .init(
+            id: "FakeRockert543/gemma-4-e2b-it-MLX-4bit",
+            displayName: "Gemma 4 E2B Instruct MLX 4bit",
+            huggingFaceRepo: "FakeRockert543/gemma-4-e2b-it-MLX-4bit",
+            snapshotDirectoryName: "gemma-4-e2b-it-mlx-ple-safe-4bit",
+            sizeBytes: 7_000_000_000,
+            quantization: "PLE-safe 4bit",
+            minimumMemoryGB: 8,
+            licenseName: "Gemma Terms of Use",
+            licenseURL: "https://ai.google.dev/gemma/terms",
+            notes: "Gemma 4 备选，沿用 TrustLens 的 PLE-safe MLX 转换。"
+        ),
+        .init(
+            id: "FakeRockert543/gemma-4-e4b-it-MLX-4bit",
+            displayName: "Gemma 4 E4B Instruct MLX 4bit",
+            huggingFaceRepo: "FakeRockert543/gemma-4-e4b-it-MLX-4bit",
+            snapshotDirectoryName: "gemma-4-e4b-it-mlx-ple-safe-4bit",
+            sizeBytes: 12_000_000_000,
+            quantization: "PLE-safe 4bit",
+            minimumMemoryGB: 16,
+            licenseName: "Gemma Terms of Use",
+            licenseURL: "https://ai.google.dev/gemma/terms",
+            notes: "更高质量 Gemma 4 备选。"
+        ),
+        .init(
+            id: "mlx-community/DeepSeek-OCR-4bit",
+            displayName: "DeepSeek OCR 4bit (Experimental)",
+            huggingFaceRepo: "mlx-community/DeepSeek-OCR-4bit",
+            sizeBytes: 3_000_000_000,
+            quantization: "4bit",
+            minimumMemoryGB: 8,
+            licenseName: "DeepSeek License",
+            licenseURL: "https://huggingface.co/deepseek-ai/DeepSeek-OCR-2",
+            experimental: true,
+            notes: "实验项；DeepSeek-OCR-2 官方形态目前不是首批默认 MLX 一键模型。"
+        ),
+    ]
+
+    public static func descriptor(id: String, customHFRepo: String = "") -> LocalOCRModelDescriptor? {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let descriptor = Self.recommendedModels.first(where: { $0.id == trimmedID }) {
+            return descriptor
+        }
+        if trimmedID == Self.customModelID || trimmedID.isEmpty {
+            return Self.customDescriptor(repo: customHFRepo)
+        }
+        return Self.customDescriptor(repo: trimmedID)
+    }
+
+    public static func customDescriptor(repo: String) -> LocalOCRModelDescriptor? {
+        let trimmed = repo.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("/"), trimmed.isEmpty == false else { return nil }
+        return .init(
+            id: Self.customModelID,
+            displayName: "Custom HF · \(trimmed)",
+            huggingFaceRepo: trimmed,
+            sizeBytes: 0,
+            quantization: "custom",
+            minimumMemoryGB: 0,
+            licenseName: "Custom",
+            licenseURL: "https://huggingface.co/\(trimmed)",
+            experimental: true,
+            notes: "用户自定义 Hugging Face MLX/VLM 仓库。"
+        )
+    }
+
+    public static func defaultSnapshotDirectoryName(for repo: String) -> String {
+        repo.lowercased()
+            .replacingOccurrences(of: "/", with: "__")
+            .replacingOccurrences(of: " ", with: "-")
+    }
+}
+
+public enum LocalOCRModelInstallPhase: String, Codable, Sendable, Equatable, CaseIterable {
+    case notInstalled = "not_installed"
+    case downloading
+    case installed
+    case failed
+}
+
+public enum LocalOCRModelCompatibilityStatus: String, Codable, Sendable, Equatable {
+    case unknown
+    case compatible
+    case incomplete
+    case incompatible
+}
+
+public struct LocalOCRModelStatus: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { self.descriptor.id }
+    public var descriptor: LocalOCRModelDescriptor
+    public var phase: LocalOCRModelInstallPhase
+    public var progress: Double
+    public var detail: String
+    public var localPath: String?
+    public var compatibility: LocalOCRModelCompatibilityStatus
+    public var checkedAt: Int64
+
+    public init(
+        descriptor: LocalOCRModelDescriptor,
+        phase: LocalOCRModelInstallPhase,
+        progress: Double = 0,
+        detail: String = "",
+        localPath: String? = nil,
+        compatibility: LocalOCRModelCompatibilityStatus = .unknown,
+        checkedAt: Int64 = Helpers.now()
+    ) {
+        self.descriptor = descriptor
+        self.phase = phase
+        self.progress = min(max(progress, 0), 1)
+        self.detail = detail
+        self.localPath = localPath
+        self.compatibility = compatibility
+        self.checkedAt = checkedAt
+    }
+}
+
+public struct LocalMLXOCRRuntimeStatus: Codable, Sendable, Equatable {
+    public var running: Bool
+    public var modelID: String?
+    public var endpoint: String?
+    public var detail: String
+
+    public init(running: Bool = false, modelID: String? = nil, endpoint: String? = nil, detail: String = "") {
+        self.running = running
+        self.modelID = modelID
+        self.endpoint = endpoint
+        self.detail = detail
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case running
+        case modelID = "modelId"
+        case modelIDLegacy = "modelID"
+        case modelIDSnake = "model_id"
+        case endpoint
+        case detail
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            running: try container.decodeIfPresent(Bool.self, forKey: .running) ?? false,
+            modelID: try container.decodeIfPresent(String.self, forKey: .modelID)
+                ?? container.decodeIfPresent(String.self, forKey: .modelIDLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .modelIDSnake),
+            endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint),
+            detail: try container.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.running, forKey: .running)
+        try container.encodeIfPresent(self.modelID, forKey: .modelID)
+        try container.encodeIfPresent(self.endpoint, forKey: .endpoint)
+        try container.encode(self.detail, forKey: .detail)
+    }
+}
+
+public struct LocalOCRModelsResponse: Codable, Sendable, Equatable {
+    public var selectedModelID: String
+    public var customHFRepo: String
+    public var models: [LocalOCRModelStatus]
+    public var runtime: LocalMLXOCRRuntimeStatus
+
+    public init(
+        selectedModelID: String = LocalMLXOCRConfig.defaultSelectedModelID,
+        customHFRepo: String = "",
+        models: [LocalOCRModelStatus] = [],
+        runtime: LocalMLXOCRRuntimeStatus = .init()
+    ) {
+        self.selectedModelID = selectedModelID
+        self.customHFRepo = customHFRepo
+        self.models = models
+        self.runtime = runtime
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedModelID = "selectedModelId"
+        case selectedModelIDLegacy = "selectedModelID"
+        case selectedModelIDSnake = "selected_model_id"
+        case customHFRepo = "customHFRepo"
+        case customHfRepo = "customHfRepo"
+        case customHFRepoSnake = "custom_hf_repo"
+        case models
+        case runtime
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            selectedModelID: try container.decodeIfPresent(String.self, forKey: .selectedModelID)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedModelIDLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedModelIDSnake)
+                ?? LocalMLXOCRConfig.defaultSelectedModelID,
+            customHFRepo: try container.decodeIfPresent(String.self, forKey: .customHFRepo)
+                ?? container.decodeIfPresent(String.self, forKey: .customHfRepo)
+                ?? container.decodeIfPresent(String.self, forKey: .customHFRepoSnake)
+                ?? "",
+            models: try container.decodeIfPresent([LocalOCRModelStatus].self, forKey: .models) ?? [],
+            runtime: try container.decodeIfPresent(LocalMLXOCRRuntimeStatus.self, forKey: .runtime) ?? .init()
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.selectedModelID, forKey: .selectedModelID)
+        try container.encode(self.customHFRepo, forKey: .customHFRepo)
+        try container.encode(self.models, forKey: .models)
+        try container.encode(self.runtime, forKey: .runtime)
+    }
+}
+
+public struct LocalOCRModelActionResult: Codable, Sendable, Equatable {
+    public var status: LocalOCRModelStatus
+    public var models: LocalOCRModelsResponse
+
+    public init(status: LocalOCRModelStatus, models: LocalOCRModelsResponse) {
+        self.status = status
+        self.models = models
+    }
 }
 
 public struct OCRModelConfig: Codable, Sendable, Equatable {
@@ -442,6 +951,7 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
     public var maxImageSize: Int
     public var enabled: Bool
     public var debugMode: Bool
+    public var localMLX: LocalMLXOCRConfig
 
     public init(
         provider: OCRModelProvider = .openAICompatible,
@@ -452,7 +962,8 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         timeout: Int = 60,
         maxImageSize: Int = 4 * 1024 * 1024,
         enabled: Bool = false,
-        debugMode: Bool = false
+        debugMode: Bool = false,
+        localMLX: LocalMLXOCRConfig = .init()
     ) {
         self.provider = provider
         self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -464,12 +975,27 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         self.maxImageSize = max(maxImageSize, 64 * 1024)
         self.enabled = enabled
         self.debugMode = debugMode
+        self.localMLX = localMLX
     }
 
     public var isReadyForRecognition: Bool {
-        self.enabled
-            && self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            && self.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard self.enabled else { return false }
+        switch self.provider {
+        case .openAICompatible:
+            return self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                && self.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        case .localMLX:
+            return self.localMLX.effectiveModelID().isEmpty == false
+        }
+    }
+
+    public var recognitionModelLabel: String {
+        switch self.provider {
+        case .openAICompatible:
+            return self.model
+        case .localMLX:
+            return "Local MLX · \(self.localMLX.effectiveModelID())"
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -487,6 +1013,9 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         case enabled
         case debugMode
         case debugModeSnake = "debug_mode"
+        case localMLX
+        case localMlx
+        case localMLXSnake = "local_mlx"
     }
 
     public init(from decoder: Decoder) throws {
@@ -509,7 +1038,11 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false,
             debugMode: try container.decodeIfPresent(Bool.self, forKey: .debugMode)
                 ?? container.decodeIfPresent(Bool.self, forKey: .debugModeSnake)
-                ?? false
+                ?? false,
+            localMLX: try container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMLX)
+                ?? container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMlx)
+                ?? container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMLXSnake)
+                ?? .init()
         )
     }
 
@@ -524,6 +1057,7 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         try container.encode(self.maxImageSize, forKey: .maxImageSize)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.debugMode, forKey: .debugMode)
+        try container.encode(self.localMLX, forKey: .localMLX)
     }
 }
 

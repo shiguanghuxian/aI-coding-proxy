@@ -78,6 +78,9 @@ final class AdminAPIClient {
     typealias ClearOCRCacheHandler = @Sendable (ClearOCRCacheRequest) async throws -> ClearOCRCacheResult
     typealias OCRRecognitionLogsHandler = @Sendable (OCRRecognitionLogListRequest) async throws -> OCRRecognitionLogListResponse
     typealias OCRRecognitionResultHandler = @Sendable (Int64) async throws -> OCRRecognitionResultLookupResponse
+    typealias LocalOCRModelsHandler = @Sendable () async throws -> LocalOCRModelsResponse
+    typealias LocalOCRModelActionHandler = @Sendable (String) async throws -> LocalOCRModelActionResult
+    typealias StopLocalOCRRuntimeHandler = @Sendable () async throws -> LocalMLXOCRRuntimeStatus
     typealias DiagnosticRequestBodySummaryHandler = @Sendable () async throws -> DiagnosticRequestBodySummary
     typealias DiagnosticRequestBodiesHandler = @Sendable (Int64?) async throws -> [DiagnosticRequestBodyEntry]
     typealias DiagnosticRequestBodyDetailHandler = @Sendable (Int64) async throws -> DiagnosticRequestBodyDetail
@@ -132,6 +135,11 @@ final class AdminAPIClient {
     private let clearOCRCacheHandler: ClearOCRCacheHandler?
     private let ocrRecognitionLogsHandler: OCRRecognitionLogsHandler?
     private let ocrRecognitionResultHandler: OCRRecognitionResultHandler?
+    private let localOCRModelsHandler: LocalOCRModelsHandler?
+    private let downloadLocalOCRModelHandler: LocalOCRModelActionHandler?
+    private let verifyLocalOCRModelHandler: LocalOCRModelActionHandler?
+    private let deleteLocalOCRModelHandler: LocalOCRModelActionHandler?
+    private let stopLocalOCRRuntimeHandler: StopLocalOCRRuntimeHandler?
     private let diagnosticRequestBodySummaryHandler: DiagnosticRequestBodySummaryHandler?
     private let diagnosticRequestBodiesHandler: DiagnosticRequestBodiesHandler?
     private let diagnosticRequestBodyDetailHandler: DiagnosticRequestBodyDetailHandler?
@@ -193,6 +201,11 @@ final class AdminAPIClient {
         clearOCRCacheHandler: ClearOCRCacheHandler? = nil,
         ocrRecognitionLogsHandler: OCRRecognitionLogsHandler? = nil,
         ocrRecognitionResultHandler: OCRRecognitionResultHandler? = nil,
+        localOCRModelsHandler: LocalOCRModelsHandler? = nil,
+        downloadLocalOCRModelHandler: LocalOCRModelActionHandler? = nil,
+        verifyLocalOCRModelHandler: LocalOCRModelActionHandler? = nil,
+        deleteLocalOCRModelHandler: LocalOCRModelActionHandler? = nil,
+        stopLocalOCRRuntimeHandler: StopLocalOCRRuntimeHandler? = nil,
         diagnosticRequestBodySummaryHandler: DiagnosticRequestBodySummaryHandler? = nil,
         diagnosticRequestBodiesHandler: DiagnosticRequestBodiesHandler? = nil,
         diagnosticRequestBodyDetailHandler: DiagnosticRequestBodyDetailHandler? = nil,
@@ -247,6 +260,11 @@ final class AdminAPIClient {
         self.clearOCRCacheHandler = clearOCRCacheHandler
         self.ocrRecognitionLogsHandler = ocrRecognitionLogsHandler
         self.ocrRecognitionResultHandler = ocrRecognitionResultHandler
+        self.localOCRModelsHandler = localOCRModelsHandler
+        self.downloadLocalOCRModelHandler = downloadLocalOCRModelHandler
+        self.verifyLocalOCRModelHandler = verifyLocalOCRModelHandler
+        self.deleteLocalOCRModelHandler = deleteLocalOCRModelHandler
+        self.stopLocalOCRRuntimeHandler = stopLocalOCRRuntimeHandler
         self.diagnosticRequestBodySummaryHandler = diagnosticRequestBodySummaryHandler
         self.diagnosticRequestBodiesHandler = diagnosticRequestBodiesHandler
         self.diagnosticRequestBodyDetailHandler = diagnosticRequestBodyDetailHandler
@@ -842,6 +860,68 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().ocrRecognitionResult(logID: logID)
+    }
+
+    func getLocalOCRModels() async throws -> LocalOCRModelsResponse {
+        if let localOCRModelsHandler {
+            return try await localOCRModelsHandler()
+        }
+        if let response: LocalOCRModelsResponse = try await self.httpRequest("/ocr-local-models", method: "GET") {
+            return response
+        }
+        return try await self.controller().localOCRModels()
+    }
+
+    func downloadLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        if let downloadLocalOCRModelHandler {
+            return try await downloadLocalOCRModelHandler(id)
+        }
+        if let result: LocalOCRModelActionResult = try await self.httpRequest(
+            "/ocr-local-models/\(Self.pathComponent(id))/download",
+            method: "POST"
+        ) {
+            return result
+        }
+        return try await self.controller().downloadLocalOCRModel(id: id)
+    }
+
+    func verifyLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        if let verifyLocalOCRModelHandler {
+            return try await verifyLocalOCRModelHandler(id)
+        }
+        if let result: LocalOCRModelActionResult = try await self.httpRequest(
+            "/ocr-local-models/\(Self.pathComponent(id))/verify",
+            method: "POST"
+        ) {
+            return result
+        }
+        return try await self.controller().verifyLocalOCRModel(id: id)
+    }
+
+    func deleteLocalOCRModel(id: String) async throws -> LocalOCRModelActionResult {
+        if let deleteLocalOCRModelHandler {
+            return try await deleteLocalOCRModelHandler(id)
+        }
+        if let result: LocalOCRModelActionResult = try await self.httpRequest(
+            "/ocr-local-models/\(Self.pathComponent(id))",
+            method: "DELETE"
+        ) {
+            return result
+        }
+        return try await self.controller().deleteLocalOCRModel(id: id)
+    }
+
+    func stopLocalOCRRuntime() async throws -> LocalMLXOCRRuntimeStatus {
+        if let stopLocalOCRRuntimeHandler {
+            return try await stopLocalOCRRuntimeHandler()
+        }
+        if let status: LocalMLXOCRRuntimeStatus = try await self.httpRequest(
+            "/ocr-local-runtime/stop",
+            method: "POST"
+        ) {
+            return status
+        }
+        return try await self.controller().stopLocalOCRRuntime()
     }
 
     func getDiagnosticRequestBodySummary() async throws -> DiagnosticRequestBodySummary {
@@ -1561,6 +1641,12 @@ final class AdminAPIClient {
 
     private static func encodePathComponent(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private static func pathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }
 

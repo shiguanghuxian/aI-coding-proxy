@@ -656,6 +656,10 @@ final class DaemonHTTPService: @unchecked Sendable {
             return try self.codableResponse(
                 try await self.controller.ocrRecognitionLogs(request: self.ocrRecognitionLogListRequest(from: request))
             )
+        case ("GET", "/admin/ocr-local-models"):
+            return try self.codableResponse(try await self.controller.localOCRModels())
+        case ("POST", "/admin/ocr-local-runtime/stop"):
+            return try self.codableResponse(try await self.controller.stopLocalOCRRuntime())
         default:
             if request.method == "GET",
                request.path.hasPrefix("/admin/diagnostic-request-bodies/"),
@@ -664,10 +668,41 @@ final class DaemonHTTPService: @unchecked Sendable {
             {
                 return try self.codableResponse(try await self.controller.diagnosticRequestBodyDetail(id: id))
             }
+            if let response = try await self.handleLocalOCRModelRoute(request) {
+                return response
+            }
             if let response = try await self.handleAccountManagementRoute(request) {
                 return response
             }
             return self.jsonError(status: 404, message: "Unsupported admin endpoint \(request.path)")
+        }
+    }
+
+    private func handleLocalOCRModelRoute(_ request: Request) async throws -> Response? {
+        guard request.path.hasPrefix("/admin/ocr-local-models/") else {
+            return nil
+        }
+        let components = request.path.split(separator: "/").map(String.init)
+        guard components.count >= 3,
+              components[0] == "admin",
+              components[1] == "ocr-local-models"
+        else {
+            return nil
+        }
+        let id = components[2].removingPercentEncoding ?? components[2]
+        if request.method == "DELETE", components.count == 3 {
+            return try self.codableResponse(try await self.controller.deleteLocalOCRModel(id: id))
+        }
+        guard components.count == 4 else {
+            return nil
+        }
+        switch (request.method, components[3]) {
+        case ("POST", "download"):
+            return try self.codableResponse(try await self.controller.downloadLocalOCRModel(id: id))
+        case ("POST", "verify"):
+            return try self.codableResponse(try await self.controller.verifyLocalOCRModel(id: id))
+        default:
+            return nil
         }
     }
 

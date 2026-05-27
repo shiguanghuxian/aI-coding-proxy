@@ -639,14 +639,20 @@ public enum OCRImageContextSupport {
 }
 
 public struct OCRImageProcessor: Sendable {
-    private static let maxConcurrentRecognitions = 3
+    private static let defaultMaxConcurrentRecognitions = 3
 
     private let cache: OCRResultCache
     private let store: SQLiteStore?
+    private let localMLXRuntime: (any LocalMLXOCRServing)?
 
-    public init(cache: OCRResultCache, store: SQLiteStore? = nil) {
+    public init(
+        cache: OCRResultCache,
+        store: SQLiteStore? = nil,
+        localMLXRuntime: (any LocalMLXOCRServing)? = nil
+    ) {
         self.cache = cache
         self.store = store
+        self.localMLXRuntime = localMLXRuntime
     }
 
     public func pruneExpiredCache() async {
@@ -741,7 +747,8 @@ public struct OCRImageProcessor: Sendable {
     ) async -> [OCRImageRecognitionResult] {
         await withTaskGroup(of: OCRImageRecognitionResult.self) { group in
             var iterator = references.makeIterator()
-            let workerCount = min(Self.maxConcurrentRecognitions, references.count)
+            let maxConcurrentRecognitions = self.maxConcurrentRecognitions(for: ocrConfig)
+            let workerCount = min(maxConcurrentRecognitions, references.count)
             for _ in 0..<workerCount {
                 guard let reference = iterator.next() else { break }
                 group.addTask {
@@ -769,6 +776,15 @@ public struct OCRImageProcessor: Sendable {
                 }
             }
             return results.sorted { $0.index < $1.index }
+        }
+    }
+
+    private func maxConcurrentRecognitions(for ocrConfig: OCRModelConfig) -> Int {
+        switch ocrConfig.provider {
+        case .openAICompatible:
+            return Self.defaultMaxConcurrentRecognitions
+        case .localMLX:
+            return ocrConfig.localMLX.maxConcurrentRecognitions
         }
     }
 
@@ -868,7 +884,7 @@ public struct OCRImageProcessor: Sendable {
             accountKey: context.accountKey,
             accountLabel: context.accountLabel,
             requestedModel: context.requestedModel,
-            ocrModel: ocrConfig.model,
+            ocrModel: ocrConfig.recognitionModelLabel,
             imageIndex: reference.index,
             imageHash: prepared?.imageHash,
             mimeType: prepared?.mimeType ?? "",
@@ -906,6 +922,39 @@ public struct OCRImageProcessor: Sendable {
     }
 
     private func performOCR(
+        reference: OCRImageReference,
+        preparedImage: OCRPreparedImage,
+        ocrConfig: OCRModelConfig,
+        networkConfig: AppConfig
+    ) async throws -> String {
+        switch ocrConfig.provider {
+        case .openAICompatible:
+            return try await self.performOpenAICompatibleOCR(
+                reference: reference,
+                preparedImage: preparedImage,
+                ocrConfig: ocrConfig,
+                networkConfig: networkConfig
+            )
+        case .localMLX:
+            guard let localMLXRuntime else {
+                throw LocalOCRModelError.unsupportedPlatform
+            }
+            return try await localMLXRuntime.recognize(
+                LocalMLXOCRRequest(
+                    prompt: ocrConfig.prompt,
+                    imageURL: preparedImage.imageURL,
+                    detail: reference.detail,
+                    modelID: ocrConfig.localMLX.effectiveModelID(),
+                    maxTokens: ocrConfig.localMLX.maxTokens,
+                    timeout: ocrConfig.timeout
+                ),
+                config: ocrConfig,
+                networkConfig: networkConfig
+            )
+        }
+    }
+
+    private func performOpenAICompatibleOCR(
         reference: OCRImageReference,
         preparedImage: OCRPreparedImage,
         ocrConfig: OCRModelConfig,

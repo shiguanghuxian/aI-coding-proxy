@@ -261,6 +261,14 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelOCRModel
     case labelOCRAPIKey
     case labelOCRBaseURL
+    case labelOCRHFBaseURL
+    case labelOCRHFToken
+    case labelOCRModelCachePath
+    case labelOCRRuntimePath
+    case labelOCRCustomHFRepo
+    case labelOCRMaxTokens
+    case labelOCRIdleShutdownSeconds
+    case labelOCRLocalConcurrency
     case labelOCRPrompt
     case labelOCRTimeout
     case labelOCRMaxImageSize
@@ -362,6 +370,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionGeneral
     case sectionGeminiOAuth
     case sectionOCRModel
+    case sectionLocalOCRModels
     case sectionOCRCache
     case sectionOCRRecognitionLogs
     case ocrCacheLogsWindowTitle
@@ -483,6 +492,13 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionRefreshOCRRecognitionLogs
     case actionViewOCRResult
     case actionOpenOCRCacheLogs
+    case actionRefreshLocalOCRModels
+    case actionDownloadLocalOCRModel
+    case actionVerifyLocalOCRModel
+    case actionDeleteLocalOCRModel
+    case actionUseLocalOCRModel
+    case actionStopLocalOCRRuntime
+    case actionUseLowResourceOCRPreset
     case actionClearExpiredDiagnosticRequestBodies
     case actionClearDiagnosticRequestBodiesOlderThan
     case actionClearAllDiagnosticRequestBodies
@@ -596,6 +612,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperOCRCachePrivacy
     case helperOCRRecognitionLogs
     case helperOCRRecognitionLogPrivacy
+    case helperLocalOCRModels
+    case helperLocalOCRLowResourceMode
+    case helperLocalOCRPrivacy
     case helperOCRResultUnavailable
     case helperDiagnosticRequestBodyCapture
     case helperDiagnosticRequestBodyCapturePrivacy
@@ -799,6 +818,12 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case statusOCRCacheHit
     case statusOCRRecognized
     case statusOCRFailed
+    case statusLocalOCRNotInstalled
+    case statusLocalOCRDownloading
+    case statusLocalOCRInstalled
+    case statusLocalOCRRecommended
+    case statusLocalOCRLowResource
+    case statusLocalOCRExperimental
     case warningAuthImportPartialFailure
     case successDaemonStarted
     case successDaemonStopped
@@ -2211,6 +2236,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRModel: "OCR Model",
             .labelOCRAPIKey: "OCR API Key",
             .labelOCRBaseURL: "OCR Base URL",
+            .labelOCRHFBaseURL: "HF Base URL",
+            .labelOCRHFToken: "HF Token",
+            .labelOCRModelCachePath: "Model Cache Path",
+            .labelOCRRuntimePath: "Runtime Path",
+            .labelOCRCustomHFRepo: "Custom HF Repo",
+            .labelOCRMaxTokens: "Max OCR Tokens",
+            .labelOCRIdleShutdownSeconds: "Unload After Idle (seconds)",
+            .labelOCRLocalConcurrency: "Local OCR Concurrency",
             .labelOCRPrompt: "OCR Prompt",
             .labelOCRTimeout: "Timeout (seconds)",
             .labelOCRMaxImageSize: "Max Image Size (bytes)",
@@ -2288,6 +2321,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeneral: "General",
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR Model",
+            .sectionLocalOCRModels: "Local MLX Models",
             .sectionOCRCache: "OCR Cache",
             .sectionOCRRecognitionLogs: "Recognition Logs",
             .ocrCacheLogsWindowTitle: "OCR Cache & Recognition Logs",
@@ -2409,6 +2443,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRefreshOCRRecognitionLogs: "Refresh Logs",
             .actionViewOCRResult: "View Result",
             .actionOpenOCRCacheLogs: "View OCR Cache & Logs",
+            .actionRefreshLocalOCRModels: "Refresh Models",
+            .actionDownloadLocalOCRModel: "Download",
+            .actionVerifyLocalOCRModel: "Verify",
+            .actionDeleteLocalOCRModel: "Delete",
+            .actionUseLocalOCRModel: "Use",
+            .actionStopLocalOCRRuntime: "Stop Runtime",
+            .actionUseLowResourceOCRPreset: "Use Low Resource Preset",
             .actionClearExpiredDiagnosticRequestBodies: "Clear Expired",
             .actionClearDiagnosticRequestBodiesOlderThan: "Clear Older Than",
             .actionClearAllDiagnosticRequestBodies: "Clear All",
@@ -2522,6 +2563,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperOCRCachePrivacy: "Only the image SHA-256 hash, safe metadata, and encrypted OCR text are stored. Original images, URLs, base64 payloads, and API keys are not stored or shown here.",
             .helperOCRRecognitionLogs: "Recent OCR attempts with safe metadata. Use this to tell whether a request recognized, reused, skipped, or failed OCR.",
             .helperOCRRecognitionLogPrivacy: "Logs store endpoint, account, model, image number, SHA-256 hash, MIME, size, status, cache hit, latency, and short error only. OCR text is loaded on demand from the encrypted OCR cache.",
+            .helperLocalOCRModels: "Run OCR locally with MLX. Pick a recommended Hugging Face snapshot, download it to this machine, then save OCR settings to use it for text-only model image context.",
+            .helperLocalOCRLowResourceMode: "Low resource mode starts Local MLX only when OCR is needed, unloads it after the idle timeout, runs local OCR images serially by default, and uses cached OCR text without loading the model.",
+            .helperLocalOCRPrivacy: "Local MLX OCR keeps images on this Mac during inference. Download and runtime logs only store model IDs, status, timing, and short errors; HF tokens and image/OCR text are not logged.",
             .helperOCRResultUnavailable: "OCR cache has been cleared, so the recognized text can no longer be viewed from this log.",
             .helperDiagnosticRequestBodyCapture: "When enabled, the proxy stores the final upstream JSON request body before sending it so cache-prefix issues can be inspected later.",
             .helperDiagnosticRequestBodyCapturePrivacy: "This is off by default. Captured request bodies are encrypted on disk and may contain prompts, OCR context, reasoning_content, tool arguments, or image base64.",
@@ -2725,6 +2769,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .statusOCRCacheHit: "Cache Hit",
             .statusOCRRecognized: "Recognized",
             .statusOCRFailed: "Failed",
+            .statusLocalOCRNotInstalled: "Not Installed",
+            .statusLocalOCRDownloading: "Downloading",
+            .statusLocalOCRInstalled: "Installed",
+            .statusLocalOCRRecommended: "Recommended",
+            .statusLocalOCRLowResource: "Low Resource",
+            .statusLocalOCRExperimental: "Experimental",
             .successDaemonStarted: "Daemon started",
             .successDaemonStopped: "Daemon stopped",
             .successAuthImported: "Current auth imported",
@@ -2993,6 +3043,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRModel: "OCR 模型",
             .labelOCRAPIKey: "OCR API Key",
             .labelOCRBaseURL: "OCR Base URL",
+            .labelOCRHFBaseURL: "HF Base URL",
+            .labelOCRHFToken: "HF Token",
+            .labelOCRModelCachePath: "模型缓存路径",
+            .labelOCRRuntimePath: "运行时路径",
+            .labelOCRCustomHFRepo: "自定义 HF 仓库",
+            .labelOCRMaxTokens: "OCR 最大输出 Tokens",
+            .labelOCRIdleShutdownSeconds: "空闲后卸载（秒）",
+            .labelOCRLocalConcurrency: "本地 OCR 并发数",
             .labelOCRPrompt: "OCR Prompt",
             .labelOCRTimeout: "超时时间（秒）",
             .labelOCRMaxImageSize: "最大图片大小（字节）",
@@ -3081,6 +3139,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeneral: "通用",
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR 模型",
+            .sectionLocalOCRModels: "本地 MLX 模型",
             .sectionOCRCache: "OCR 缓存",
             .sectionOCRRecognitionLogs: "识别日志",
             .ocrCacheLogsWindowTitle: "OCR 缓存与识别日志",
@@ -3202,6 +3261,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRefreshOCRRecognitionLogs: "刷新日志",
             .actionViewOCRResult: "查看结果",
             .actionOpenOCRCacheLogs: "查看 OCR 缓存与识别日志",
+            .actionRefreshLocalOCRModels: "刷新模型",
+            .actionDownloadLocalOCRModel: "下载",
+            .actionVerifyLocalOCRModel: "校验",
+            .actionDeleteLocalOCRModel: "删除",
+            .actionUseLocalOCRModel: "设为当前",
+            .actionStopLocalOCRRuntime: "停止运行时",
+            .actionUseLowResourceOCRPreset: "使用低资源推荐",
             .actionClearExpiredDiagnosticRequestBodies: "清理过期",
             .actionClearDiagnosticRequestBodiesOlderThan: "清理早于",
             .actionClearAllDiagnosticRequestBodies: "全部清理",
@@ -3315,6 +3381,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperOCRCachePrivacy: "这里只保存图片 SHA-256 哈希、安全元数据和加密后的 OCR 文本。不会保存或展示原图、URL、base64 内容或 API Key。",
             .helperOCRRecognitionLogs: "最近的 OCR 尝试记录，用来判断请求是新识别、命中缓存、跳过还是失败。",
             .helperOCRRecognitionLogPrivacy: "日志只保存 endpoint、账号、模型、图片序号、SHA-256 哈希、MIME、大小、状态、缓存命中、耗时和短错误摘要。OCR 正文只会按需从加密缓存读取。",
+            .helperLocalOCRModels: "使用 MLX 在本机运行 OCR。选择推荐 Hugging Face snapshot 并下载到这台设备后，保存 OCR 设置即可给纯文本模型注入图片上下文。",
+            .helperLocalOCRLowResourceMode: "低资源模式只在需要 OCR 时启动 Local MLX，空闲超时后自动卸载；本地图片默认串行识别，命中缓存时不会加载模型。",
+            .helperLocalOCRPrivacy: "Local MLX OCR 推理时图片只在本机处理。下载和运行日志只记录模型 ID、状态、耗时和短错误，不记录 HF Token、图片或 OCR 正文。",
             .helperOCRResultUnavailable: "OCR 缓存已清理，无法从这条日志查看识别正文。",
             .helperDiagnosticRequestBodyCapture: "开启后，代理会在真正发往上游前保存最终上游 JSON 请求体，用于排查缓存前缀是否稳定。",
             .helperDiagnosticRequestBodyCapturePrivacy: "默认关闭。保存的请求体会加密落盘，但可能包含提示词、OCR 上下文、reasoning_content、工具参数或图片 base64。",
@@ -3518,6 +3587,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .statusOCRCacheHit: "缓存命中",
             .statusOCRRecognized: "已识别",
             .statusOCRFailed: "失败",
+            .statusLocalOCRNotInstalled: "未安装",
+            .statusLocalOCRDownloading: "下载中",
+            .statusLocalOCRInstalled: "已安装",
+            .statusLocalOCRRecommended: "推荐",
+            .statusLocalOCRLowResource: "低资源",
+            .statusLocalOCRExperimental: "实验项",
             .successDaemonStarted: "服务已启动",
             .successDaemonStopped: "服务已停止",
             .successAuthImported: "当前授权已导入",
