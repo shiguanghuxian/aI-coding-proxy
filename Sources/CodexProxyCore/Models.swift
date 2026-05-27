@@ -546,6 +546,64 @@ public struct AuthenticatedProxyKeyContext: Sendable, Equatable {
     }
 }
 
+public struct DiagnosticRequestBodyCaptureConfig: Codable, Sendable, Equatable {
+    public static let defaultRetentionDays = 7
+    public static let defaultMaxBodySizeBytes = 20 * 1_024 * 1_024
+
+    public var enabled: Bool
+    public var retentionDays: Int
+    public var maxBodySizeBytes: Int
+    public var captureJSONOnly: Bool
+
+    public init(
+        enabled: Bool = false,
+        retentionDays: Int = Self.defaultRetentionDays,
+        maxBodySizeBytes: Int = Self.defaultMaxBodySizeBytes,
+        captureJSONOnly: Bool = true
+    ) {
+        self.enabled = enabled
+        self.retentionDays = min(max(retentionDays, 1), 365)
+        self.maxBodySizeBytes = min(max(maxBodySizeBytes, 1_024), 200 * 1_024 * 1_024)
+        self.captureJSONOnly = captureJSONOnly
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case retentionDays
+        case retentionDaysSnake = "retention_days"
+        case maxBodySizeBytes
+        case maxBodySizeBytesSnake = "max_body_size_bytes"
+        case captureJSONOnly
+        case captureJSONOnlyAlt = "captureJsonOnly"
+        case captureJSONOnlySnake = "capture_json_only"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false,
+            retentionDays: try container.decodeIfPresent(Int.self, forKey: .retentionDays)
+                ?? container.decodeIfPresent(Int.self, forKey: .retentionDaysSnake)
+                ?? Self.defaultRetentionDays,
+            maxBodySizeBytes: try container.decodeIfPresent(Int.self, forKey: .maxBodySizeBytes)
+                ?? container.decodeIfPresent(Int.self, forKey: .maxBodySizeBytesSnake)
+                ?? Self.defaultMaxBodySizeBytes,
+            captureJSONOnly: try container.decodeIfPresent(Bool.self, forKey: .captureJSONOnly)
+                ?? container.decodeIfPresent(Bool.self, forKey: .captureJSONOnlyAlt)
+                ?? container.decodeIfPresent(Bool.self, forKey: .captureJSONOnlySnake)
+                ?? true
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.retentionDays, forKey: .retentionDays)
+        try container.encode(self.maxBodySizeBytes, forKey: .maxBodySizeBytes)
+        try container.encode(self.captureJSONOnly, forKey: .captureJSONOnly)
+    }
+}
+
 public struct AppConfig: Codable, Sendable, Equatable {
     public static let defaultAnthropicTargetModel = ProxyTranscoder.defaultModel
     public static let defaultProxyAPIKeyLabel = "Primary"
@@ -571,6 +629,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
     public var anthropicModelMappings: [AnthropicModelMapping]
     public var geminiOAuth: GeminiOAuthConfig
     public var ocrModel: OCRModelConfig
+    public var diagnosticRequestBodyCapture: DiagnosticRequestBodyCaptureConfig
 
     public init(
         publicHost: String = "127.0.0.1",
@@ -592,7 +651,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         anthropicDefaultTargetModel: String = AppConfig.defaultAnthropicTargetModel,
         anthropicModelMappings: [AnthropicModelMapping] = [],
         geminiOAuth: GeminiOAuthConfig = .init(),
-        ocrModel: OCRModelConfig = .init()
+        ocrModel: OCRModelConfig = .init(),
+        diagnosticRequestBodyCapture: DiagnosticRequestBodyCaptureConfig = .init()
     ) {
         self.publicHost = publicHost
         self.publicPort = publicPort
@@ -614,6 +674,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.anthropicModelMappings = anthropicModelMappings
         self.geminiOAuth = geminiOAuth
         self.ocrModel = ocrModel
+        self.diagnosticRequestBodyCapture = diagnosticRequestBodyCapture
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -640,6 +701,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         case geminiOAuthSnake = "gemini_oauth"
         case ocrModel
         case ocrModelSnake = "ocr_model"
+        case diagnosticRequestBodyCapture
+        case diagnosticRequestBodyCaptureSnake = "diagnostic_request_body_capture"
     }
 
     public init(from decoder: Decoder) throws {
@@ -672,6 +735,15 @@ public struct AppConfig: Codable, Sendable, Equatable {
                 ?? .init(),
             ocrModel: try container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModel)
                 ?? container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModelSnake)
+                ?? .init(),
+            diagnosticRequestBodyCapture: try container.decodeIfPresent(
+                DiagnosticRequestBodyCaptureConfig.self,
+                forKey: .diagnosticRequestBodyCapture
+            )
+                ?? container.decodeIfPresent(
+                    DiagnosticRequestBodyCaptureConfig.self,
+                    forKey: .diagnosticRequestBodyCaptureSnake
+                )
                 ?? .init()
         )
     }
@@ -698,6 +770,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         try container.encode(self.anthropicModelMappings, forKey: .anthropicModelMappings)
         try container.encode(self.geminiOAuth, forKey: .geminiOauth)
         try container.encode(self.ocrModel, forKey: .ocrModel)
+        try container.encode(self.diagnosticRequestBodyCapture, forKey: .diagnosticRequestBodyCapture)
     }
 
     public func normalizedModelRoutingConfig() -> AppConfig {
@@ -736,7 +809,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
                 defaultTargetModel: normalizedDefaultTargetModel
             ),
             geminiOAuth: self.geminiOAuth,
-            ocrModel: self.ocrModel
+            ocrModel: self.ocrModel,
+            diagnosticRequestBodyCapture: self.diagnosticRequestBodyCapture
         )
     }
 
@@ -2598,6 +2672,7 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
     public var cacheHitTokens: Int64?
     public var failureCategory: String
     public var errorSummary: String?
+    public var hasDiagnosticRequestBody: Bool
 
     public init(
         id: Int64,
@@ -2618,7 +2693,8 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         totalTokens: Int64,
         cacheHitTokens: Int64?,
         failureCategory: String,
-        errorSummary: String?
+        errorSummary: String?,
+        hasDiagnosticRequestBody: Bool = false
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -2639,6 +2715,7 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         self.cacheHitTokens = cacheHitTokens
         self.failureCategory = failureCategory
         self.errorSummary = errorSummary
+        self.hasDiagnosticRequestBody = hasDiagnosticRequestBody
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2668,6 +2745,8 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         case cacheHitTokens
         case errorSummary
         case failureCategory
+        case hasDiagnosticRequestBody
+        case has_diagnostic_request_body
     }
 
     public init(from decoder: Decoder) throws {
@@ -2702,7 +2781,10 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
             totalTokens: try container.decode(Int64.self, forKey: .totalTokens),
             cacheHitTokens: try container.decodeIfPresent(Int64.self, forKey: .cacheHitTokens),
             failureCategory: try container.decodeIfPresent(String.self, forKey: .failureCategory) ?? ProxyRequestTrace.FailureCategory.none.rawValue,
-            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary)
+            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary),
+            hasDiagnosticRequestBody: try container.decodeIfPresent(Bool.self, forKey: .hasDiagnosticRequestBody)
+                ?? container.decodeIfPresent(Bool.self, forKey: .has_diagnostic_request_body)
+                ?? false
         )
     }
 
@@ -2727,6 +2809,7 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         try container.encodeIfPresent(self.cacheHitTokens, forKey: .cacheHitTokens)
         try container.encode(self.failureCategory, forKey: .failureCategory)
         try container.encodeIfPresent(self.errorSummary, forKey: .errorSummary)
+        try container.encode(self.hasDiagnosticRequestBody, forKey: .hasDiagnosticRequestBody)
     }
 }
 
@@ -3119,6 +3202,411 @@ public struct ClearOCRCacheResult: Codable, Sendable, Equatable {
     public init(deletedCount: Int, summary: OCRCacheSummary) {
         self.deletedCount = max(0, deletedCount)
         self.summary = summary
+    }
+}
+
+public enum DiagnosticRequestBodyCaptureStatus: String, Codable, Sendable, Equatable, CaseIterable {
+    case captured
+    case skipped
+    case failed
+}
+
+public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int64
+    public var requestLogID: Int64?
+    public var createdAt: Int64
+    public var endpoint: String
+    public var upstreamURL: String?
+    public var accountKey: String
+    public var accountLabel: String
+    public var model: String
+    public var actualModel: String?
+    public var bodySHA256: String
+    public var prefixSHA256: String
+    public var byteCount: Int
+    public var expiresAt: Int64
+    public var status: DiagnosticRequestBodyCaptureStatus
+    public var errorSummary: String?
+
+    public init(
+        id: Int64 = 0,
+        requestLogID: Int64? = nil,
+        createdAt: Int64 = Helpers.now(),
+        endpoint: String = "",
+        upstreamURL: String? = nil,
+        accountKey: String = "",
+        accountLabel: String = "",
+        model: String = "",
+        actualModel: String? = nil,
+        bodySHA256: String = "",
+        prefixSHA256: String = "",
+        byteCount: Int = 0,
+        expiresAt: Int64 = Helpers.now(),
+        status: DiagnosticRequestBodyCaptureStatus = .captured,
+        errorSummary: String? = nil
+    ) {
+        self.id = id
+        self.requestLogID = requestLogID
+        self.createdAt = createdAt
+        self.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = upstreamURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.upstreamURL = normalizedURL.isEmpty ? nil : normalizedURL
+        self.accountKey = accountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accountLabel = accountLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedActualModel = actualModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.actualModel = normalizedActualModel.isEmpty ? nil : normalizedActualModel
+        self.bodySHA256 = bodySHA256.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.prefixSHA256 = prefixSHA256.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.byteCount = max(0, byteCount)
+        self.expiresAt = expiresAt
+        self.status = status
+        let normalizedError = errorSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.errorSummary = normalizedError.isEmpty ? nil : normalizedError
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case requestLogID
+        case requestLogIDAlt = "requestLogId"
+        case createdAt
+        case endpoint
+        case upstreamURL
+        case upstreamURLAlt = "upstreamUrl"
+        case accountKey
+        case accountLabel
+        case model
+        case actualModel
+        case bodySHA256
+        case bodySHA256Alt = "bodySha256"
+        case prefixSHA256
+        case prefixSHA256Alt = "prefixSha256"
+        case byteCount
+        case expiresAt
+        case status
+        case errorSummary
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decodeIfPresent(Int64.self, forKey: .id) ?? 0,
+            requestLogID: try container.decodeIfPresent(Int64.self, forKey: .requestLogID)
+                ?? container.decodeIfPresent(Int64.self, forKey: .requestLogIDAlt),
+            createdAt: try container.decodeIfPresent(Int64.self, forKey: .createdAt) ?? Helpers.now(),
+            endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint) ?? "",
+            upstreamURL: try container.decodeIfPresent(String.self, forKey: .upstreamURL)
+                ?? container.decodeIfPresent(String.self, forKey: .upstreamURLAlt),
+            accountKey: try container.decodeIfPresent(String.self, forKey: .accountKey) ?? "",
+            accountLabel: try container.decodeIfPresent(String.self, forKey: .accountLabel) ?? "",
+            model: try container.decodeIfPresent(String.self, forKey: .model) ?? "",
+            actualModel: try container.decodeIfPresent(String.self, forKey: .actualModel),
+            bodySHA256: try container.decodeIfPresent(String.self, forKey: .bodySHA256)
+                ?? container.decodeIfPresent(String.self, forKey: .bodySHA256Alt)
+                ?? "",
+            prefixSHA256: try container.decodeIfPresent(String.self, forKey: .prefixSHA256)
+                ?? container.decodeIfPresent(String.self, forKey: .prefixSHA256Alt)
+                ?? "",
+            byteCount: try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0,
+            expiresAt: try container.decodeIfPresent(Int64.self, forKey: .expiresAt) ?? Helpers.now(),
+            status: try container.decodeIfPresent(DiagnosticRequestBodyCaptureStatus.self, forKey: .status) ?? .captured,
+            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encodeIfPresent(self.requestLogID, forKey: .requestLogID)
+        try container.encode(self.createdAt, forKey: .createdAt)
+        try container.encode(self.endpoint, forKey: .endpoint)
+        try container.encodeIfPresent(self.upstreamURL, forKey: .upstreamURL)
+        try container.encode(self.accountKey, forKey: .accountKey)
+        try container.encode(self.accountLabel, forKey: .accountLabel)
+        try container.encode(self.model, forKey: .model)
+        try container.encodeIfPresent(self.actualModel, forKey: .actualModel)
+        try container.encode(self.bodySHA256, forKey: .bodySHA256)
+        try container.encode(self.prefixSHA256, forKey: .prefixSHA256)
+        try container.encode(self.byteCount, forKey: .byteCount)
+        try container.encode(self.expiresAt, forKey: .expiresAt)
+        try container.encode(self.status, forKey: .status)
+        try container.encodeIfPresent(self.errorSummary, forKey: .errorSummary)
+    }
+}
+
+public struct DiagnosticRequestBodySummary: Codable, Sendable, Equatable {
+    public var totalCount: Int
+    public var capturedCount: Int
+    public var expiredCount: Int
+    public var totalBytes: Int64
+    public var oldestCreatedAt: Int64?
+    public var newestCreatedAt: Int64?
+
+    public init(
+        totalCount: Int = 0,
+        capturedCount: Int = 0,
+        expiredCount: Int = 0,
+        totalBytes: Int64 = 0,
+        oldestCreatedAt: Int64? = nil,
+        newestCreatedAt: Int64? = nil
+    ) {
+        self.totalCount = max(0, totalCount)
+        self.capturedCount = max(0, capturedCount)
+        self.expiredCount = max(0, expiredCount)
+        self.totalBytes = max(0, totalBytes)
+        self.oldestCreatedAt = oldestCreatedAt
+        self.newestCreatedAt = newestCreatedAt
+    }
+}
+
+public struct ClearDiagnosticRequestBodiesRequest: Codable, Sendable, Equatable {
+    public var expiredOnly: Bool
+    public var olderThanSeconds: Int64?
+    public var requestLogIDs: [Int64]
+    public var clearAll: Bool
+
+    public init(
+        expiredOnly: Bool = false,
+        olderThanSeconds: Int64? = nil,
+        requestLogIDs: [Int64] = [],
+        clearAll: Bool = false
+    ) {
+        self.expiredOnly = expiredOnly
+        self.olderThanSeconds = olderThanSeconds.flatMap { $0 > 0 ? $0 : nil }
+        self.requestLogIDs = Array(Set(requestLogIDs.filter { $0 > 0 })).sorted()
+        self.clearAll = clearAll
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiredOnly
+        case expiredOnlySnake = "expired_only"
+        case olderThanSeconds
+        case olderThanSecondsSnake = "older_than_seconds"
+        case requestLogIDs
+        case requestLogIDsAlt = "requestLogIds"
+        case requestLogIDsSnake = "request_log_ids"
+        case clearAll
+        case clearAllSnake = "clear_all"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            expiredOnly: try container.decodeIfPresent(Bool.self, forKey: .expiredOnly)
+                ?? container.decodeIfPresent(Bool.self, forKey: .expiredOnlySnake)
+                ?? false,
+            olderThanSeconds: try container.decodeIfPresent(Int64.self, forKey: .olderThanSeconds)
+                ?? container.decodeIfPresent(Int64.self, forKey: .olderThanSecondsSnake),
+            requestLogIDs: try container.decodeIfPresent([Int64].self, forKey: .requestLogIDs)
+                ?? container.decodeIfPresent([Int64].self, forKey: .requestLogIDsAlt)
+                ?? container.decodeIfPresent([Int64].self, forKey: .requestLogIDsSnake)
+                ?? [],
+            clearAll: try container.decodeIfPresent(Bool.self, forKey: .clearAll)
+                ?? container.decodeIfPresent(Bool.self, forKey: .clearAllSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.expiredOnly, forKey: .expiredOnly)
+        try container.encodeIfPresent(self.olderThanSeconds, forKey: .olderThanSeconds)
+        try container.encode(self.requestLogIDs, forKey: .requestLogIDs)
+        try container.encode(self.clearAll, forKey: .clearAll)
+    }
+}
+
+public struct ClearDiagnosticRequestBodiesResult: Codable, Sendable, Equatable {
+    public var deletedCount: Int
+    public var summary: DiagnosticRequestBodySummary
+
+    public init(deletedCount: Int, summary: DiagnosticRequestBodySummary) {
+        self.deletedCount = max(0, deletedCount)
+        self.summary = summary
+    }
+}
+
+public struct DiagnosticRequestBodyDetail: Codable, Sendable, Equatable {
+    public var entry: DiagnosticRequestBodyEntry
+    public var bodyText: String?
+    public var available: Bool
+    public var message: String?
+
+    public init(
+        entry: DiagnosticRequestBodyEntry,
+        bodyText: String? = nil,
+        available: Bool = false,
+        message: String? = nil
+    ) {
+        self.entry = entry
+        self.bodyText = bodyText
+        self.available = available
+        self.message = message
+    }
+}
+
+public enum OCRRecognitionLogStatus: String, Codable, Sendable, Equatable, CaseIterable {
+    case skipped
+    case cacheHit = "cache_hit"
+    case recognized
+    case failed
+}
+
+public struct OCRRecognitionLogEntry: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int64
+    public var createdAt: Int64
+    public var endpoint: String
+    public var accountKey: String
+    public var accountLabel: String
+    public var requestedModel: String
+    public var ocrModel: String
+    public var imageIndex: Int
+    public var imageHash: String?
+    public var mimeType: String
+    public var byteCount: Int
+    public var status: OCRRecognitionLogStatus
+    public var cacheHit: Bool
+    public var latencyMS: Int64
+    public var errorSummary: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case createdAt
+        case endpoint
+        case accountKey
+        case accountLabel
+        case requestedModel
+        case ocrModel
+        case imageIndex
+        case imageHash
+        case mimeType
+        case byteCount
+        case status
+        case cacheHit
+        case latencyMS = "latencyMs"
+        case latencyMSCamel = "latencyMS"
+        case errorSummary
+    }
+
+    public init(
+        id: Int64 = 0,
+        createdAt: Int64 = Helpers.now(),
+        endpoint: String = "",
+        accountKey: String = "",
+        accountLabel: String = "",
+        requestedModel: String = "",
+        ocrModel: String = "",
+        imageIndex: Int,
+        imageHash: String? = nil,
+        mimeType: String = "",
+        byteCount: Int = 0,
+        status: OCRRecognitionLogStatus,
+        cacheHit: Bool = false,
+        latencyMS: Int64 = 0,
+        errorSummary: String? = nil
+    ) {
+        self.id = id
+        self.createdAt = createdAt
+        self.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accountKey = accountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accountLabel = accountLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.requestedModel = requestedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ocrModel = ocrModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.imageIndex = max(1, imageIndex)
+        let normalizedImageHash = imageHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.imageHash = normalizedImageHash.isEmpty ? nil : normalizedImageHash
+        self.mimeType = mimeType.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.byteCount = max(0, byteCount)
+        self.status = status
+        self.cacheHit = cacheHit
+        self.latencyMS = max(0, latencyMS)
+        let normalizedErrorSummary = errorSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.errorSummary = normalizedErrorSummary.isEmpty ? nil : normalizedErrorSummary
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decodeIfPresent(Int64.self, forKey: .id) ?? 0,
+            createdAt: try container.decodeIfPresent(Int64.self, forKey: .createdAt) ?? Helpers.now(),
+            endpoint: try container.decodeIfPresent(String.self, forKey: .endpoint) ?? "",
+            accountKey: try container.decodeIfPresent(String.self, forKey: .accountKey) ?? "",
+            accountLabel: try container.decodeIfPresent(String.self, forKey: .accountLabel) ?? "",
+            requestedModel: try container.decodeIfPresent(String.self, forKey: .requestedModel) ?? "",
+            ocrModel: try container.decodeIfPresent(String.self, forKey: .ocrModel) ?? "",
+            imageIndex: try container.decodeIfPresent(Int.self, forKey: .imageIndex) ?? 1,
+            imageHash: try container.decodeIfPresent(String.self, forKey: .imageHash),
+            mimeType: try container.decodeIfPresent(String.self, forKey: .mimeType) ?? "",
+            byteCount: try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0,
+            status: try container.decodeIfPresent(OCRRecognitionLogStatus.self, forKey: .status) ?? .failed,
+            cacheHit: try container.decodeIfPresent(Bool.self, forKey: .cacheHit) ?? false,
+            latencyMS: try container.decodeIfPresent(Int64.self, forKey: .latencyMS)
+                ?? container.decodeIfPresent(Int64.self, forKey: .latencyMSCamel)
+                ?? 0,
+            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.createdAt, forKey: .createdAt)
+        try container.encode(self.endpoint, forKey: .endpoint)
+        try container.encode(self.accountKey, forKey: .accountKey)
+        try container.encode(self.accountLabel, forKey: .accountLabel)
+        try container.encode(self.requestedModel, forKey: .requestedModel)
+        try container.encode(self.ocrModel, forKey: .ocrModel)
+        try container.encode(self.imageIndex, forKey: .imageIndex)
+        try container.encodeIfPresent(self.imageHash, forKey: .imageHash)
+        try container.encode(self.mimeType, forKey: .mimeType)
+        try container.encode(self.byteCount, forKey: .byteCount)
+        try container.encode(self.status, forKey: .status)
+        try container.encode(self.cacheHit, forKey: .cacheHit)
+        try container.encode(self.latencyMS, forKey: .latencyMS)
+        try container.encodeIfPresent(self.errorSummary, forKey: .errorSummary)
+    }
+}
+
+public struct OCRRecognitionLogListRequest: Codable, Sendable, Equatable {
+    public var status: OCRRecognitionLogStatus?
+    public var limit: Int
+    public var offset: Int
+
+    public init(status: OCRRecognitionLogStatus? = nil, limit: Int = 50, offset: Int = 0) {
+        self.status = status
+        self.limit = min(max(limit, 1), 200)
+        self.offset = max(0, offset)
+    }
+}
+
+public struct OCRRecognitionLogListResponse: Codable, Sendable, Equatable {
+    public var entries: [OCRRecognitionLogEntry]
+    public var totalCount: Int
+
+    public init(entries: [OCRRecognitionLogEntry] = [], totalCount: Int = 0) {
+        self.entries = entries
+        self.totalCount = max(0, totalCount)
+    }
+}
+
+public struct OCRRecognitionResultLookupResponse: Codable, Sendable, Equatable {
+    public var entry: OCRRecognitionLogEntry
+    public var available: Bool
+    public var text: String?
+    public var message: String?
+
+    public init(
+        entry: OCRRecognitionLogEntry,
+        available: Bool,
+        text: String? = nil,
+        message: String? = nil
+    ) {
+        self.entry = entry
+        self.available = available
+        let normalizedText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.text = normalizedText.isEmpty ? nil : normalizedText
+        self.message = normalizedMessage.isEmpty ? nil : normalizedMessage
     }
 }
 

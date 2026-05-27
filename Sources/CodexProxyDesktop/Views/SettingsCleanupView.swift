@@ -17,20 +17,34 @@ struct SettingsCleanupPanel: View {
             .buttonStyle(AppActionButtonStyle(kind: .secondary))
             .disabled(self.model.reasoningCacheIsRefreshing)
         ) {
-            SettingsInsetPanel(
-                title: self.model.text(.sectionReasoningCache),
-                subtitle: self.model.text(.helperReasoningCache)
-            ) {
-                self.reasoningCacheIsolationNotice
-                self.metrics
-                self.actions
-                self.accountSummary
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsInsetPanel(
+                    title: self.model.text(.sectionReasoningCache),
+                    subtitle: self.model.text(.helperReasoningCache)
+                ) {
+                    self.reasoningCacheIsolationNotice
+                    self.metrics
+                    self.actions
+                    self.accountSummary
+                }
+
+                SettingsInsetPanel(
+                    title: self.model.text(.sectionDiagnosticRequestBodies),
+                    subtitle: self.model.text(.helperDiagnosticRequestBodiesCleanup)
+                ) {
+                    self.diagnosticRequestBodyNotice
+                    self.diagnosticMetrics
+                    self.diagnosticActions
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .onAppear {
             if self.model.reasoningCacheSummary.totalCount == 0 {
                 self.refresh()
+            }
+            if self.model.diagnosticRequestBodySummary.totalCount == 0 {
+                Task { await self.model.loadDiagnosticRequestBodySummary() }
             }
         }
     }
@@ -98,6 +112,69 @@ struct SettingsCleanupPanel: View {
         }
     }
 
+    private var diagnosticRequestBodyNotice: some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+
+        return HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.warning)
+                .frame(width: 16, height: 16)
+            Text(self.model.text(.helperDiagnosticRequestBodySensitiveData))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(palette.warningSoft.opacity(self.colorScheme == .dark ? 0.34 : 0.62))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(palette.warning.opacity(self.colorScheme == .dark ? 0.34 : 0.22), lineWidth: 1)
+        )
+    }
+
+    private var diagnosticMetrics: some View {
+        LazyVGrid(columns: self.metricColumns, spacing: 10) {
+            MetricTile(
+                label: self.model.text(.labelDiagnosticRequestBodiesTotal),
+                value: "\(self.model.diagnosticRequestBodySummary.totalCount)",
+                footnote: self.model.text(.sectionDiagnosticRequestBodies),
+                tone: .warning,
+                symbol: "doc.text.magnifyingglass",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelDiagnosticRequestBodiesSize),
+                value: self.model.diagnosticRequestBodySizeText(self.model.diagnosticRequestBodySummary.totalBytes),
+                footnote: self.model.text(.labelDiagnosticRequestBodiesSize),
+                tone: .neutral,
+                symbol: "internaldrive",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelDiagnosticRequestBodiesExpired),
+                value: "\(self.model.diagnosticRequestBodySummary.expiredCount)",
+                footnote: self.model.text(.actionClearExpiredDiagnosticRequestBodies),
+                tone: self.model.diagnosticRequestBodySummary.expiredCount > 0 ? .warning : .neutral,
+                symbol: "clock.badge.exclamationmark",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelDiagnosticRequestBodiesNewest),
+                value: self.model.reasoningCacheTimestampText(self.model.diagnosticRequestBodySummary.newestCreatedAt),
+                footnote: self.model.text(.labelLastRefreshed),
+                tone: .neutral,
+                symbol: "clock.arrow.circlepath",
+                compact: true
+            )
+        }
+    }
+
     private var actions: some View {
         VStack(alignment: .leading, spacing: 12) {
             ViewThatFits(in: .horizontal) {
@@ -125,6 +202,39 @@ struct SettingsCleanupPanel: View {
                     self.clearOlderButton
                     self.clearAccountButton
                     self.clearAllButton
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var diagnosticActions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FormFieldPanel(title: self.model.text(.labelDiagnosticRequestBodiesOlderThan)) {
+                Picker(
+                    self.model.text(.labelDiagnosticRequestBodiesOlderThan),
+                    selection: self.$model.diagnosticRequestBodyOlderThanSeconds
+                ) {
+                    ForEach(ReasoningCacheOlderThanPreset.allCases) { preset in
+                        Text(self.model.reasoningCacheOlderThanLabel(preset.rawValue)).tag(preset.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(self.model.diagnosticRequestBodyIsClearing)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    self.clearExpiredDiagnosticButton
+                    self.clearOlderDiagnosticButton
+                    self.clearAllDiagnosticButton
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    self.clearExpiredDiagnosticButton
+                    self.clearOlderDiagnosticButton
+                    self.clearAllDiagnosticButton
                 }
             }
         }
@@ -199,6 +309,30 @@ struct SettingsCleanupPanel: View {
         .disabled(!self.model.reasoningCacheHasEntries || self.model.reasoningCacheIsClearing)
     }
 
+    private var clearExpiredDiagnosticButton: some View {
+        Button(self.model.text(.actionClearExpiredDiagnosticRequestBodies)) {
+            Task { await self.model.clearExpiredDiagnosticRequestBodies() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(self.model.diagnosticRequestBodyIsClearing)
+    }
+
+    private var clearOlderDiagnosticButton: some View {
+        Button(self.model.text(.actionClearDiagnosticRequestBodiesOlderThan)) {
+            Task { await self.model.clearDiagnosticRequestBodiesOlderThanSelectedPreset() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(!self.model.diagnosticRequestBodyHasEntries || self.model.diagnosticRequestBodyIsClearing)
+    }
+
+    private var clearAllDiagnosticButton: some View {
+        Button(self.model.text(.actionClearAllDiagnosticRequestBodies)) {
+            Task { await self.model.clearAllDiagnosticRequestBodies() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .danger))
+        .disabled(!self.model.diagnosticRequestBodyHasEntries || self.model.diagnosticRequestBodyIsClearing)
+    }
+
     private var accountSummary: some View {
         FormFieldPanel(title: self.model.text(.labelAccounts)) {
             if self.model.reasoningCacheAccountOptions.isEmpty {
@@ -236,7 +370,10 @@ struct SettingsCleanupPanel: View {
     ]
 
     private func refresh() {
-        Task { await self.model.loadReasoningCacheSummary() }
+        Task {
+            await self.model.loadReasoningCacheSummary()
+            await self.model.loadDiagnosticRequestBodySummary()
+        }
     }
 }
 #endif

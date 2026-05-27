@@ -265,6 +265,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelOCRTimeout
     case labelOCRMaxImageSize
     case labelOCRDebugMode
+    case labelOCRRecognitionStatus
+    case labelOCRRecognitionImage
+    case labelOCRImageHash
+    case labelOCRCacheHit
+    case labelOCRResult
     case labelLanguage
     case labelTheme
     case labelDisplay
@@ -358,6 +363,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionGeminiOAuth
     case sectionOCRModel
     case sectionOCRCache
+    case sectionOCRRecognitionLogs
+    case ocrCacheLogsWindowTitle
+    case ocrCacheLogsWindowSubtitle
+    case sectionDiagnosticLogging
+    case sectionDiagnosticRequestBodies
     case sectionOutboundProxy
     case sectionBehavior
     case sectionService
@@ -470,6 +480,16 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionClearOCRCacheOlderThan
     case actionClearAllOCRCache
     case actionClearOCRCacheConfirm
+    case actionRefreshOCRRecognitionLogs
+    case actionViewOCRResult
+    case actionOpenOCRCacheLogs
+    case actionClearExpiredDiagnosticRequestBodies
+    case actionClearDiagnosticRequestBodiesOlderThan
+    case actionClearAllDiagnosticRequestBodies
+    case actionClearDiagnosticRequestBodiesConfirm
+    case actionViewDiagnosticRequestBody
+    case actionCopyDiagnosticRequestBody
+    case actionSaveDiagnosticRequestBody
     case actionTestProxy
     case actionOpenHelp
     case actionSendTest
@@ -516,6 +536,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case placeholderNoProxyAPIKeys
     case placeholderNoProxyAPIKeyUsage
     case placeholderProxyAPIKeyNoCompatibleAccounts
+    case placeholderNoOCRRecognitionLogs
     case helperAppearanceAppliesImmediately
     case helperThemeFollowsSystem
     case helperLanguageFollowsSystem
@@ -573,6 +594,14 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperOCRModelSettings
     case helperOCRCache
     case helperOCRCachePrivacy
+    case helperOCRRecognitionLogs
+    case helperOCRRecognitionLogPrivacy
+    case helperOCRResultUnavailable
+    case helperDiagnosticRequestBodyCapture
+    case helperDiagnosticRequestBodyCapturePrivacy
+    case helperDiagnosticRequestBodiesCleanup
+    case helperDiagnosticRequestBodySensitiveData
+    case helperDiagnosticRequestBodyUnavailable
     case helperImageEditInputs
     case helperAnthropicConnection
     case helperGeminiConnection
@@ -763,6 +792,13 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorReasoningCacheClearFailed
     case errorOCRCacheFailed
     case errorOCRCacheClearFailed
+    case errorDiagnosticRequestBodyUnavailable
+    case errorDiagnosticRequestBodySaveFailed
+    case statusOCRAll
+    case statusOCRSkipped
+    case statusOCRCacheHit
+    case statusOCRRecognized
+    case statusOCRFailed
     case warningAuthImportPartialFailure
     case successDaemonStarted
     case successDaemonStopped
@@ -812,6 +848,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successRequestLogsExported
     case successReasoningCacheCleared
     case successOCRCacheCleared
+    case successDiagnosticRequestBodiesCleared
+    case successCopiedDiagnosticRequestBody
+    case successDiagnosticRequestBodySaved
     case successHostSaved
     case successAccountEnabled
     case successAccountDisabled
@@ -835,6 +874,17 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelReasoningCacheNewest
     case labelReasoningCacheAccount
     case labelReasoningCacheOlderThan
+    case labelDiagnosticRequestBodyCapture
+    case labelDiagnosticRetentionDays
+    case labelDiagnosticMaxBodySizeMB
+    case labelDiagnosticCaptureJSONOnly
+    case labelDiagnosticRequestBodiesTotal
+    case labelDiagnosticRequestBodiesSize
+    case labelDiagnosticRequestBodiesExpired
+    case labelDiagnosticRequestBodiesNewest
+    case labelDiagnosticRequestBodiesOlderThan
+    case labelDiagnosticBodyHash
+    case labelDiagnosticPrefixHash
     case confirmClearReasoningCacheExpiredTitle
     case confirmClearReasoningCacheExpiredMessage
     case confirmClearReasoningCacheAccountTitle
@@ -846,6 +896,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case confirmClearOCRCacheOlderThanTitle
     case confirmClearOCRCacheAllTitle
     case confirmClearOCRCacheAllMessage
+    case confirmClearDiagnosticRequestBodiesExpiredTitle
+    case confirmClearDiagnosticRequestBodiesExpiredMessage
+    case confirmClearDiagnosticRequestBodiesOlderThanTitle
+    case confirmClearDiagnosticRequestBodiesAllTitle
+    case confirmClearDiagnosticRequestBodiesAllMessage
 }
 
 public enum OperationContext: String, Sendable {
@@ -2160,6 +2215,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRTimeout: "Timeout (seconds)",
             .labelOCRMaxImageSize: "Max Image Size (bytes)",
             .labelOCRDebugMode: "OCR Debug Mode",
+            .labelOCRRecognitionStatus: "Status",
+            .labelOCRRecognitionImage: "Image",
+            .labelOCRImageHash: "Image Hash",
+            .labelOCRCacheHit: "Cache Hit",
+            .labelOCRResult: "OCR Result",
             .labelLanguage: "Language",
             .labelTheme: "Theme",
             .labelDisplay: "Display",
@@ -2229,6 +2289,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR Model",
             .sectionOCRCache: "OCR Cache",
+            .sectionOCRRecognitionLogs: "Recognition Logs",
+            .ocrCacheLogsWindowTitle: "OCR Cache & Recognition Logs",
+            .ocrCacheLogsWindowSubtitle: "Inspect encrypted OCR cache metadata, clear cached results, and review recent recognition attempts.",
+            .sectionDiagnosticLogging: "Diagnostic Logging",
+            .sectionDiagnosticRequestBodies: "Request Body Diagnostics",
             .sectionOutboundProxy: "Outbound Proxy",
             .sectionBehavior: "Behavior",
             .sectionService: "Service",
@@ -2341,6 +2406,16 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearOCRCacheOlderThan: "Clear Older Than",
             .actionClearAllOCRCache: "Clear All",
             .actionClearOCRCacheConfirm: "Clear OCR Cache",
+            .actionRefreshOCRRecognitionLogs: "Refresh Logs",
+            .actionViewOCRResult: "View Result",
+            .actionOpenOCRCacheLogs: "View OCR Cache & Logs",
+            .actionClearExpiredDiagnosticRequestBodies: "Clear Expired",
+            .actionClearDiagnosticRequestBodiesOlderThan: "Clear Older Than",
+            .actionClearAllDiagnosticRequestBodies: "Clear All",
+            .actionClearDiagnosticRequestBodiesConfirm: "Clear Diagnostics",
+            .actionViewDiagnosticRequestBody: "View Upstream Request Body",
+            .actionCopyDiagnosticRequestBody: "Copy Request Body",
+            .actionSaveDiagnosticRequestBody: "Save As",
             .actionTestProxy: "Test Proxy",
             .actionOpenHelp: "Help",
             .actionSendTest: "Send Test",
@@ -2387,6 +2462,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoProxyAPIKeys: "No local proxy API keys yet.",
             .placeholderNoProxyAPIKeyUsage: "No API key usage recorded in the selected range.",
             .placeholderProxyAPIKeyNoCompatibleAccounts: "No enabled accounts are compatible with the current data source.",
+            .placeholderNoOCRRecognitionLogs: "No OCR recognition logs yet.",
             .helperAppearanceAppliesImmediately: "Language and theme changes apply immediately and stay local to this desktop app.",
             .helperThemeFollowsSystem: "Follow System uses the current macOS appearance.",
             .helperLanguageFollowsSystem: "Follow System uses your current macOS language preference.",
@@ -2444,6 +2520,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperOCRModelSettings: "Configure an independent OpenAI-compatible OCR model. It runs only when an account is marked as not supporting image context.",
             .helperOCRCache: "Encrypted OCR result cache keyed by image content hash. It lets the same image reuse one recognition result across text-only model accounts.",
             .helperOCRCachePrivacy: "Only the image SHA-256 hash, safe metadata, and encrypted OCR text are stored. Original images, URLs, base64 payloads, and API keys are not stored or shown here.",
+            .helperOCRRecognitionLogs: "Recent OCR attempts with safe metadata. Use this to tell whether a request recognized, reused, skipped, or failed OCR.",
+            .helperOCRRecognitionLogPrivacy: "Logs store endpoint, account, model, image number, SHA-256 hash, MIME, size, status, cache hit, latency, and short error only. OCR text is loaded on demand from the encrypted OCR cache.",
+            .helperOCRResultUnavailable: "OCR cache has been cleared, so the recognized text can no longer be viewed from this log.",
+            .helperDiagnosticRequestBodyCapture: "When enabled, the proxy stores the final upstream JSON request body before sending it so cache-prefix issues can be inspected later.",
+            .helperDiagnosticRequestBodyCapturePrivacy: "This is off by default. Captured request bodies are encrypted on disk and may contain prompts, OCR context, reasoning_content, tool arguments, or image base64.",
+            .helperDiagnosticRequestBodiesCleanup: "Manage encrypted full upstream request bodies captured only while diagnostic logging is enabled.",
+            .helperDiagnosticRequestBodySensitiveData: "Request body diagnostics can contain sensitive prompts, OCR context, reasoning_content, tool arguments, and image base64. Keep this off unless you are actively debugging.",
+            .helperDiagnosticRequestBodyUnavailable: "The encrypted request body file is unavailable or this diagnostic row only contains safe metadata.",
             .helperImageEditInputs: "Choose one or more PNG, JPEG, or WebP images for the Images edits request. The preview shows only file summaries, not image bytes.",
             .helperAnthropicConnection: "Point Claude Code to the root address. The same Anthropic-routed local API key can also be used by Codex or another OpenAI-compatible client against the OpenAI-compatible base URL when you want requests to stay on the Anthropic account pool.",
             .helperGeminiConnection: "Point Gemini CLI to the proxy root through `GOOGLE_GEMINI_BASE_URL`, and reuse the same local API key through `GEMINI_API_KEY`. Gemini CLI requests now execute only through accounts imported from `Google / Gemini Login`. `Google Gemini Compatible` remains available for API-key compatibility routes, but it is no longer used as the Gemini CLI backend path.",
@@ -2634,6 +2718,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorReasoningCacheClearFailed: "Reasoning cache cleanup failed",
             .errorOCRCacheFailed: "OCR cache failed to load",
             .errorOCRCacheClearFailed: "OCR cache cleanup failed",
+            .errorDiagnosticRequestBodyUnavailable: "Request body diagnostic unavailable",
+            .errorDiagnosticRequestBodySaveFailed: "Request body save failed",
+            .statusOCRAll: "All",
+            .statusOCRSkipped: "Skipped",
+            .statusOCRCacheHit: "Cache Hit",
+            .statusOCRRecognized: "Recognized",
+            .statusOCRFailed: "Failed",
             .successDaemonStarted: "Daemon started",
             .successDaemonStopped: "Daemon stopped",
             .successAuthImported: "Current auth imported",
@@ -2683,6 +2774,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "Request logs exported",
             .successReasoningCacheCleared: "Reasoning cache cleared",
             .successOCRCacheCleared: "OCR cache cleared",
+            .successDiagnosticRequestBodiesCleared: "Request body diagnostics cleared",
+            .successCopiedDiagnosticRequestBody: "Request body copied",
+            .successDiagnosticRequestBodySaved: "Request body saved",
             .successHostSaved: "Remote host saved",
             .successAccountEnabled: "Account enabled",
             .successAccountDisabled: "Account disabled",
@@ -2700,6 +2794,17 @@ public struct LocalizationStore: Sendable, Equatable {
             .successProxyAPIKeyPrimaryChanged: "Primary API key changed",
             .successKeepAwakeEnabled: "Keep awake enabled",
             .successKeepAwakeDisabled: "Keep awake disabled",
+            .labelDiagnosticRequestBodyCapture: "Capture Request Bodies",
+            .labelDiagnosticRetentionDays: "Retention Days",
+            .labelDiagnosticMaxBodySizeMB: "Max Body Size (MB)",
+            .labelDiagnosticCaptureJSONOnly: "JSON Only",
+            .labelDiagnosticRequestBodiesTotal: "Total",
+            .labelDiagnosticRequestBodiesSize: "Size",
+            .labelDiagnosticRequestBodiesExpired: "Expired",
+            .labelDiagnosticRequestBodiesNewest: "Newest",
+            .labelDiagnosticRequestBodiesOlderThan: "Older Than",
+            .labelDiagnosticBodyHash: "Body SHA-256",
+            .labelDiagnosticPrefixHash: "Prefix SHA-256",
             .confirmClearReasoningCacheExpiredTitle: "Clear expired reasoning cache?",
             .confirmClearReasoningCacheExpiredMessage: "Expired reasoning backfill entries will be removed. Active cache entries remain available for restart recovery.",
             .confirmClearReasoningCacheAccountTitle: "Clear this account's reasoning cache?",
@@ -2711,6 +2816,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearOCRCacheOlderThanTitle: "Clear older OCR cache?",
             .confirmClearOCRCacheAllTitle: "Clear all OCR cache?",
             .confirmClearOCRCacheAllMessage: "All encrypted OCR result cache entries will be removed. This does not delete accounts, API keys, request logs, or original images.",
+            .confirmClearDiagnosticRequestBodiesExpiredTitle: "Clear expired request body diagnostics?",
+            .confirmClearDiagnosticRequestBodiesExpiredMessage: "Expired encrypted request body files and their metadata will be removed.",
+            .confirmClearDiagnosticRequestBodiesOlderThanTitle: "Clear older request body diagnostics?",
+            .confirmClearDiagnosticRequestBodiesAllTitle: "Clear all request body diagnostics?",
+            .confirmClearDiagnosticRequestBodiesAllMessage: "All encrypted request body diagnostic files and metadata will be removed. Request log rows remain, but their full request bodies can no longer be viewed.",
         ],
         .zhHans: [
             .brandName: "AI Coding Proxy",
@@ -2887,6 +2997,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRTimeout: "超时时间（秒）",
             .labelOCRMaxImageSize: "最大图片大小（字节）",
             .labelOCRDebugMode: "OCR 调试模式",
+            .labelOCRRecognitionStatus: "状态",
+            .labelOCRRecognitionImage: "图片",
+            .labelOCRImageHash: "图片哈希",
+            .labelOCRCacheHit: "缓存命中",
+            .labelOCRResult: "OCR 结果",
             .labelLanguage: "语言",
             .labelTheme: "主题",
             .labelDisplay: "显示",
@@ -2928,6 +3043,17 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelReasoningCacheNewest: "最近使用",
             .labelReasoningCacheAccount: "账号",
             .labelReasoningCacheOlderThan: "早于",
+            .labelDiagnosticRequestBodyCapture: "保存请求体诊断",
+            .labelDiagnosticRetentionDays: "保留天数",
+            .labelDiagnosticMaxBodySizeMB: "最大请求体（MB）",
+            .labelDiagnosticCaptureJSONOnly: "仅保存 JSON",
+            .labelDiagnosticRequestBodiesTotal: "记录数",
+            .labelDiagnosticRequestBodiesSize: "占用空间",
+            .labelDiagnosticRequestBodiesExpired: "已过期",
+            .labelDiagnosticRequestBodiesNewest: "最近记录",
+            .labelDiagnosticRequestBodiesOlderThan: "早于",
+            .labelDiagnosticBodyHash: "请求体 SHA-256",
+            .labelDiagnosticPrefixHash: "前缀 SHA-256",
             .sectionRuntime: "运行概览",
             .sectionTraffic: "流量统计",
             .sectionLatestActivity: "最近活动",
@@ -2956,6 +3082,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR 模型",
             .sectionOCRCache: "OCR 缓存",
+            .sectionOCRRecognitionLogs: "识别日志",
+            .ocrCacheLogsWindowTitle: "OCR 缓存与识别日志",
+            .ocrCacheLogsWindowSubtitle: "查看加密 OCR 缓存元数据、清理识别结果缓存，并排查最近的图片识别记录。",
+            .sectionDiagnosticLogging: "诊断日志",
+            .sectionDiagnosticRequestBodies: "请求体诊断数据",
             .sectionOutboundProxy: "出站代理",
             .sectionBehavior: "行为",
             .sectionService: "服务",
@@ -3068,6 +3199,16 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearOCRCacheOlderThan: "清理早于",
             .actionClearAllOCRCache: "全部清理",
             .actionClearOCRCacheConfirm: "确认清理 OCR 缓存",
+            .actionRefreshOCRRecognitionLogs: "刷新日志",
+            .actionViewOCRResult: "查看结果",
+            .actionOpenOCRCacheLogs: "查看 OCR 缓存与识别日志",
+            .actionClearExpiredDiagnosticRequestBodies: "清理过期",
+            .actionClearDiagnosticRequestBodiesOlderThan: "清理早于",
+            .actionClearAllDiagnosticRequestBodies: "全部清理",
+            .actionClearDiagnosticRequestBodiesConfirm: "确认清理",
+            .actionViewDiagnosticRequestBody: "查看上游请求体",
+            .actionCopyDiagnosticRequestBody: "复制请求体",
+            .actionSaveDiagnosticRequestBody: "另存为",
             .actionTestProxy: "测试代理",
             .actionOpenHelp: "帮助",
             .actionSendTest: "发送测试",
@@ -3114,6 +3255,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .placeholderNoProxyAPIKeys: "当前还没有本地代理 API Key。",
             .placeholderNoProxyAPIKeyUsage: "所选时间范围内还没有 API Key 用量记录。",
             .placeholderProxyAPIKeyNoCompatibleAccounts: "当前数据源下没有可选的启用账号。",
+            .placeholderNoOCRRecognitionLogs: "还没有 OCR 识别日志。",
             .helperAppearanceAppliesImmediately: "语言和主题切换会立即生效，并且只保存在本机桌面应用中。",
             .helperThemeFollowsSystem: "跟随系统会使用当前 macOS 的外观设置。",
             .helperLanguageFollowsSystem: "跟随系统会使用当前 macOS 的语言偏好。",
@@ -3171,6 +3313,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperOCRModelSettings: "配置独立的 OpenAI 兼容 OCR 模型。只有账号标记为不支持图片上下文，且请求包含图片时才会调用。",
             .helperOCRCache: "按图片内容哈希索引的加密 OCR 结果缓存。相同图片可在不同纯文本模型账号之间复用同一次识别结果。",
             .helperOCRCachePrivacy: "这里只保存图片 SHA-256 哈希、安全元数据和加密后的 OCR 文本。不会保存或展示原图、URL、base64 内容或 API Key。",
+            .helperOCRRecognitionLogs: "最近的 OCR 尝试记录，用来判断请求是新识别、命中缓存、跳过还是失败。",
+            .helperOCRRecognitionLogPrivacy: "日志只保存 endpoint、账号、模型、图片序号、SHA-256 哈希、MIME、大小、状态、缓存命中、耗时和短错误摘要。OCR 正文只会按需从加密缓存读取。",
+            .helperOCRResultUnavailable: "OCR 缓存已清理，无法从这条日志查看识别正文。",
+            .helperDiagnosticRequestBodyCapture: "开启后，代理会在真正发往上游前保存最终上游 JSON 请求体，用于排查缓存前缀是否稳定。",
+            .helperDiagnosticRequestBodyCapturePrivacy: "默认关闭。保存的请求体会加密落盘，但可能包含提示词、OCR 上下文、reasoning_content、工具参数或图片 base64。",
+            .helperDiagnosticRequestBodiesCleanup: "管理仅在诊断日志开启时捕获的加密完整上游请求体。",
+            .helperDiagnosticRequestBodySensitiveData: "请求体诊断可能包含敏感提示词、OCR 上下文、reasoning_content、工具参数和图片 base64。除非正在调试，请保持关闭。",
+            .helperDiagnosticRequestBodyUnavailable: "加密请求体文件不可用，或这条诊断记录只保存了安全元数据。",
             .helperImageEditInputs: "选择一张或多张 PNG、JPEG 或 WebP 图片用于 Images edits 请求。预览区只展示文件摘要，不展示图片二进制内容。",
             .helperAnthropicConnection: "Claude Code 只需要使用根地址接入；如果你希望 Codex 或其它 OpenAI-compatible 客户端也固定走 Anthropic 账号池，也可以在 OpenAI 兼容 Base URL 上复用这把 Anthropic 路由的本地 API Key。",
             .helperGeminiConnection: "Gemini CLI 通过 `GOOGLE_GEMINI_BASE_URL` 指向代理根地址，并通过 `GEMINI_API_KEY` 复用同一份本地 API Key。Gemini CLI 请求现在只会通过账号页 `Google / Gemini Login` 导入的账号执行。`Google Gemini Compatible` 仍可用于 API key 兼容路由，但不再作为 Gemini CLI 的后端路径。",
@@ -3361,6 +3511,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorReasoningCacheClearFailed: "Reasoning 缓存清理失败",
             .errorOCRCacheFailed: "OCR 缓存加载失败",
             .errorOCRCacheClearFailed: "OCR 缓存清理失败",
+            .errorDiagnosticRequestBodyUnavailable: "请求体诊断不可用",
+            .errorDiagnosticRequestBodySaveFailed: "请求体保存失败",
+            .statusOCRAll: "全部",
+            .statusOCRSkipped: "已跳过",
+            .statusOCRCacheHit: "缓存命中",
+            .statusOCRRecognized: "已识别",
+            .statusOCRFailed: "失败",
             .successDaemonStarted: "服务已启动",
             .successDaemonStopped: "服务已停止",
             .successAuthImported: "当前授权已导入",
@@ -3410,6 +3567,9 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "请求日志已导出",
             .successReasoningCacheCleared: "Reasoning 缓存已清理",
             .successOCRCacheCleared: "OCR 缓存已清理",
+            .successDiagnosticRequestBodiesCleared: "请求体诊断数据已清理",
+            .successCopiedDiagnosticRequestBody: "请求体已复制",
+            .successDiagnosticRequestBodySaved: "请求体已保存",
             .successHostSaved: "远程主机已保存",
             .successAccountEnabled: "账号已启用",
             .successAccountDisabled: "账号已停用",
@@ -3438,6 +3598,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearOCRCacheOlderThanTitle: "清理较早的 OCR 缓存？",
             .confirmClearOCRCacheAllTitle: "清理全部 OCR 缓存？",
             .confirmClearOCRCacheAllMessage: "将删除所有加密 OCR 结果缓存。不会删除账号、API Key、请求日志或原始图片。",
+            .confirmClearDiagnosticRequestBodiesExpiredTitle: "清理过期请求体诊断数据？",
+            .confirmClearDiagnosticRequestBodiesExpiredMessage: "将删除已过期的加密请求体文件和对应元数据。",
+            .confirmClearDiagnosticRequestBodiesOlderThanTitle: "清理较早的请求体诊断数据？",
+            .confirmClearDiagnosticRequestBodiesAllTitle: "清理全部请求体诊断数据？",
+            .confirmClearDiagnosticRequestBodiesAllMessage: "将删除所有加密请求体诊断文件和元数据。请求日志行会保留，但之后无法再查看完整请求体。",
         ],
     ]
 }

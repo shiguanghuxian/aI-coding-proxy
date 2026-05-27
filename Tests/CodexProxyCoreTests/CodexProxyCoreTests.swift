@@ -23,6 +23,45 @@ final class CodexProxyCoreTests: XCTestCase {
         Self.setGeminiOAuthTestCredentials()
     }
 
+    func testAdminEventHubBroadcastsRequestLoggedToMultipleSubscribers() async throws {
+        let hub = AdminEventHub()
+        let firstStream = await hub.subscribe()
+        let secondStream = await hub.subscribe()
+        var firstIterator = firstStream.makeAsyncIterator()
+        var secondIterator = secondStream.makeAsyncIterator()
+        let firstTask = Task { await firstIterator.next() }
+        let secondTask = Task { await secondIterator.next() }
+
+        await hub.publishRequestLogged(requestLogID: 42)
+
+        let firstValue = await firstTask.value
+        let secondValue = await secondTask.value
+        let first = try XCTUnwrap(firstValue)
+        let second = try XCTUnwrap(secondValue)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.type, .requestLogged)
+        XCTAssertEqual(first.requestLogID, 42)
+    }
+
+    func testAdminEventJSONContainsOnlySafeMetadata() throws {
+        let event = AdminEvent(
+            id: "7",
+            sequence: 7,
+            type: .requestLogged,
+            createdAt: 1_710_000_000,
+            requestLogID: 99
+        )
+        let data = try Helpers.encodeJSON(event, pretty: false)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(Set(object.keys), Set(["id", "sequence", "type", "created_at", "request_log_id"]))
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("prompt"))
+        XCTAssertFalse(text.contains("apiKey"))
+        XCTAssertFalse(text.contains("reasoning_content"))
+        XCTAssertFalse(text.contains("body"))
+    }
+
     func testNormalizeLegacyAuthJSON() throws {
         let legacy = """
         {
@@ -114,6 +153,189 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertTrue(config.ocrModel.debugMode)
         XCTAssertTrue(config.ocrModel.prompt.contains("你是一个专业的图片内容识别助手"))
         XCTAssertTrue(config.ocrModel.prompt.contains("[OCR识别结果]"))
+    }
+
+    func testDiagnosticRequestBodyCaptureConfigDecodesSnakeCaseAndDefaultsDisabled() throws {
+        XCTAssertFalse(AppConfig().diagnosticRequestBodyCapture.enabled)
+        XCTAssertEqual(
+            AppConfig().diagnosticRequestBodyCapture.retentionDays,
+            DiagnosticRequestBodyCaptureConfig.defaultRetentionDays
+        )
+        XCTAssertEqual(
+            AppConfig().diagnosticRequestBodyCapture.maxBodySizeBytes,
+            DiagnosticRequestBodyCaptureConfig.defaultMaxBodySizeBytes
+        )
+        XCTAssertTrue(AppConfig().diagnosticRequestBodyCapture.captureJSONOnly)
+
+        let json = """
+        {
+          "diagnostic_request_body_capture": {
+            "enabled": true,
+            "retention_days": 14,
+            "max_body_size_bytes": 4096,
+            "capture_json_only": false
+          }
+        }
+        """
+
+        let config = try Helpers.readJSON(AppConfig.self, from: Data(json.utf8))
+
+        XCTAssertTrue(config.diagnosticRequestBodyCapture.enabled)
+        XCTAssertEqual(config.diagnosticRequestBodyCapture.retentionDays, 14)
+        XCTAssertEqual(config.diagnosticRequestBodyCapture.maxBodySizeBytes, 4096)
+        XCTAssertFalse(config.diagnosticRequestBodyCapture.captureJSONOnly)
+    }
+
+    func testDiagnosticRequestBodyPrefixHashUsesCacheRelevantFields() throws {
+        let base: [String: Any] = [
+            "model": "deepseek-reasoner",
+            "messages": [
+                ["role": "system", "content": "stable system"],
+                ["role": "user", "content": "hello"],
+            ],
+            "tools": [
+                ["type": "function", "function": ["name": "lookup"]],
+            ],
+            "reasoning_effort": "high",
+            "temperature": 0.7,
+        ]
+        var ignoredOnlyChanged = base
+        ignoredOnlyChanged["temperature"] = 0.1
+        var toolChanged = base
+        toolChanged["tools"] = [
+            ["type": "function", "function": ["name": "search"]],
+        ]
+        var effortChanged = base
+        effortChanged["reasoning_effort"] = "low"
+
+        XCTAssertEqual(
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: base),
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: ignoredOnlyChanged)
+        )
+        XCTAssertNotEqual(
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: base),
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: toolChanged)
+        )
+        XCTAssertNotEqual(
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: base),
+            DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: effortChanged)
+        )
+    }
+
+    func testSQLiteStoreDiagnosticRequestBodiesEncryptsBodyLinksLogsAndClearsFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let bodyText = #"{"model":"deepseek-reasoner","messages":[{"role":"user","content":"secret prompt for prefix diagnosis"}],"reasoning_effort":"high"}"#
+        let body = Data(bodyText.utf8)
+        let bodyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+
+        let diagnostic = try store.insertDiagnosticRequestBody(
+            DiagnosticRequestBodyCaptureInput(
+                endpoint: "/v1/chat/completions",
+                upstreamURL: "https://api.deepseek.com/chat/completions",
+                accountKey: "acct|deepseek",
+                accountLabel: "DeepSeek",
+                model: "deepseek-reasoner",
+                actualModel: nil,
+                body: body,
+                bodyObject: bodyObject,
+                config: DiagnosticRequestBodyCaptureConfig(enabled: true, retentionDays: 1, maxBodySizeBytes: 4096),
+                createdAt: 3_000
+            )
+        )
+        XCTAssertEqual(diagnostic.status, .captured)
+        XCTAssertEqual(diagnostic.bodySHA256, Helpers.sha256(body))
+        XCTAssertEqual(diagnostic.byteCount, body.count)
+
+        let detail = try store.loadDiagnosticRequestBodyDetail(id: diagnostic.id)
+        XCTAssertTrue(detail.available)
+        XCTAssertEqual(detail.bodyText, bodyText)
+
+        let diagnosticDirectory = Paths.diagnosticRequestBodiesDirectoryURL(in: directory)
+        let files = try FileManager.default.contentsOfDirectory(at: diagnosticDirectory, includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.count, 1)
+        let encryptedText = String(decoding: try Data(contentsOf: files[0]), as: UTF8.self)
+        XCTAssertFalse(encryptedText.contains("secret prompt for prefix diagnosis"))
+        XCTAssertFalse(encryptedText.contains("deepseek-reasoner"))
+
+        let databaseText = String(decoding: try Data(contentsOf: Paths.databaseURL(in: directory)), as: UTF8.self)
+        XCTAssertFalse(databaseText.contains("secret prompt for prefix diagnosis"))
+
+        let requestLogID = try store.recordTrace(
+            ProxyRequestTrace(
+                endpoint: "/v1/chat/completions",
+                upstreamURL: "https://api.deepseek.com/chat/completions",
+                apiKeyHash: Helpers.sha256("proxy-key"),
+                accountKey: "acct|deepseek",
+                accountLabel: "DeepSeek",
+                model: "deepseek-reasoner",
+                success: true,
+                latencyMS: 42,
+                usage: UpstreamUsage(inputTokens: 10, outputTokens: 2, totalTokens: 12, cacheHitTokens: 4),
+                timestamp: Helpers.now(),
+                apiKeyValue: "proxy-key"
+            )
+        )
+        try store.linkDiagnosticRequestBody(id: diagnostic.id, requestLogID: requestLogID)
+
+        let logs = try store.loadRequestLogs(query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10))
+        let logged = try XCTUnwrap(logs.entries.first(where: { $0.id == requestLogID }))
+        XCTAssertTrue(logged.hasDiagnosticRequestBody)
+        XCTAssertEqual(try store.listDiagnosticRequestBodies(requestLogID: requestLogID).map(\.id), [diagnostic.id])
+
+        let cleared = try store.clearDiagnosticRequestBodies(
+            ClearDiagnosticRequestBodiesRequest(requestLogIDs: [requestLogID]),
+            now: 3_010
+        )
+        XCTAssertEqual(cleared.deletedCount, 1)
+        XCTAssertEqual(cleared.summary.totalCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files[0].path))
+    }
+
+    func testSQLiteStoreDiagnosticRequestBodiesSkipNonJSONAndOversizedBodies() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: SecretStore(dataDirectory: directory))
+        let nonJSON = try store.insertDiagnosticRequestBody(
+            DiagnosticRequestBodyCaptureInput(
+                endpoint: "/v1/chat/completions",
+                upstreamURL: "https://example.com/chat/completions",
+                accountKey: "acct|a",
+                accountLabel: "A",
+                model: "model",
+                actualModel: nil,
+                body: Data("not-json".utf8),
+                bodyObject: [:],
+                config: DiagnosticRequestBodyCaptureConfig(enabled: true, maxBodySizeBytes: 1024, captureJSONOnly: true),
+                createdAt: 4_000
+            )
+        )
+        let oversizedBodyText = #"{"model":"m","messages":[{"role":"user","content":""# + String(repeating: "x", count: 2_048) + #""}]}"#
+        let oversized = try store.insertDiagnosticRequestBody(
+            DiagnosticRequestBodyCaptureInput(
+                endpoint: "/v1/chat/completions",
+                upstreamURL: "https://example.com/chat/completions",
+                accountKey: "acct|a",
+                accountLabel: "A",
+                model: "model",
+                actualModel: nil,
+                body: Data(oversizedBodyText.utf8),
+                bodyObject: ["model": "m", "messages": [["role": "user", "content": "x"]]],
+                config: DiagnosticRequestBodyCaptureConfig(enabled: true, maxBodySizeBytes: 1_024, captureJSONOnly: true),
+                createdAt: 4_001
+            )
+        )
+
+        XCTAssertEqual(nonJSON.status, .skipped)
+        XCTAssertEqual(oversized.status, .skipped)
+        XCTAssertFalse(try store.loadDiagnosticRequestBodyDetail(id: nonJSON.id).available)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Paths.diagnosticRequestBodiesDirectoryURL(in: directory).path))
     }
 
     func testOCRImageContextInjectsNumberedResultsAndStripsImages() throws {
@@ -255,6 +477,81 @@ final class CodexProxyCoreTests: XCTestCase {
         let cleared = try await reloaded.clear(ClearOCRCacheRequest(expiredOnly: true), now: 1_100)
         XCTAssertEqual(cleared.deletedCount, 1)
         XCTAssertEqual(cleared.summary.totalCount, 0)
+    }
+
+    func testOCRRecognitionLogsStoreMetadataAndLookupEncryptedCacheResult() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let secretStore = SecretStore(dataDirectory: directory)
+        let store = try SQLiteStore(dataDirectory: directory, secretStore: secretStore)
+        let imageBytes = Data("ocr-log-image".utf8)
+        let imageHash = Helpers.sha256(imageBytes)
+        try store.upsertOCRResultCacheEntry(
+            imageHash: imageHash,
+            entry: OCRResultCacheEntry(
+                text: "[OCR识别结果]\n文字内容：secret OCR log text",
+                mimeType: "image/png",
+                byteCount: imageBytes.count,
+                touchedAt: 2_000,
+                expiresAt: 2_600
+            ),
+            capacity: 8
+        )
+
+        let inserted = try store.insertOCRRecognitionLog(
+            OCRRecognitionLogEntry(
+                createdAt: 2_100,
+                endpoint: "/v1/responses",
+                accountKey: "acct|ds",
+                accountLabel: "ds",
+                requestedModel: "deepseek-reasoner",
+                ocrModel: "ocr-model",
+                imageIndex: 1,
+                imageHash: imageHash,
+                mimeType: "image/png",
+                byteCount: imageBytes.count,
+                status: .recognized,
+                cacheHit: false,
+                latencyMS: 123,
+                errorSummary: nil
+            )
+        )
+        _ = try store.insertOCRRecognitionLog(
+            OCRRecognitionLogEntry(
+                createdAt: 2_101,
+                endpoint: "/v1/responses",
+                accountKey: "acct|ds",
+                accountLabel: "ds",
+                requestedModel: "deepseek-reasoner",
+                ocrModel: "ocr-model",
+                imageIndex: 2,
+                status: .failed,
+                cacheHit: false,
+                latencyMS: 4,
+                errorSummary: "OCR 返回为空"
+            )
+        )
+
+        let all = try store.listOCRRecognitionLogs(OCRRecognitionLogListRequest(limit: 10))
+        XCTAssertEqual(all.totalCount, 2)
+        let recognized = try store.listOCRRecognitionLogs(OCRRecognitionLogListRequest(status: .recognized, limit: 10))
+        XCTAssertEqual(recognized.entries.map(\.id), [inserted.id])
+        let result = try store.loadOCRRecognitionResult(logID: inserted.id, now: 2_200)
+        XCTAssertTrue(result.available)
+        XCTAssertEqual(result.text, "[OCR识别结果]\n文字内容：secret OCR log text")
+
+        _ = try store.clearOCRResultCache(ClearOCRCacheRequest(clearAll: true), now: 2_201)
+        let missing = try store.loadOCRRecognitionResult(logID: inserted.id, now: 2_202)
+        XCTAssertFalse(missing.available)
+        XCTAssertNil(missing.text)
+
+        let databaseText = String(decoding: try Data(contentsOf: Paths.databaseURL(in: directory)), as: UTF8.self)
+        XCTAssertFalse(databaseText.contains("secret OCR log text"))
+        XCTAssertFalse(databaseText.contains("ocr-log-image"))
+        XCTAssertFalse(databaseText.contains("data:image"))
+        XCTAssertFalse(databaseText.contains("base64"))
     }
 
     func testOCRImageProcessorInjectsFailureContextForUnsupportedImageFormat() async throws {

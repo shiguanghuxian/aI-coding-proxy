@@ -67,6 +67,9 @@ struct RequestLogsView: View {
         }
         .frame(minWidth: self.presentationMode == .window ? 1200 : nil, minHeight: 760)
         .compactOverlayScrollbars()
+        .sheet(isPresented: self.$model.isDiagnosticRequestBodyPresented) {
+            DiagnosticRequestBodyDetailSheet(model: self.model)
+        }
     }
 
     private var usesControlsDisclosure: Bool {
@@ -1290,6 +1293,10 @@ struct RequestLogContextMenuContent: View {
             titles.append(self.model.text(.actionCopyErrorSummary))
         }
 
+        if self.entry.hasDiagnosticRequestBody {
+            titles.append(self.model.text(.actionViewDiagnosticRequestBody))
+        }
+
         titles.append(self.model.text(.actionCopyRowCSV))
         return titles
     }
@@ -1366,12 +1373,93 @@ struct RequestLogContextMenuContent: View {
                 }
             }
 
+            if self.entry.hasDiagnosticRequestBody {
+                Button(self.model.text(.actionViewDiagnosticRequestBody)) {
+                    Task { await self.model.loadDiagnosticRequestBody(for: self.entry) }
+                }
+            }
+
             Divider()
 
             Button(self.model.text(.actionCopyRowCSV)) {
                 self.model.copyRequestLogRowCSV(self.entry)
             }
         }
+    }
+}
+
+private struct DiagnosticRequestBodyDetailSheet: View {
+    @ObservedObject var model: DesktopAppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(self.model.text(.sectionDiagnosticRequestBodies))
+                        .font(.system(size: 16, weight: .semibold))
+                    if let entry = self.model.diagnosticRequestBodyDetail?.entry {
+                        Text("\(entry.endpoint) · \(entry.actualModel ?? entry.model)")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                Button(self.model.text(.commonDismiss)) {
+                    self.model.isDiagnosticRequestBodyPresented = false
+                }
+                .buttonStyle(AppActionButtonStyle(kind: .secondary))
+            }
+
+            if let detail = self.model.diagnosticRequestBodyDetail {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(self.model.text(.labelDiagnosticBodyHash)): \(detail.entry.bodySHA256)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("\(self.model.text(.labelDiagnosticPrefixHash)): \(detail.entry.prefixSHA256)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+                if detail.available, let bodyText = detail.bodyText {
+                    ScrollView {
+                        Text(bodyText)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(12)
+                    }
+                    .frame(width: 760, height: 480)
+                    .dashboardFieldChrome()
+
+                    HStack {
+                        Button(self.model.text(.actionCopyDiagnosticRequestBody)) {
+                            self.model.copyDiagnosticRequestBody()
+                        }
+                        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+
+                        Button(self.model.text(.actionSaveDiagnosticRequestBody)) {
+                            self.model.saveDiagnosticRequestBody()
+                        }
+                        .buttonStyle(AppActionButtonStyle(kind: .primary))
+
+                        Spacer(minLength: 0)
+                    }
+                } else {
+                    Text(detail.message ?? self.model.text(.helperDiagnosticRequestBodyUnavailable))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 560, alignment: .leading)
+                        .padding(12)
+                        .dashboardFieldChrome()
+                }
+            } else {
+                ProgressView()
+                    .frame(width: 420, height: 120)
+            }
+        }
+        .padding(18)
     }
 }
 #endif

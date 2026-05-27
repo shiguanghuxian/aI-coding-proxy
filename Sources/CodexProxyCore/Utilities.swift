@@ -121,6 +121,10 @@ public enum Paths {
         dataDirectory.appendingPathComponent("client-config-backups", isDirectory: true)
     }
 
+    public static func diagnosticRequestBodiesDirectoryURL(in dataDirectory: URL) -> URL {
+        dataDirectory.appendingPathComponent("diagnostic-request-bodies", isDirectory: true)
+    }
+
 }
 
 public enum RuntimeInfo {

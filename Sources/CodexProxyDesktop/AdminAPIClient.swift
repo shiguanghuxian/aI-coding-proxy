@@ -76,9 +76,16 @@ final class AdminAPIClient {
     typealias ClearReasoningCacheHandler = @Sendable (ClearReasoningCacheRequest) async throws -> ClearReasoningCacheResult
     typealias OCRCacheSummaryHandler = @Sendable () async throws -> OCRCacheSummary
     typealias ClearOCRCacheHandler = @Sendable (ClearOCRCacheRequest) async throws -> ClearOCRCacheResult
+    typealias OCRRecognitionLogsHandler = @Sendable (OCRRecognitionLogListRequest) async throws -> OCRRecognitionLogListResponse
+    typealias OCRRecognitionResultHandler = @Sendable (Int64) async throws -> OCRRecognitionResultLookupResponse
+    typealias DiagnosticRequestBodySummaryHandler = @Sendable () async throws -> DiagnosticRequestBodySummary
+    typealias DiagnosticRequestBodiesHandler = @Sendable (Int64?) async throws -> [DiagnosticRequestBodyEntry]
+    typealias DiagnosticRequestBodyDetailHandler = @Sendable (Int64) async throws -> DiagnosticRequestBodyDetail
+    typealias ClearDiagnosticRequestBodiesHandler = @Sendable (ClearDiagnosticRequestBodiesRequest) async throws -> ClearDiagnosticRequestBodiesResult
     typealias GetStatusHandler = @Sendable () async throws -> ProxyStatus
     typealias GetStatsHandler = @Sendable () async throws -> AdminStatsSummary
     typealias GetStatsForAPIKeyHandler = @Sendable (String?) async throws -> AdminStatsSummary
+    typealias AdminEventsHandler = @Sendable () async throws -> AsyncThrowingStream<AdminEvent, Error>
     typealias SaveSettingsHandler = @Sendable (AppConfig) async throws -> AppConfig
     typealias GetSettingsHandler = @Sendable () async throws -> AppConfig
     typealias GetManagedProxySnapshotHandler = @Sendable () async throws -> ManagedProxySnapshot
@@ -123,9 +130,16 @@ final class AdminAPIClient {
     private let clearReasoningCacheHandler: ClearReasoningCacheHandler?
     private let ocrCacheSummaryHandler: OCRCacheSummaryHandler?
     private let clearOCRCacheHandler: ClearOCRCacheHandler?
+    private let ocrRecognitionLogsHandler: OCRRecognitionLogsHandler?
+    private let ocrRecognitionResultHandler: OCRRecognitionResultHandler?
+    private let diagnosticRequestBodySummaryHandler: DiagnosticRequestBodySummaryHandler?
+    private let diagnosticRequestBodiesHandler: DiagnosticRequestBodiesHandler?
+    private let diagnosticRequestBodyDetailHandler: DiagnosticRequestBodyDetailHandler?
+    private let clearDiagnosticRequestBodiesHandler: ClearDiagnosticRequestBodiesHandler?
     private let getStatusHandler: GetStatusHandler?
     private let getStatsHandler: GetStatsHandler?
     private let getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler?
+    private let adminEventsHandler: AdminEventsHandler?
     private let saveSettingsHandler: SaveSettingsHandler?
     private let getSettingsHandler: GetSettingsHandler?
     private let getManagedProxySnapshotHandler: GetManagedProxySnapshotHandler?
@@ -177,9 +191,16 @@ final class AdminAPIClient {
         clearReasoningCacheHandler: ClearReasoningCacheHandler? = nil,
         ocrCacheSummaryHandler: OCRCacheSummaryHandler? = nil,
         clearOCRCacheHandler: ClearOCRCacheHandler? = nil,
+        ocrRecognitionLogsHandler: OCRRecognitionLogsHandler? = nil,
+        ocrRecognitionResultHandler: OCRRecognitionResultHandler? = nil,
+        diagnosticRequestBodySummaryHandler: DiagnosticRequestBodySummaryHandler? = nil,
+        diagnosticRequestBodiesHandler: DiagnosticRequestBodiesHandler? = nil,
+        diagnosticRequestBodyDetailHandler: DiagnosticRequestBodyDetailHandler? = nil,
+        clearDiagnosticRequestBodiesHandler: ClearDiagnosticRequestBodiesHandler? = nil,
         getStatusHandler: GetStatusHandler? = nil,
         getStatsHandler: GetStatsHandler? = nil,
         getStatsForAPIKeyHandler: GetStatsForAPIKeyHandler? = nil,
+        adminEventsHandler: AdminEventsHandler? = nil,
         saveSettingsHandler: SaveSettingsHandler? = nil,
         getSettingsHandler: GetSettingsHandler? = nil,
         getManagedProxySnapshotHandler: GetManagedProxySnapshotHandler? = nil,
@@ -224,9 +245,16 @@ final class AdminAPIClient {
         self.clearReasoningCacheHandler = clearReasoningCacheHandler
         self.ocrCacheSummaryHandler = ocrCacheSummaryHandler
         self.clearOCRCacheHandler = clearOCRCacheHandler
+        self.ocrRecognitionLogsHandler = ocrRecognitionLogsHandler
+        self.ocrRecognitionResultHandler = ocrRecognitionResultHandler
+        self.diagnosticRequestBodySummaryHandler = diagnosticRequestBodySummaryHandler
+        self.diagnosticRequestBodiesHandler = diagnosticRequestBodiesHandler
+        self.diagnosticRequestBodyDetailHandler = diagnosticRequestBodyDetailHandler
+        self.clearDiagnosticRequestBodiesHandler = clearDiagnosticRequestBodiesHandler
         self.getStatusHandler = getStatusHandler
         self.getStatsHandler = getStatsHandler
         self.getStatsForAPIKeyHandler = getStatsForAPIKeyHandler
+        self.adminEventsHandler = adminEventsHandler
         self.saveSettingsHandler = saveSettingsHandler
         self.getSettingsHandler = getSettingsHandler
         self.getManagedProxySnapshotHandler = getManagedProxySnapshotHandler
@@ -724,6 +752,16 @@ final class AdminAPIClient {
         return try await self.controller().statsSummary(apiKey: trimmedAPIKey.isEmpty ? nil : trimmedAPIKey)
     }
 
+    func streamAdminEvents() async throws -> AsyncThrowingStream<AdminEvent, Error> {
+        if let adminEventsHandler {
+            return try await adminEventsHandler()
+        }
+        if let stream = try await self.httpAdminEventStream() {
+            return stream
+        }
+        throw ProxyError.message("Admin event stream is unavailable.")
+    }
+
     func getReasoningCacheSummary() async throws -> ReasoningCacheSummary {
         if let reasoningCacheSummaryHandler {
             return try await reasoningCacheSummaryHandler()
@@ -770,6 +808,95 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().clearOCRCache(request)
+    }
+
+    func getOCRRecognitionLogs(_ request: OCRRecognitionLogListRequest) async throws -> OCRRecognitionLogListResponse {
+        if let ocrRecognitionLogsHandler {
+            return try await ocrRecognitionLogsHandler(request)
+        }
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "\(request.limit)"),
+            URLQueryItem(name: "offset", value: "\(request.offset)"),
+        ]
+        if let status = request.status {
+            queryItems.append(URLQueryItem(name: "status", value: status.rawValue))
+        }
+        if let page: OCRRecognitionLogListResponse = try await self.httpRequest(
+            "/ocr-recognition-logs",
+            method: "GET",
+            queryItems: queryItems
+        ) {
+            return page
+        }
+        return try await self.controller().ocrRecognitionLogs(request: request)
+    }
+
+    func getOCRRecognitionResult(logID: Int64) async throws -> OCRRecognitionResultLookupResponse {
+        if let ocrRecognitionResultHandler {
+            return try await ocrRecognitionResultHandler(logID)
+        }
+        if let result: OCRRecognitionResultLookupResponse = try await self.httpRequest(
+            "/ocr-recognition-logs/\(logID)/result",
+            method: "GET"
+        ) {
+            return result
+        }
+        return try await self.controller().ocrRecognitionResult(logID: logID)
+    }
+
+    func getDiagnosticRequestBodySummary() async throws -> DiagnosticRequestBodySummary {
+        if let diagnosticRequestBodySummaryHandler {
+            return try await diagnosticRequestBodySummaryHandler()
+        }
+        if let summary: DiagnosticRequestBodySummary = try await self.httpRequest(
+            "/diagnostic-request-bodies/summary",
+            method: "GET"
+        ) {
+            return summary
+        }
+        return try await self.controller().diagnosticRequestBodySummary()
+    }
+
+    func getDiagnosticRequestBodies(requestLogID: Int64? = nil) async throws -> [DiagnosticRequestBodyEntry] {
+        if let diagnosticRequestBodiesHandler {
+            return try await diagnosticRequestBodiesHandler(requestLogID)
+        }
+        let queryItems = requestLogID.map { [URLQueryItem(name: "requestLogID", value: String($0))] } ?? []
+        if let entries: [DiagnosticRequestBodyEntry] = try await self.httpRequest(
+            "/diagnostic-request-bodies",
+            method: "GET",
+            queryItems: queryItems
+        ) {
+            return entries
+        }
+        return try await self.controller().diagnosticRequestBodies(requestLogID: requestLogID)
+    }
+
+    func getDiagnosticRequestBodyDetail(id: Int64) async throws -> DiagnosticRequestBodyDetail {
+        if let diagnosticRequestBodyDetailHandler {
+            return try await diagnosticRequestBodyDetailHandler(id)
+        }
+        if let detail: DiagnosticRequestBodyDetail = try await self.httpRequest(
+            "/diagnostic-request-bodies/\(id)",
+            method: "GET"
+        ) {
+            return detail
+        }
+        return try await self.controller().diagnosticRequestBodyDetail(id: id)
+    }
+
+    func clearDiagnosticRequestBodies(_ request: ClearDiagnosticRequestBodiesRequest) async throws -> ClearDiagnosticRequestBodiesResult {
+        if let clearDiagnosticRequestBodiesHandler {
+            return try await clearDiagnosticRequestBodiesHandler(request)
+        }
+        if let result: ClearDiagnosticRequestBodiesResult = try await self.httpRequest(
+            "/diagnostic-request-bodies/clear",
+            method: "POST",
+            body: request
+        ) {
+            return result
+        }
+        return try await self.controller().clearDiagnosticRequestBodies(request)
     }
 
     func getProxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {
@@ -1175,6 +1302,113 @@ final class AdminAPIClient {
         }
     }
 
+    private func httpAdminEventStream(
+        allowReconnectRetry: Bool = true
+    ) async throws -> AsyncThrowingStream<AdminEvent, Error>? {
+        let context = try await self.adminRequestContext()
+        let url = Self.makeAdminURL(baseURL: context.baseURL, path: "/events")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 1_800
+        request.setValue("Bearer \(context.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+        do {
+            let (bytes, response) = try await self.session.bytes(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                if context.allowsLocalFallback {
+                    return nil
+                }
+                throw ProxyError.message("Admin event stream returned an invalid response.")
+            }
+            if httpResponse.statusCode == 401,
+               allowReconnectRetry,
+               let reconnectHandler = context.reconnectHandler
+            {
+                try await reconnectHandler()
+                return try await self.httpAdminEventStream(allowReconnectRetry: false)
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                var data = Data()
+                for try await byte in bytes {
+                    data.append(byte)
+                }
+                if (httpResponse.statusCode == 404 || httpResponse.statusCode == 405) && context.allowsLocalFallback {
+                    return nil
+                }
+                throw ProxyError.message(Self.httpErrorMessage(from: data, statusCode: httpResponse.statusCode))
+            }
+
+            return AsyncThrowingStream<AdminEvent, Error> { continuation in
+                let task = Task {
+                    var decoder = SSEIncrementalDecoder()
+                    var buffer = Data()
+                    buffer.reserveCapacity(2_048)
+
+                    func consume(_ data: Data) {
+                        for event in decoder.append(data) {
+                            guard let adminEvent = Self.adminEvent(from: event) else {
+                                continue
+                            }
+                            continuation.yield(adminEvent)
+                        }
+                    }
+
+                    do {
+                        for try await byte in bytes {
+                            try Task.checkCancellation()
+                            buffer.append(byte)
+                            if buffer.count >= 2_048 {
+                                consume(buffer)
+                                buffer.removeAll(keepingCapacity: true)
+                            }
+                        }
+                        if buffer.isEmpty == false {
+                            consume(buffer)
+                        }
+                        for event in decoder.finish() {
+                            if let adminEvent = Self.adminEvent(from: event) {
+                                continuation.yield(adminEvent)
+                            }
+                        }
+                        continuation.finish()
+                    } catch {
+                        if error is CancellationError {
+                            continuation.finish()
+                        } else {
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                }
+
+                continuation.onTermination = { @Sendable _ in
+                    task.cancel()
+                }
+            }
+        } catch let error as URLError {
+            guard Self.isRecoverableConnectionError(error) else {
+                throw error
+            }
+            if allowReconnectRetry,
+               let reconnectHandler = context.reconnectHandler
+            {
+                try await reconnectHandler()
+                return try await self.httpAdminEventStream(allowReconnectRetry: false)
+            }
+            if context.allowsLocalFallback {
+                return nil
+            }
+            throw ProxyError.message(
+                Self.adminConnectionMessage(
+                    baseURL: context.baseURL,
+                    detail: error.localizedDescription,
+                    isRemoteTarget: context.isRemoteTarget
+                )
+            )
+        }
+    }
+
     private func adminRequest(path: String, method: String, body: Encodable? = nil) async throws -> URLRequest {
         let context = try await self.adminRequestContext()
         let url = Self.makeAdminURL(baseURL: context.baseURL, path: path)
@@ -1196,6 +1430,13 @@ final class AdminAPIClient {
             guard let key = entry.key as? String else { return }
             partialResult[key.lowercased()] = "\(entry.value)"
         }
+    }
+
+    nonisolated private static func adminEvent(from event: SSEEvent) -> AdminEvent? {
+        guard event.data.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return nil
+        }
+        return try? Helpers.readJSON(AdminEvent.self, from: Data(event.data.utf8))
     }
 
     private static func collectSimpleHTTPResponse(from proxy: ProxyHTTPResponse) async throws -> SimpleHTTPResponse {

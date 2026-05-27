@@ -2,6 +2,7 @@
 import AppKit
 import CodexProxyCore
 import Foundation
+import UniformTypeIdentifiers
 
 enum ReasoningCacheOlderThanPreset: Int64, CaseIterable, Identifiable {
     case oneDay = 86_400
@@ -171,6 +172,29 @@ extension DesktopAppModel {
         }
     }
 
+    func loadOCRRecognitionLogs() async {
+        self.ocrRecognitionLogsIsRefreshing = true
+        defer { self.ocrRecognitionLogsIsRefreshing = false }
+        do {
+            self.ocrRecognitionLogPage = try await self.admin.getOCRRecognitionLogs(
+                OCRRecognitionLogListRequest(status: self.ocrRecognitionLogStatusFilter, limit: 50)
+            )
+        } catch {
+            self.present(error: error, context: .loadOCRCache)
+        }
+    }
+
+    func loadOCRRecognitionResult(for entry: OCRRecognitionLogEntry) async {
+        self.ocrRecognitionResultIsLoading = true
+        defer { self.ocrRecognitionResultIsLoading = false }
+        do {
+            self.ocrRecognitionResult = try await self.admin.getOCRRecognitionResult(logID: entry.id)
+            self.isOCRRecognitionResultPresented = true
+        } catch {
+            self.present(error: error, context: .loadOCRCache)
+        }
+    }
+
     func clearExpiredOCRCache() async {
         await self.clearOCRCache(
             request: ClearOCRCacheRequest(expiredOnly: true),
@@ -241,6 +265,138 @@ extension DesktopAppModel {
         alert.messageText = content.title
         alert.informativeText = content.informativeText
         alert.addButton(withTitle: content.actionTitle)
+        alert.addButton(withTitle: self.text(.commonCancel))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    var diagnosticRequestBodyHasEntries: Bool {
+        self.diagnosticRequestBodySummary.totalCount > 0
+    }
+
+    func diagnosticRequestBodySizeText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    func loadDiagnosticRequestBodySummary() async {
+        self.diagnosticRequestBodyIsRefreshing = true
+        defer { self.diagnosticRequestBodyIsRefreshing = false }
+        do {
+            self.diagnosticRequestBodySummary = try await self.admin.getDiagnosticRequestBodySummary()
+        } catch {
+            self.present(error: error, context: .loadRequestLogs)
+        }
+    }
+
+    func clearExpiredDiagnosticRequestBodies() async {
+        await self.clearDiagnosticRequestBodies(
+            request: ClearDiagnosticRequestBodiesRequest(expiredOnly: true),
+            title: self.text(.confirmClearDiagnosticRequestBodiesExpiredTitle),
+            message: self.text(.confirmClearDiagnosticRequestBodiesExpiredMessage)
+        )
+    }
+
+    func clearDiagnosticRequestBodiesOlderThanSelectedPreset() async {
+        let seconds = self.diagnosticRequestBodyOlderThanSeconds
+        await self.clearDiagnosticRequestBodies(
+            request: ClearDiagnosticRequestBodiesRequest(olderThanSeconds: seconds),
+            title: self.text(.confirmClearDiagnosticRequestBodiesOlderThanTitle),
+            message: self.localized(
+                zh: "将清理创建时间早于 \(self.reasoningCacheOlderThanLabel(seconds)) 的请求体诊断数据。",
+                en: "This clears request body diagnostics created more than \(self.reasoningCacheOlderThanLabel(seconds)) ago."
+            )
+        )
+    }
+
+    func clearAllDiagnosticRequestBodies() async {
+        await self.clearDiagnosticRequestBodies(
+            request: ClearDiagnosticRequestBodiesRequest(clearAll: true),
+            title: self.text(.confirmClearDiagnosticRequestBodiesAllTitle),
+            message: self.text(.confirmClearDiagnosticRequestBodiesAllMessage)
+        )
+    }
+
+    private func clearDiagnosticRequestBodies(
+        request: ClearDiagnosticRequestBodiesRequest,
+        title: String,
+        message: String
+    ) async {
+        let confirmation = DiagnosticRequestBodyClearConfirmationContent(
+            title: title,
+            informativeText: message,
+            actionTitle: self.text(.actionClearDiagnosticRequestBodiesConfirm)
+        )
+        guard self.confirmClearDiagnosticRequestBodies(confirmation) else {
+            return
+        }
+        self.diagnosticRequestBodyIsClearing = true
+        defer { self.diagnosticRequestBodyIsClearing = false }
+        do {
+            let result = try await self.admin.clearDiagnosticRequestBodies(request)
+            self.diagnosticRequestBodySummary = result.summary
+            self.publishBanner(
+                .success,
+                title: self.text(.successDiagnosticRequestBodiesCleared),
+                detail: self.localized(zh: "已清理 \(result.deletedCount) 条请求体诊断数据。", en: "Cleared \(result.deletedCount) request body diagnostics.")
+            )
+        } catch {
+            self.present(error: error, context: .clearOCRCache)
+        }
+    }
+
+    private func confirmClearDiagnosticRequestBodies(_ content: DiagnosticRequestBodyClearConfirmationContent) -> Bool {
+        if let confirmClearDiagnosticRequestBodiesHandler {
+            return confirmClearDiagnosticRequestBodiesHandler(content)
+        }
+        return self.confirmDestructiveAction(
+            title: content.title,
+            message: content.informativeText,
+            actionTitle: content.actionTitle
+        )
+    }
+
+    func loadDiagnosticRequestBody(for entry: RequestLogEntry) async {
+        guard entry.hasDiagnosticRequestBody else { return }
+        self.diagnosticRequestBodyDetailIsLoading = true
+        defer { self.diagnosticRequestBodyDetailIsLoading = false }
+        do {
+            guard let diagnosticEntry = try await self.admin.getDiagnosticRequestBodies(requestLogID: entry.id).first else {
+                self.publishRequestLogsBanner(.warning, title: self.text(.errorDiagnosticRequestBodyUnavailable), detail: nil)
+                return
+            }
+            self.diagnosticRequestBodyDetail = try await self.admin.getDiagnosticRequestBodyDetail(id: diagnosticEntry.id)
+            self.isDiagnosticRequestBodyPresented = true
+        } catch {
+            self.publishRequestLogsBanner(.error, title: self.text(.errorRequestLogsFailed), detail: error.localizedDescription)
+        }
+    }
+
+    func copyDiagnosticRequestBody() {
+        guard let bodyText = self.diagnosticRequestBodyDetail?.bodyText else { return }
+        self.copyRequestLogValue(bodyText, successTitle: self.text(.successCopiedDiagnosticRequestBody))
+    }
+
+    func saveDiagnosticRequestBody() {
+        guard let detail = self.diagnosticRequestBodyDetail,
+              let bodyText = detail.bodyText
+        else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json, .plainText]
+        panel.nameFieldStringValue = "upstream-request-\(detail.entry.id).json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try Data(bodyText.utf8).write(to: url, options: .atomic)
+            self.publishRequestLogsBanner(.success, title: self.text(.successDiagnosticRequestBodySaved), detail: nil)
+        } catch {
+            self.publishRequestLogsBanner(.error, title: self.text(.errorDiagnosticRequestBodySaveFailed), detail: error.localizedDescription)
+        }
+    }
+
+    private func confirmDestructiveAction(title: String, message: String, actionTitle: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: actionTitle)
         alert.addButton(withTitle: self.text(.commonCancel))
         return alert.runModal() == .alertFirstButtonReturn
     }

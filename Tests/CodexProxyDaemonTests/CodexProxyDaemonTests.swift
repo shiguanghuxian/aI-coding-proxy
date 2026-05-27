@@ -364,6 +364,37 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testAdminEventsRouteRequiresAuthAndReturnsSSEStream() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let unauthorized = await harness.service.handle(
+            DaemonHTTPService.Request(
+                method: "GET",
+                target: "/admin/events",
+                path: "/admin/events",
+                headers: [:],
+                body: Data()
+            ),
+            kind: .admin
+        )
+        XCTAssertEqual(unauthorized.statusCode, 401)
+
+        let response = await harness.service.handle(
+            Self.makeAdminRequest(method: "GET", path: "/admin/events", adminToken: harness.config.adminToken),
+            kind: .admin
+        )
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertTrue(response.headers["content-type"]?.contains("text/event-stream") == true)
+        guard case .stream(let stream) = response.body else {
+            return XCTFail("Expected admin events to use a streaming body.")
+        }
+        var iterator: AsyncThrowingStream<Data, Error>.Iterator? = stream.makeAsyncIterator()
+        let firstChunk = try await iterator?.next()
+        iterator = nil
+        XCTAssertEqual(String(decoding: try XCTUnwrap(firstChunk), as: UTF8.self), ": connected\n\n")
+    }
+
     func testVersionOutputUsesDisplayAndReleaseVersions() {
         XCTAssertEqual(CodexProxyDaemonMain.versionOutput(for: ["--version"]), RuntimeInfo.displayVersion)
         XCTAssertEqual(CodexProxyDaemonMain.versionOutput(for: ["--release-version"]), RuntimeInfo.releaseVersion)
@@ -953,6 +984,9 @@ final class CodexProxyDaemonTests: XCTestCase {
             let refreshed = try await harness.controller.refreshAccountUsage(id: added.id)
             XCTAssertNil(refreshed.usageError)
 
+            let eventStream = await harness.controller.adminEvents()
+            var eventIterator = eventStream.makeAsyncIterator()
+            let eventTask = Task { await eventIterator.next() }
             let response = await harness.service.handle(
                 Self.makePublicRequest(
                     path: "/v1/chat/completions",
@@ -979,6 +1013,180 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertEqual(entry.endpoint, "/v1/chat/completions")
             XCTAssertEqual(entry.upstreamURL, "\(baseURL)/chat/completions")
             XCTAssertFalse(entry.upstreamURL?.contains("/v1/") == true)
+
+            let eventValue = await eventTask.value
+            let event = try XCTUnwrap(eventValue)
+            XCTAssertEqual(event.type, .requestLogged)
+            XCTAssertEqual(event.requestLogID, entry.id)
+        }
+    }
+
+    func testDiagnosticRequestBodyCaptureStoresFinalUpstreamChatCompletionsJSON() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+        let proxyKey = config.proxyAPIKey
+        let adminToken = config.adminToken
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-reasoner"],
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "DeepSeek Diagnostics",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-deepseek-diag",
+                    enabled: true
+                )
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"deepseek-reasoner","messages":[{"role":"system","content":"stable prefix"},{"role":"user","content":"diagnostic prompt"}],"reasoning_effort":"high","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"stream":false}"#,
+                    proxyKey: proxyKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let requestLog = try XCTUnwrap(logs.entries.first(where: { $0.accountKey == added.accountKey }))
+            XCTAssertTrue(requestLog.hasDiagnosticRequestBody)
+
+            let snapshot = await probe.snapshot()
+            let finalUpstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(finalUpstreamBody.contains("diagnostic prompt"))
+
+            let listResponse = await harness.service.handle(
+                Self.makeAdminQueryRequest(
+                    path: "/admin/diagnostic-request-bodies",
+                    query: "requestLogID=\(requestLog.id)",
+                    adminToken: adminToken
+                ),
+                kind: .admin
+            )
+            let listData = try await Self.data(from: listResponse.body)
+            XCTAssertEqual(listResponse.statusCode, 200, Self.string(from: listData))
+            let diagnosticEntries = try Helpers.readJSON([DiagnosticRequestBodyEntry].self, from: listData)
+            let diagnostic = try XCTUnwrap(diagnosticEntries.first)
+            XCTAssertEqual(diagnostic.requestLogID, requestLog.id)
+            XCTAssertEqual(diagnostic.endpoint, "/v1/chat/completions")
+            XCTAssertEqual(diagnostic.upstreamURL, "\(baseURL)/chat/completions")
+            XCTAssertEqual(diagnostic.bodySHA256, Helpers.sha256(Data(finalUpstreamBody.utf8)))
+            XCTAssertFalse(diagnostic.prefixSHA256.isEmpty)
+
+            let detailResponse = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "GET",
+                    path: "/admin/diagnostic-request-bodies/\(diagnostic.id)",
+                    adminToken: adminToken
+                ),
+                kind: .admin
+            )
+            let detailData = try await Self.data(from: detailResponse.body)
+            XCTAssertEqual(detailResponse.statusCode, 200, Self.string(from: detailData))
+            let detail = try Helpers.readJSON(DiagnosticRequestBodyDetail.self, from: detailData)
+            XCTAssertTrue(detail.available)
+            XCTAssertEqual(detail.bodyText, finalUpstreamBody)
+
+            let exportData = try await harness.controller.exportRequestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours)
+            )
+            let exportText = String(decoding: exportData, as: UTF8.self)
+            XCTAssertFalse(exportText.contains("diagnostic prompt"))
+            XCTAssertFalse(exportText.contains(finalUpstreamBody))
+
+            let clearResponse = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/diagnostic-request-bodies/clear",
+                    body: #"{"requestLogIDs":[\#(requestLog.id)]}"#,
+                    adminToken: adminToken
+                ),
+                kind: .admin
+            )
+            let clearData = try await Self.data(from: clearResponse.body)
+            XCTAssertEqual(clearResponse.statusCode, 200, Self.string(from: clearData))
+            let clearResult = try Helpers.readJSON(ClearDiagnosticRequestBodiesResult.self, from: clearData)
+            XCTAssertEqual(clearResult.deletedCount, 1)
+            XCTAssertEqual(clearResult.summary.totalCount, 0)
+        }
+    }
+
+    func testDiagnosticRequestBodyCaptureDisabledDoesNotPersistRequestBodies() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let config = try await harness.controller.loadConfig()
+        XCTAssertFalse(config.diagnosticRequestBodyCapture.enabled)
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-reasoner"],
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "DeepSeek No Diagnostics",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-deepseek-no-diag",
+                    enabled: true
+                )
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"deepseek-reasoner","messages":[{"role":"user","content":"do not store this body"}],"stream":false}"#,
+                    proxyKey: config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let requestLog = try XCTUnwrap(logs.entries.first(where: { $0.accountKey == added.accountKey }))
+            XCTAssertFalse(requestLog.hasDiagnosticRequestBody)
+            let summary = try await harness.controller.diagnosticRequestBodySummary()
+            XCTAssertEqual(summary.totalCount, 0)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: Paths.diagnosticRequestBodiesDirectoryURL(in: harness.dataDirectory).path
+                )
+            )
         }
     }
 
@@ -8861,6 +9069,23 @@ final class CodexProxyDaemonTests: XCTestCase {
             ),
             capacity: 8
         )
+        let logEntry = try harness.controller.store.insertOCRRecognitionLog(
+            OCRRecognitionLogEntry(
+                createdAt: now,
+                endpoint: "/v1/responses",
+                accountKey: "acct|ocr",
+                accountLabel: "OCR Account",
+                requestedModel: "deepseek-reasoner",
+                ocrModel: "ocr-model",
+                imageIndex: 1,
+                imageHash: Helpers.sha256(Data("ocr-admin-image".utf8)),
+                mimeType: "image/png",
+                byteCount: 15,
+                status: .recognized,
+                cacheHit: false,
+                latencyMS: 88
+            )
+        )
         try harness.controller.store.upsertOCRResultCacheEntry(
             imageHash: Helpers.sha256(Data("ocr-admin-expired".utf8)),
             entry: OCRResultCacheEntry(
@@ -8903,6 +9128,36 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertEqual(clearExpired.deletedCount, 1)
         XCTAssertEqual(clearExpired.summary.totalCount, 1)
 
+        let logsResponse = await harness.service.handle(
+            Self.makeAdminQueryRequest(
+                path: "/admin/ocr-recognition-logs",
+                query: "status=recognized&limit=10",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let logsBody = try await Self.data(from: logsResponse.body)
+        XCTAssertEqual(logsResponse.statusCode, 200, Self.string(from: logsBody))
+        XCTAssertFalse(Self.string(from: logsBody).contains("admin route secret OCR text"))
+        let logs = try Helpers.readJSON(OCRRecognitionLogListResponse.self, from: logsBody)
+        XCTAssertEqual(logs.totalCount, 1)
+        XCTAssertEqual(logs.entries.first?.status, .recognized)
+        XCTAssertEqual(logs.entries.first?.imageHash, Helpers.sha256(Data("ocr-admin-image".utf8)))
+
+        let resultResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "GET",
+                path: "/admin/ocr-recognition-logs/\(logEntry.id)/result",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let resultBody = try await Self.data(from: resultResponse.body)
+        XCTAssertEqual(resultResponse.statusCode, 200, Self.string(from: resultBody))
+        let result = try Helpers.readJSON(OCRRecognitionResultLookupResponse.self, from: resultBody)
+        XCTAssertTrue(result.available)
+        XCTAssertEqual(result.text, "[OCR识别结果]\n文字内容：admin route secret OCR text")
+
         let clearAllResponse = await harness.service.handle(
             Self.makeAdminRequest(
                 method: "POST",
@@ -8917,6 +9172,20 @@ final class CodexProxyDaemonTests: XCTestCase {
         let clearAll = try Helpers.readJSON(ClearOCRCacheResult.self, from: clearAllBody)
         XCTAssertEqual(clearAll.deletedCount, 1)
         XCTAssertEqual(clearAll.summary.totalCount, 0)
+
+        let missingResultResponse = await harness.service.handle(
+            Self.makeAdminRequest(
+                method: "GET",
+                path: "/admin/ocr-recognition-logs/\(logEntry.id)/result",
+                adminToken: harness.config.adminToken
+            ),
+            kind: .admin
+        )
+        let missingResultBody = try await Self.data(from: missingResultResponse.body)
+        XCTAssertEqual(missingResultResponse.statusCode, 200, Self.string(from: missingResultBody))
+        let missingResult = try Helpers.readJSON(OCRRecognitionResultLookupResponse.self, from: missingResultBody)
+        XCTAssertFalse(missingResult.available)
+        XCTAssertNil(missingResult.text)
     }
 
     func testChatCompletionsTextOnlyAccountAppliesOCRAndCachesImageResult() async throws {

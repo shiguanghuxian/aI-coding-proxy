@@ -522,6 +522,12 @@ final class DaemonHTTPService: @unchecked Sendable {
             return self.jsonError(status: 401, message: error.localizedDescription, type: "authentication_error")
         }
 
+        if request.method == "GET",
+           let logID = self.ocrRecognitionLogResultID(from: request.path)
+        {
+            return try self.codableResponse(try await self.controller.ocrRecognitionResult(logID: logID))
+        }
+
         switch (request.method, request.path) {
         case ("GET", "/admin/status"):
             return try self.codableResponse(try await self.controller.status())
@@ -605,6 +611,8 @@ final class DaemonHTTPService: @unchecked Sendable {
         case ("POST", "/admin/proxy-test/run"):
             let payload = try self.decode(AdminProxyTestRunRequest.self, from: request.body)
             return self.fromProxyResponse(try await self.controller.adminProxyTestRun(payload))
+        case ("GET", "/admin/events"):
+            return await self.adminEventsResponse()
         case ("GET", "/admin/stats/summary"):
             return try self.codableResponse(
                 try await self.controller.statsSummary(apiKey: self.queryItems(from: request.target)["api_key"])
@@ -624,6 +632,16 @@ final class DaemonHTTPService: @unchecked Sendable {
             )
         case ("GET", "/admin/stats/request-filters"):
             return try self.codableResponse(try await self.controller.requestLogFilters(query: self.requestLogQuery(from: request)))
+        case ("GET", "/admin/diagnostic-request-bodies/summary"):
+            return try self.codableResponse(try await self.controller.diagnosticRequestBodySummary())
+        case ("GET", "/admin/diagnostic-request-bodies"):
+            let rawID = self.queryItems(from: request.target)["requestLogID"]
+                ?? self.queryItems(from: request.target)["request_log_id"]
+            let requestLogID = rawID.flatMap(Int64.init)
+            return try self.codableResponse(try await self.controller.diagnosticRequestBodies(requestLogID: requestLogID))
+        case ("POST", "/admin/diagnostic-request-bodies/clear"):
+            let payload = try self.decode(ClearDiagnosticRequestBodiesRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.clearDiagnosticRequestBodies(payload))
         case ("GET", "/admin/reasoning-cache/summary"):
             return try self.codableResponse(try await self.controller.reasoningCacheSummary())
         case ("POST", "/admin/reasoning-cache/clear"):
@@ -634,7 +652,18 @@ final class DaemonHTTPService: @unchecked Sendable {
         case ("POST", "/admin/ocr-cache/clear"):
             let payload = try self.decode(ClearOCRCacheRequest.self, from: request.body)
             return try self.codableResponse(try await self.controller.clearOCRCache(payload))
+        case ("GET", "/admin/ocr-recognition-logs"):
+            return try self.codableResponse(
+                try await self.controller.ocrRecognitionLogs(request: self.ocrRecognitionLogListRequest(from: request))
+            )
         default:
+            if request.method == "GET",
+               request.path.hasPrefix("/admin/diagnostic-request-bodies/"),
+               let rawID = request.path.split(separator: "/").last,
+               let id = Int64(rawID)
+            {
+                return try self.codableResponse(try await self.controller.diagnosticRequestBodyDetail(id: id))
+            }
             if let response = try await self.handleAccountManagementRoute(request) {
                 return response
             }
@@ -770,6 +799,56 @@ final class DaemonHTTPService: @unchecked Sendable {
         }
     }
 
+    private func adminEventsResponse() async -> Response {
+        let events = await self.controller.adminEvents()
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            let task = Task {
+                let keepaliveTask = Task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(15))
+                        guard !Task.isCancelled else { break }
+                        continuation.yield(Data(": ping\n\n".utf8))
+                    }
+                }
+
+                continuation.yield(Data(": connected\n\n".utf8))
+                for await event in events {
+                    do {
+                        continuation.yield(try Self.adminEventSSEChunk(event))
+                    } catch {
+                        continuation.yield(Data("event: error\ndata: {}\n\n".utf8))
+                    }
+                }
+
+                keepaliveTask.cancel()
+                continuation.finish()
+            }
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
+            }
+        }
+
+        return Response(
+            statusCode: 200,
+            headers: [
+                "content-type": "text/event-stream; charset=utf-8",
+                "cache-control": "no-cache",
+                "connection": "keep-alive",
+            ],
+            body: .stream(stream)
+        )
+    }
+
+    private static func adminEventSSEChunk(_ event: AdminEvent) throws -> Data {
+        let payload = try Helpers.encodeJSON(event, pretty: false)
+        var data = Data()
+        data.append(Data("event: \(event.type.rawValue)\n".utf8))
+        data.append(Data("data: ".utf8))
+        data.append(payload)
+        data.append(Data("\n\n".utf8))
+        return data
+    }
+
     static func transportSafeStream(
         _ stream: AsyncThrowingStream<Data, Error>
     ) -> AsyncThrowingStream<Data, Error> {
@@ -884,6 +963,29 @@ final class DaemonHTTPService: @unchecked Sendable {
             page: page,
             pageSize: pageSize
         )
+    }
+
+    private func ocrRecognitionLogListRequest(from request: Request) -> OCRRecognitionLogListRequest {
+        let items = self.queryItems(from: request.target)
+        let rawStatus = items["status"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let status = rawStatus.isEmpty ? nil : OCRRecognitionLogStatus(rawValue: rawStatus)
+        return OCRRecognitionLogListRequest(
+            status: status,
+            limit: items["limit"].flatMap(Int.init) ?? 50,
+            offset: items["offset"].flatMap(Int.init) ?? 0
+        )
+    }
+
+    private func ocrRecognitionLogResultID(from path: String) -> Int64? {
+        let components = path.split(separator: "/").map(String.init)
+        guard components.count == 4,
+              components[0] == "admin",
+              components[1] == "ocr-recognition-logs",
+              components[3] == "result"
+        else {
+            return nil
+        }
+        return Int64(components[2])
     }
 
     private func queryItems(from target: String) -> [String: String] {

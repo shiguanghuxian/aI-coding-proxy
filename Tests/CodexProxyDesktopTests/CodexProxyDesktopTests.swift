@@ -76,6 +76,27 @@ private final class OnboardingWindowControllerSpy: OnboardingWindowControlling {
     }
 }
 
+@MainActor
+private final class OCRCacheLogsWindowControllerSpy: OCRCacheLogsWindowControlling {
+    private(set) var showWindowCallCount = 0
+    private(set) var closeWindowCallCount = 0
+    private(set) var refreshWindowCallCount = 0
+    var onClose: (() -> Void)?
+
+    func showWindow() {
+        self.showWindowCallCount += 1
+    }
+
+    func closeWindow() {
+        self.closeWindowCallCount += 1
+        self.onClose?()
+    }
+
+    func refreshWindow() {
+        self.refreshWindowCallCount += 1
+    }
+}
+
 private enum KeepAwakeTestError: LocalizedError {
     case failed
 
@@ -578,6 +599,121 @@ private final class OCRCacheMaintenanceProbe: @unchecked Sendable {
 
     func confirmations() -> [DesktopAppModel.OCRCacheClearConfirmationContent] {
         self.lock.withLock { self.storedConfirmations }
+    }
+}
+
+private final class OCRRecognitionLogProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRequests: [OCRRecognitionLogListRequest] = []
+    private var storedResultIDs: [Int64] = []
+    private let page: OCRRecognitionLogListResponse
+    private let result: OCRRecognitionResultLookupResponse
+
+    init(page: OCRRecognitionLogListResponse, result: OCRRecognitionResultLookupResponse) {
+        self.page = page
+        self.result = result
+    }
+
+    func logs(_ request: OCRRecognitionLogListRequest) -> OCRRecognitionLogListResponse {
+        self.lock.withLock {
+            self.storedRequests.append(request)
+        }
+        return self.page
+    }
+
+    func result(id: Int64) -> OCRRecognitionResultLookupResponse {
+        self.lock.withLock {
+            self.storedResultIDs.append(id)
+        }
+        return self.result
+    }
+
+    func requests() -> [OCRRecognitionLogListRequest] {
+        self.lock.withLock { self.storedRequests }
+    }
+
+    func resultIDs() -> [Int64] {
+        self.lock.withLock { self.storedResultIDs }
+    }
+}
+
+private final class DiagnosticRequestBodyMaintenanceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSummary: DiagnosticRequestBodySummary
+    private var storedSummaryCallCount = 0
+    private var storedClearRequests: [ClearDiagnosticRequestBodiesRequest] = []
+    private var storedConfirmations: [DesktopAppModel.DiagnosticRequestBodyClearConfirmationContent] = []
+    private var storedRequestLogIDs: [Int64?] = []
+    private var storedDetailIDs: [Int64] = []
+    private let entries: [DiagnosticRequestBodyEntry]
+    private let detail: DiagnosticRequestBodyDetail
+
+    init(
+        summary: DiagnosticRequestBodySummary = DiagnosticRequestBodySummary(),
+        entries: [DiagnosticRequestBodyEntry] = [],
+        detail: DiagnosticRequestBodyDetail = DiagnosticRequestBodyDetail(entry: DiagnosticRequestBodyEntry())
+    ) {
+        self.storedSummary = summary
+        self.entries = entries
+        self.detail = detail
+    }
+
+    func summary() -> DiagnosticRequestBodySummary {
+        self.lock.withLock {
+            self.storedSummaryCallCount += 1
+            return self.storedSummary
+        }
+    }
+
+    func recordClear(
+        _ request: ClearDiagnosticRequestBodiesRequest,
+        resultSummary: DiagnosticRequestBodySummary
+    ) -> ClearDiagnosticRequestBodiesResult {
+        self.lock.withLock {
+            self.storedClearRequests.append(request)
+            self.storedSummary = resultSummary
+        }
+        return ClearDiagnosticRequestBodiesResult(deletedCount: 2, summary: resultSummary)
+    }
+
+    func recordConfirmation(_ content: DesktopAppModel.DiagnosticRequestBodyClearConfirmationContent) {
+        self.lock.withLock {
+            self.storedConfirmations.append(content)
+        }
+    }
+
+    func list(requestLogID: Int64?) -> [DiagnosticRequestBodyEntry] {
+        self.lock.withLock {
+            self.storedRequestLogIDs.append(requestLogID)
+        }
+        return self.entries
+    }
+
+    func detail(id: Int64) -> DiagnosticRequestBodyDetail {
+        self.lock.withLock {
+            self.storedDetailIDs.append(id)
+        }
+        return self.detail
+    }
+
+    func summaryCallCount() -> Int {
+        self.lock.withLock { self.storedSummaryCallCount }
+    }
+
+    func clearRequests() -> [ClearDiagnosticRequestBodiesRequest] {
+        self.lock.withLock { self.storedClearRequests }
+    }
+
+    func confirmations() -> [DesktopAppModel.DiagnosticRequestBodyClearConfirmationContent] {
+        self.lock.withLock { self.storedConfirmations }
+    }
+
+    func requestLogIDs() -> [Int64?] {
+        self.lock.withLock { self.storedRequestLogIDs }
+    }
+
+    func detailIDs() -> [Int64] {
+        self.lock.withLock { self.storedDetailIDs }
     }
 }
 
@@ -3886,14 +4022,29 @@ final class CodexProxyDesktopTests: XCTestCase {
     func testSettingsCleanupPanelDeclaresReasoningCacheMaintenanceUI() throws {
         let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
         let cleanupSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsCleanupView.swift")
+        let requestLogsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/RequestLogsView.swift")
 
         XCTAssertTrue(settingsSource.contains("SettingsCleanupPanel(model: self.model)"))
+        XCTAssertTrue(settingsSource.contains(".sectionDiagnosticLogging"))
+        XCTAssertTrue(settingsSource.contains("$model.settings.diagnosticRequestBodyCapture.enabled"))
+        XCTAssertTrue(settingsSource.contains("$model.settings.diagnosticRequestBodyCapture.retentionDays"))
+        XCTAssertTrue(settingsSource.contains("diagnosticRequestBodyCapture.maxBodySizeBytes"))
+        XCTAssertTrue(settingsSource.contains("$model.settings.diagnosticRequestBodyCapture.captureJSONOnly"))
         XCTAssertTrue(cleanupSource.contains(".sectionReasoningCache"))
         XCTAssertTrue(cleanupSource.contains(".actionClearExpiredReasoningCache"))
         XCTAssertTrue(cleanupSource.contains(".actionClearReasoningCacheByAccount"))
         XCTAssertTrue(cleanupSource.contains(".actionClearReasoningCacheOlderThan"))
         XCTAssertTrue(cleanupSource.contains(".actionClearAllReasoningCache"))
         XCTAssertTrue(cleanupSource.contains(".helperReasoningCacheAccountIsolation"))
+        XCTAssertTrue(cleanupSource.contains(".sectionDiagnosticRequestBodies"))
+        XCTAssertTrue(cleanupSource.contains(".helperDiagnosticRequestBodySensitiveData"))
+        XCTAssertTrue(cleanupSource.contains("clearExpiredDiagnosticRequestBodies"))
+        XCTAssertTrue(cleanupSource.contains("clearDiagnosticRequestBodiesOlderThanSelectedPreset"))
+        XCTAssertTrue(cleanupSource.contains("clearAllDiagnosticRequestBodies"))
+        XCTAssertTrue(requestLogsSource.contains(".actionViewDiagnosticRequestBody"))
+        XCTAssertTrue(requestLogsSource.contains("DiagnosticRequestBodyDetailSheet"))
+        XCTAssertTrue(requestLogsSource.contains("copyDiagnosticRequestBody"))
+        XCTAssertTrue(requestLogsSource.contains("saveDiagnosticRequestBody"))
         XCTAssertFalse(cleanupSource.contains("reasoning_content"))
     }
 
@@ -4107,6 +4258,278 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testOCRRecognitionLogsLoadAndResultLookupUseAdminAPI() async {
+        let entry = OCRRecognitionLogEntry(
+            id: 42,
+            createdAt: 1_776_000_000,
+            endpoint: "/v1/responses",
+            accountKey: "acct|ds",
+            accountLabel: "ds",
+            requestedModel: "deepseek-reasoner",
+            ocrModel: "ocr-model",
+            imageIndex: 1,
+            imageHash: "abcdef123456",
+            mimeType: "image/png",
+            byteCount: 256,
+            status: .cacheHit,
+            cacheHit: true,
+            latencyMS: 5
+        )
+        let page = OCRRecognitionLogListResponse(entries: [entry], totalCount: 1)
+        let result = OCRRecognitionResultLookupResponse(entry: entry, available: true, text: "[OCR识别结果]\n文字内容：hello")
+        let probe = OCRRecognitionLogProbe(page: page, result: result)
+        let admin = AdminAPIClient(
+            ocrRecognitionLogsHandler: { request in probe.logs(request) },
+            ocrRecognitionResultHandler: { id in probe.result(id: id) }
+        )
+        let model = DesktopAppModel(admin: admin)
+
+        model.ocrRecognitionLogStatusFilter = .cacheHit
+        await model.loadOCRRecognitionLogs()
+        await model.loadOCRRecognitionResult(for: entry)
+
+        XCTAssertEqual(model.ocrRecognitionLogPage, page)
+        XCTAssertEqual(probe.requests().first?.status, .cacheHit)
+        XCTAssertEqual(probe.requests().first?.limit, 50)
+        XCTAssertEqual(probe.resultIDs(), [42])
+        XCTAssertEqual(model.ocrRecognitionResult, result)
+        XCTAssertTrue(model.isOCRRecognitionResultPresented)
+        XCTAssertFalse(model.ocrRecognitionLogsIsRefreshing)
+        XCTAssertFalse(model.ocrRecognitionResultIsLoading)
+    }
+
+    @MainActor
+    func testOpenOCRCacheLogsWindowCreatesWindowRefreshesDataAndReusesController() async {
+        let summary = OCRCacheSummary(
+            totalCount: 2,
+            expiredCount: 1,
+            oldestTouchedAt: 1_776_000_000,
+            newestTouchedAt: 1_776_000_300
+        )
+        let entry = OCRRecognitionLogEntry(
+            id: 42,
+            createdAt: 1_776_000_000,
+            endpoint: "/v1/responses",
+            accountKey: "acct|ds",
+            accountLabel: "ds",
+            requestedModel: "deepseek-reasoner",
+            ocrModel: "ocr-model",
+            imageIndex: 1,
+            imageHash: "abcdef123456",
+            mimeType: "image/png",
+            byteCount: 256,
+            status: .recognized,
+            cacheHit: false,
+            latencyMS: 17
+        )
+        let page = OCRRecognitionLogListResponse(entries: [entry], totalCount: 1)
+        let ocrProbe = OCRCacheMaintenanceProbe(summary: summary)
+        let logProbe = OCRRecognitionLogProbe(
+            page: page,
+            result: OCRRecognitionResultLookupResponse(entry: entry, available: false)
+        )
+        let admin = AdminAPIClient(
+            ocrCacheSummaryHandler: { ocrProbe.summary() },
+            ocrRecognitionLogsHandler: { request in logProbe.logs(request) }
+        )
+        let windowSpy = OCRCacheLogsWindowControllerSpy()
+        var factoryCallCount = 0
+        let model = DesktopAppModel(
+            admin: admin,
+            ocrCacheLogsWindowFactory: { _ in
+                factoryCallCount += 1
+                return windowSpy
+            }
+        )
+        windowSpy.onClose = { model.handleOCRCacheLogsWindowDidClose() }
+
+        model.openOCRCacheLogsWindow()
+        await Self.waitForCondition {
+            ocrProbe.summaryCallCount() == 1 && logProbe.requests().count == 1
+        }
+
+        XCTAssertTrue(model.isOCRCacheLogsPresented)
+        XCTAssertEqual(factoryCallCount, 1)
+        XCTAssertEqual(windowSpy.showWindowCallCount, 1)
+        XCTAssertEqual(model.ocrCacheSummary, summary)
+        XCTAssertEqual(model.ocrRecognitionLogPage, page)
+
+        model.openOCRCacheLogsWindow()
+        await Self.waitForCondition {
+            ocrProbe.summaryCallCount() == 2 && logProbe.requests().count == 2
+        }
+
+        XCTAssertEqual(factoryCallCount, 1)
+        XCTAssertEqual(windowSpy.showWindowCallCount, 2)
+
+        model.refreshThemeSensitiveWindows()
+        XCTAssertEqual(windowSpy.refreshWindowCallCount, 1)
+
+        model.dismissOCRCacheLogsWindow()
+        XCTAssertEqual(windowSpy.closeWindowCallCount, 1)
+        XCTAssertFalse(model.isOCRCacheLogsPresented)
+    }
+
+    func testOCRRecognitionLogsSettingsUIAndLocalizationAreDeclared() throws {
+        let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
+        let ocrCacheLogsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRCacheLogsView.swift")
+        let ocrWindowSource = try Self.repoFileText("Sources/CodexProxyDesktop/OCRCacheLogsWindowController.swift")
+        let adminSource = try Self.repoFileText("Sources/CodexProxyDesktop/AdminAPIClient.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertTrue(settingsSource.contains(".actionOpenOCRCacheLogs"))
+        XCTAssertTrue(settingsSource.contains("self.model.openOCRCacheLogsWindow()"))
+        XCTAssertFalse(settingsSource.contains(".sectionOCRRecognitionLogs"))
+        XCTAssertFalse(settingsSource.contains("OCRRecognitionLogRow"))
+        XCTAssertFalse(settingsSource.contains("self.model.loadOCRRecognitionLogs()"))
+        XCTAssertTrue(ocrCacheLogsSource.contains(".sectionOCRCache"))
+        XCTAssertTrue(ocrCacheLogsSource.contains(".sectionOCRRecognitionLogs"))
+        XCTAssertTrue(ocrCacheLogsSource.contains(".helperOCRRecognitionLogPrivacy"))
+        XCTAssertTrue(ocrCacheLogsSource.contains("OCRRecognitionLogRow"))
+        XCTAssertTrue(ocrCacheLogsSource.contains("OCRRecognitionResultSheet"))
+        XCTAssertTrue(ocrCacheLogsSource.contains("self.model.loadOCRRecognitionResult(for: self.entry)"))
+        XCTAssertTrue(ocrWindowSource.contains("OCRCacheLogsWindowController"))
+        XCTAssertTrue(ocrWindowSource.contains("OCRCacheLogsView(model: model)"))
+        XCTAssertTrue(adminSource.contains("/ocr-recognition-logs"))
+        XCTAssertTrue(adminSource.contains("/ocr-recognition-logs/\\(logID)/result"))
+        XCTAssertTrue(preferencesSource.contains(".ocrCacheLogsWindowTitle: \"OCR 缓存与识别日志\""))
+        XCTAssertTrue(preferencesSource.contains(".ocrCacheLogsWindowTitle: \"OCR Cache & Recognition Logs\""))
+        XCTAssertTrue(preferencesSource.contains(".actionOpenOCRCacheLogs: \"查看 OCR 缓存与识别日志\""))
+        XCTAssertTrue(preferencesSource.contains(".actionOpenOCRCacheLogs: \"View OCR Cache & Logs\""))
+        XCTAssertTrue(preferencesSource.contains(".sectionOCRRecognitionLogs: \"识别日志\""))
+        XCTAssertTrue(preferencesSource.contains(".sectionOCRRecognitionLogs: \"Recognition Logs\""))
+        XCTAssertTrue(preferencesSource.contains(".helperOCRRecognitionLogPrivacy"))
+    }
+
+    @MainActor
+    func testDiagnosticRequestBodySummaryClearAndDetailUseAdminAPI() async {
+        let summary = DiagnosticRequestBodySummary(
+            totalCount: 3,
+            capturedCount: 3,
+            expiredCount: 1,
+            totalBytes: 12_345,
+            oldestCreatedAt: 1_776_000_000,
+            newestCreatedAt: 1_776_000_300
+        )
+        let emptySummary = DiagnosticRequestBodySummary()
+        let diagnosticEntry = DiagnosticRequestBodyEntry(
+            id: 99,
+            requestLogID: 42,
+            createdAt: 1_776_000_300,
+            endpoint: "/v1/chat/completions",
+            upstreamURL: "https://api.deepseek.com/chat/completions",
+            accountKey: "acct|ds",
+            accountLabel: "ds",
+            model: "deepseek-reasoner",
+            bodySHA256: "body-hash",
+            prefixSHA256: "prefix-hash",
+            byteCount: 512,
+            expiresAt: 1_776_604_800
+        )
+        let detail = DiagnosticRequestBodyDetail(
+            entry: diagnosticEntry,
+            bodyText: #"{"model":"deepseek-reasoner","messages":[]}"#,
+            available: true
+        )
+        let probe = DiagnosticRequestBodyMaintenanceProbe(
+            summary: summary,
+            entries: [diagnosticEntry],
+            detail: detail
+        )
+        let admin = AdminAPIClient(
+            diagnosticRequestBodySummaryHandler: { probe.summary() },
+            diagnosticRequestBodiesHandler: { requestLogID in probe.list(requestLogID: requestLogID) },
+            diagnosticRequestBodyDetailHandler: { id in probe.detail(id: id) },
+            clearDiagnosticRequestBodiesHandler: { request in
+                probe.recordClear(request, resultSummary: emptySummary)
+            }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearDiagnosticRequestBodiesHandler: { content in
+                probe.recordConfirmation(content)
+                return true
+            }
+        )
+
+        await model.loadDiagnosticRequestBodySummary()
+        XCTAssertEqual(probe.summaryCallCount(), 1)
+        XCTAssertEqual(model.diagnosticRequestBodySummary, summary)
+
+        model.diagnosticRequestBodySummary = summary
+        await model.clearExpiredDiagnosticRequestBodies()
+
+        model.diagnosticRequestBodySummary = summary
+        model.diagnosticRequestBodyOlderThanSeconds = ReasoningCacheOlderThanPreset.oneDay.rawValue
+        await model.clearDiagnosticRequestBodiesOlderThanSelectedPreset()
+
+        model.diagnosticRequestBodySummary = summary
+        await model.clearAllDiagnosticRequestBodies()
+
+        let clearRequests = probe.clearRequests()
+        XCTAssertEqual(clearRequests.count, 3)
+        XCTAssertTrue(clearRequests[0].expiredOnly)
+        XCTAssertEqual(clearRequests[1].olderThanSeconds, ReasoningCacheOlderThanPreset.oneDay.rawValue)
+        XCTAssertTrue(clearRequests[2].clearAll)
+        XCTAssertEqual(probe.confirmations().count, 3)
+        XCTAssertEqual(model.diagnosticRequestBodySummary, emptySummary)
+        XCTAssertEqual(model.banners.first?.title, model.text(.successDiagnosticRequestBodiesCleared))
+
+        let requestLogEntry = RequestLogEntry(
+            id: 42,
+            timestamp: 1_776_000_300,
+            endpoint: "/v1/chat/completions",
+            upstreamURL: "https://api.deepseek.com/chat/completions",
+            model: "deepseek-reasoner",
+            apiKey: "sk-local",
+            accountKey: "acct|ds",
+            accountLabel: "ds",
+            success: true,
+            latencyMS: 10,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            cacheHitTokens: nil,
+            failureCategory: ProxyRequestTrace.FailureCategory.none.rawValue,
+            errorSummary: nil,
+            hasDiagnosticRequestBody: true
+        )
+        await model.loadDiagnosticRequestBody(for: requestLogEntry)
+
+        XCTAssertEqual(probe.requestLogIDs(), [42])
+        XCTAssertEqual(probe.detailIDs(), [99])
+        XCTAssertEqual(model.diagnosticRequestBodyDetail, detail)
+        XCTAssertTrue(model.isDiagnosticRequestBodyPresented)
+        XCTAssertFalse(model.diagnosticRequestBodyIsRefreshing)
+        XCTAssertFalse(model.diagnosticRequestBodyIsClearing)
+        XCTAssertFalse(model.diagnosticRequestBodyDetailIsLoading)
+    }
+
+    @MainActor
+    func testDiagnosticRequestBodyClearCancellationDoesNotCallAdmin() async {
+        let summary = DiagnosticRequestBodySummary(totalCount: 1, capturedCount: 1, totalBytes: 128)
+        let probe = DiagnosticRequestBodyMaintenanceProbe(summary: summary)
+        let admin = AdminAPIClient(clearDiagnosticRequestBodiesHandler: { request in
+            probe.recordClear(request, resultSummary: DiagnosticRequestBodySummary())
+        })
+        let model = DesktopAppModel(
+            admin: admin,
+            confirmClearDiagnosticRequestBodiesHandler: { content in
+                probe.recordConfirmation(content)
+                return false
+            }
+        )
+        model.diagnosticRequestBodySummary = summary
+
+        await model.clearAllDiagnosticRequestBodies()
+
+        XCTAssertEqual(probe.confirmations().count, 1)
+        XCTAssertTrue(probe.clearRequests().isEmpty)
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertFalse(model.diagnosticRequestBodyIsClearing)
+    }
+
+    @MainActor
     func testReasoningCacheCleanupLocalizationCopy() {
         let model = DesktopAppModel()
 
@@ -4116,6 +4539,11 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.actionClearAllReasoningCache), "Clear All")
         XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("never backfilled across accounts"))
         XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("Disabling or deleting"))
+        XCTAssertEqual(model.text(.sectionDiagnosticLogging), "Diagnostic Logging")
+        XCTAssertEqual(model.text(.sectionDiagnosticRequestBodies), "Request Body Diagnostics")
+        XCTAssertEqual(model.text(.labelDiagnosticRequestBodyCapture), "Capture Request Bodies")
+        XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("sensitive prompts"))
+        XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("image base64"))
 
         model.preferences.languageMode = .zhHans
         XCTAssertEqual(model.text(.sectionCleanup), "清理")
@@ -4123,6 +4551,11 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.actionClearAllReasoningCache), "全部清理")
         XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("不会跨账号"))
         XCTAssertTrue(model.text(.helperReasoningCacheAccountIsolation).contains("禁用或删除"))
+        XCTAssertEqual(model.text(.sectionDiagnosticLogging), "诊断日志")
+        XCTAssertEqual(model.text(.sectionDiagnosticRequestBodies), "请求体诊断数据")
+        XCTAssertEqual(model.text(.labelDiagnosticRequestBodyCapture), "保存请求体诊断")
+        XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("敏感提示词"))
+        XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("图片 base64"))
     }
 
     @MainActor
@@ -7544,6 +7977,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelSupportsVision), "Supports Image Context")
         XCTAssertEqual(model.text(.sectionOCRModel), "OCR Model")
         XCTAssertEqual(model.text(.sectionOCRCache), "OCR Cache")
+        XCTAssertEqual(model.text(.ocrCacheLogsWindowTitle), "OCR Cache & Recognition Logs")
+        XCTAssertEqual(model.text(.actionOpenOCRCacheLogs), "View OCR Cache & Logs")
         XCTAssertEqual(model.text(.labelOCRModel), "OCR Model")
         XCTAssertEqual(model.text(.labelOCRDebugMode), "OCR Debug Mode")
         XCTAssertEqual(model.text(.actionRefreshOCRCache), "Refresh OCR Cache")
@@ -7586,6 +8021,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelSupportsVision), "支持图片上下文")
         XCTAssertEqual(model.text(.sectionOCRModel), "OCR 模型")
         XCTAssertEqual(model.text(.sectionOCRCache), "OCR 缓存")
+        XCTAssertEqual(model.text(.ocrCacheLogsWindowTitle), "OCR 缓存与识别日志")
+        XCTAssertEqual(model.text(.actionOpenOCRCacheLogs), "查看 OCR 缓存与识别日志")
         XCTAssertEqual(model.text(.labelOCRModel), "OCR 模型")
         XCTAssertEqual(model.text(.labelOCRDebugMode), "OCR 调试模式")
         XCTAssertEqual(model.text(.actionRefreshOCRCache), "刷新 OCR 缓存")
@@ -8826,6 +9263,73 @@ final class CodexProxyDesktopTests: XCTestCase {
         let callCount = await probe.snapshot()
         XCTAssertEqual(callCount, 1)
         XCTAssertEqual(model.stats.totalRequests, 21)
+    }
+
+    @MainActor
+    func testAdminEventStreamRefreshesStatsAndMenuBarUsage() async {
+        var refreshedStats = Self.makeStatsSummary(totalRequests: 31)
+        refreshedStats.naturalTokenUsage.today = .init(
+            requestCount: 1,
+            inputTokens: 123,
+            outputTokens: 45
+        )
+        let statsProbe = StatsRefreshProbe(responses: [refreshedStats])
+        let eventProbe = AdminEventStreamProbe()
+        let admin = AdminAPIClient(
+            getStatsForAPIKeyHandler: { _ in await statsProbe.nextStats() },
+            adminEventsHandler: { await eventProbe.stream() }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.preferences.showsMenuBarTokenUsage = true
+        model.adminEventStatsRefreshDebounce = .milliseconds(20)
+        defer {
+            model.stopAdminEventStream()
+        }
+
+        model.startAdminEventStreamIfNeeded()
+        await eventProbe.waitUntilSubscribed()
+        await eventProbe.yield(
+            AdminEvent(id: "1", sequence: 1, type: .requestLogged, createdAt: 1, requestLogID: 9)
+        )
+
+        await Self.waitForCondition(timeout: .seconds(1.5)) {
+            model.stats.totalRequests == 31
+        }
+
+        let callCount = await statsProbe.snapshot()
+        XCTAssertEqual(callCount, 1)
+        XCTAssertTrue(model.menuBarTokenUsagePresentation?.accessibilityLabel.contains("123") == true)
+        XCTAssertTrue(model.menuBarTokenUsagePresentation?.accessibilityLabel.contains("45") == true)
+    }
+
+    @MainActor
+    func testAdminEventStatsRefreshDebouncesBursts() async {
+        let statsProbe = StatsRefreshProbe(
+            responses: [Self.makeStatsSummary(totalRequests: 41)]
+        )
+        let eventProbe = AdminEventStreamProbe()
+        let admin = AdminAPIClient(
+            getStatsForAPIKeyHandler: { _ in await statsProbe.nextStats() },
+            adminEventsHandler: { await eventProbe.stream() }
+        )
+        let model = DesktopAppModel(admin: admin)
+        model.adminEventStatsRefreshDebounce = .milliseconds(50)
+        defer {
+            model.stopAdminEventStream()
+        }
+
+        model.startAdminEventStreamIfNeeded()
+        await eventProbe.waitUntilSubscribed()
+        await eventProbe.yield(AdminEvent(id: "1", sequence: 1, type: .requestLogged, createdAt: 1, requestLogID: 1))
+        await eventProbe.yield(AdminEvent(id: "2", sequence: 2, type: .requestLogged, createdAt: 2, requestLogID: 2))
+        await eventProbe.yield(AdminEvent(id: "3", sequence: 3, type: .statsChanged, createdAt: 3, requestLogID: nil))
+
+        await Self.waitForCondition(timeout: .seconds(1.5)) {
+            model.stats.totalRequests == 41
+        }
+
+        let callCount = await statsProbe.snapshot()
+        XCTAssertEqual(callCount, 1)
     }
 
     @MainActor
@@ -10912,8 +11416,9 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("case .ocr:"))
         XCTAssertTrue(settingsSource.contains("SettingsOCRPanel(model: self.model)"))
         XCTAssertTrue(settingsSource.contains("OCRSettingsPanel(model: self.model)"))
-        XCTAssertTrue(settingsSource.contains(".sectionOCRCache"))
-        XCTAssertTrue(settingsSource.contains("self.model.clearExpiredOCRCache()"))
+        XCTAssertTrue(settingsSource.contains(".actionOpenOCRCacheLogs"))
+        XCTAssertTrue(settingsSource.contains("self.model.openOCRCacheLogsWindow()"))
+        XCTAssertFalse(settingsSource.contains("self.model.clearExpiredOCRCache()"))
         XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.enabled"))
         XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.apiKey"))
         XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.prompt"))
@@ -17074,6 +17579,43 @@ private actor StatsRefreshProbe {
 
     func snapshot() -> Int {
         self.callCount
+    }
+}
+
+private actor AdminEventStreamProbe {
+    private var continuation: AsyncThrowingStream<AdminEvent, Error>.Continuation?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func stream() -> AsyncThrowingStream<AdminEvent, Error> {
+        AsyncThrowingStream<AdminEvent, Error> { continuation in
+            self.setContinuation(continuation)
+        }
+    }
+
+    func waitUntilSubscribed() async {
+        if self.continuation != nil {
+            return
+        }
+        await withCheckedContinuation { waiter in
+            self.waiters.append(waiter)
+        }
+    }
+
+    func yield(_ event: AdminEvent) {
+        self.continuation?.yield(event)
+    }
+
+    func finish() {
+        self.continuation?.finish()
+    }
+
+    private func setContinuation(_ continuation: AsyncThrowingStream<AdminEvent, Error>.Continuation) {
+        self.continuation = continuation
+        let waiters = self.waiters
+        self.waiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 

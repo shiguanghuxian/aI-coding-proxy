@@ -51,6 +51,25 @@ private struct OCRPreparedImage: Sendable, Equatable {
     var imageURL: String
 }
 
+public struct OCRRecognitionLogContext: Sendable, Equatable {
+    public var endpoint: String
+    public var accountKey: String
+    public var accountLabel: String
+    public var requestedModel: String
+
+    public init(
+        endpoint: String = "",
+        accountKey: String = "",
+        accountLabel: String = "",
+        requestedModel: String = ""
+    ) {
+        self.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accountKey = accountKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.accountLabel = accountLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.requestedModel = requestedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 public actor OCRResultCache {
     private var entries: [String: OCRResultCacheEntry] = [:]
     private var inFlight: [String: Task<String, Error>] = [:]
@@ -119,6 +138,32 @@ public actor OCRResultCache {
             self.inFlight.removeValue(forKey: key)
             self.store(text, for: key, mimeType: mimeType, byteCount: byteCount)
             return text
+        } catch {
+            self.inFlight.removeValue(forKey: key)
+            throw error
+        }
+    }
+
+    func textWithStatus(
+        for key: String,
+        mimeType: String,
+        byteCount: Int,
+        operation: @Sendable @escaping () async throws -> String
+    ) async throws -> (text: String, cacheHit: Bool) {
+        if let cached = self.value(for: key) {
+            return (cached, true)
+        }
+        if let task = self.inFlight[key] {
+            return (try await task.value, true)
+        }
+
+        let task = Task { try await operation() }
+        self.inFlight[key] = task
+        do {
+            let text = try await task.value
+            self.inFlight.removeValue(forKey: key)
+            self.store(text, for: key, mimeType: mimeType, byteCount: byteCount)
+            return (text, false)
         } catch {
             self.inFlight.removeValue(forKey: key)
             throw error
@@ -597,9 +642,11 @@ public struct OCRImageProcessor: Sendable {
     private static let maxConcurrentRecognitions = 3
 
     private let cache: OCRResultCache
+    private let store: SQLiteStore?
 
-    public init(cache: OCRResultCache) {
+    public init(cache: OCRResultCache, store: SQLiteStore? = nil) {
         self.cache = cache
+        self.store = store
     }
 
     public func pruneExpiredCache() async {
@@ -616,59 +663,81 @@ public struct OCRImageProcessor: Sendable {
 
     public func requestByApplyingOCRIfNeeded(
         _ request: [String: Any],
-        config: AppConfig
+        config: AppConfig,
+        logContext: OCRRecognitionLogContext? = nil
     ) async -> [String: Any] {
         let ocrConfig = config.ocrModel
-        guard ocrConfig.isReadyForRecognition else {
-            return request
-        }
         let references = OCRImageContextSupport.imageReferences(in: request)
         guard references.isEmpty == false else {
             return request
         }
+        guard ocrConfig.isReadyForRecognition else {
+            self.recordSkippedLogs(for: references, ocrConfig: ocrConfig, logContext: logContext)
+            return request
+        }
 
-        let results = await self.recognizeAll(references, ocrConfig: ocrConfig, networkConfig: config)
+        let results = await self.recognizeAll(
+            references,
+            ocrConfig: ocrConfig,
+            networkConfig: config,
+            logContext: logContext
+        )
         return OCRImageContextSupport.requestByInjectingOCRContext(into: request, results: results)
     }
 
     public func anthropicRequestByApplyingOCRIfNeeded(
         _ request: [String: Any],
-        config: AppConfig
+        config: AppConfig,
+        logContext: OCRRecognitionLogContext? = nil
     ) async -> [String: Any] {
         let ocrConfig = config.ocrModel
-        guard ocrConfig.isReadyForRecognition else {
-            return request
-        }
         let references = OCRImageContextSupport.anthropicImageReferences(in: request)
         guard references.isEmpty == false else {
             return request
         }
+        guard ocrConfig.isReadyForRecognition else {
+            self.recordSkippedLogs(for: references, ocrConfig: ocrConfig, logContext: logContext)
+            return request
+        }
 
-        let results = await self.recognizeAll(references, ocrConfig: ocrConfig, networkConfig: config)
+        let results = await self.recognizeAll(
+            references,
+            ocrConfig: ocrConfig,
+            networkConfig: config,
+            logContext: logContext
+        )
         return OCRImageContextSupport.anthropicRequestByInjectingOCRContext(into: request, results: results)
     }
 
     public func geminiRequestByApplyingOCRIfNeeded(
         _ request: [String: Any],
-        config: AppConfig
+        config: AppConfig,
+        logContext: OCRRecognitionLogContext? = nil
     ) async -> [String: Any] {
         let ocrConfig = config.ocrModel
-        guard ocrConfig.isReadyForRecognition else {
-            return request
-        }
         let references = OCRImageContextSupport.geminiImageReferences(in: request)
         guard references.isEmpty == false else {
             return request
         }
+        guard ocrConfig.isReadyForRecognition else {
+            self.recordSkippedLogs(for: references, ocrConfig: ocrConfig, logContext: logContext)
+            return request
+        }
 
-        let results = await self.recognizeAll(references, ocrConfig: ocrConfig, networkConfig: config)
+        let results = await self.recognizeAll(
+            references,
+            ocrConfig: ocrConfig,
+            networkConfig: config,
+            logContext: logContext
+        )
         return OCRImageContextSupport.geminiRequestByInjectingOCRContext(into: request, results: results)
     }
 
     private func recognizeAll(
         _ references: [OCRImageReference],
         ocrConfig: OCRModelConfig,
-        networkConfig: AppConfig
+        networkConfig: AppConfig,
+        logContext: OCRRecognitionLogContext?
     ) async -> [OCRImageRecognitionResult] {
         await withTaskGroup(of: OCRImageRecognitionResult.self) { group in
             var iterator = references.makeIterator()
@@ -676,7 +745,12 @@ public struct OCRImageProcessor: Sendable {
             for _ in 0..<workerCount {
                 guard let reference = iterator.next() else { break }
                 group.addTask {
-                    await self.recognize(reference, ocrConfig: ocrConfig, networkConfig: networkConfig)
+                    await self.recognize(
+                        reference,
+                        ocrConfig: ocrConfig,
+                        networkConfig: networkConfig,
+                        logContext: logContext
+                    )
                 }
             }
 
@@ -685,7 +759,12 @@ public struct OCRImageProcessor: Sendable {
                 results.append(result)
                 if let reference = iterator.next() {
                     group.addTask {
-                        await self.recognize(reference, ocrConfig: ocrConfig, networkConfig: networkConfig)
+                        await self.recognize(
+                            reference,
+                            ocrConfig: ocrConfig,
+                            networkConfig: networkConfig,
+                            logContext: logContext
+                        )
                     }
                 }
             }
@@ -696,11 +775,13 @@ public struct OCRImageProcessor: Sendable {
     private func recognize(
         _ reference: OCRImageReference,
         ocrConfig: OCRModelConfig,
-        networkConfig: AppConfig
+        networkConfig: AppConfig,
+        logContext: OCRRecognitionLogContext?
     ) async -> OCRImageRecognitionResult {
+        let startedMS = Helpers.nowMilliseconds()
         do {
             let prepared = try await self.preparedImage(reference.imageURL, config: ocrConfig, networkConfig: networkConfig)
-            let text = try await self.cache.text(
+            let lookup = try await self.cache.textWithStatus(
                 for: prepared.imageHash,
                 mimeType: prepared.mimeType,
                 byteCount: prepared.byteCount
@@ -717,13 +798,111 @@ public struct OCRImageProcessor: Sendable {
                     )
                 }
             }
-            return OCRImageRecognitionResult(index: reference.index, text: text)
+            self.recordRecognitionLog(
+                reference: reference,
+                prepared: prepared,
+                ocrConfig: ocrConfig,
+                logContext: logContext,
+                status: lookup.cacheHit ? .cacheHit : .recognized,
+                cacheHit: lookup.cacheHit,
+                startedMS: startedMS,
+                error: nil
+            )
+            return OCRImageRecognitionResult(index: reference.index, text: lookup.text)
         } catch {
             if ocrConfig.debugMode {
                 print("[ocr] image \(reference.index) failed: \(error.localizedDescription)")
             }
+            self.recordRecognitionLog(
+                reference: reference,
+                prepared: nil,
+                ocrConfig: ocrConfig,
+                logContext: logContext,
+                status: .failed,
+                cacheHit: false,
+                startedMS: startedMS,
+                error: error.localizedDescription
+            )
             return OCRImageRecognitionResult(index: reference.index, error: error.localizedDescription)
         }
+    }
+
+    private func recordSkippedLogs(
+        for references: [OCRImageReference],
+        ocrConfig: OCRModelConfig,
+        logContext: OCRRecognitionLogContext?
+    ) {
+        for reference in references {
+            self.recordRecognitionLog(
+                reference: reference,
+                prepared: nil,
+                ocrConfig: ocrConfig,
+                logContext: logContext,
+                status: .skipped,
+                cacheHit: false,
+                startedMS: Helpers.nowMilliseconds(),
+                error: ocrConfig.enabled
+                    ? "OCR 配置不完整，已跳过图片识别。"
+                    : "OCR 未启用，已跳过图片识别。"
+            )
+        }
+    }
+
+    private func recordRecognitionLog(
+        reference: OCRImageReference,
+        prepared: OCRPreparedImage?,
+        ocrConfig: OCRModelConfig,
+        logContext: OCRRecognitionLogContext?,
+        status: OCRRecognitionLogStatus,
+        cacheHit: Bool,
+        startedMS: Int64,
+        error: String?
+    ) {
+        guard let store else {
+            return
+        }
+        let context = logContext ?? OCRRecognitionLogContext()
+        let entry = OCRRecognitionLogEntry(
+            createdAt: Helpers.now(),
+            endpoint: context.endpoint,
+            accountKey: context.accountKey,
+            accountLabel: context.accountLabel,
+            requestedModel: context.requestedModel,
+            ocrModel: ocrConfig.model,
+            imageIndex: reference.index,
+            imageHash: prepared?.imageHash,
+            mimeType: prepared?.mimeType ?? "",
+            byteCount: prepared?.byteCount ?? 0,
+            status: status,
+            cacheHit: cacheHit,
+            latencyMS: max(0, Helpers.nowMilliseconds() - startedMS),
+            errorSummary: error.map(self.safeErrorSummaryForLog)
+        )
+        do {
+            try store.insertOCRRecognitionLog(entry)
+        } catch {
+            if ocrConfig.debugMode {
+                print("[ocr] failed to write recognition log: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func safeErrorSummaryForLog(_ error: String) -> String {
+        var sanitized = error
+        for (pattern, replacement) in [
+            (#"data:image/[^ \n\r\t"'<>]+"#, "[redacted-image-data]"),
+            (#"https?://[^ \n\r\t"'<>]+"#, "[redacted-url]"),
+        ] {
+            sanitized = (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]))
+                .map {
+                    $0.stringByReplacingMatches(
+                        in: sanitized,
+                        range: NSRange(location: 0, length: sanitized.utf16.count),
+                        withTemplate: replacement
+                    )
+                } ?? sanitized
+        }
+        return Helpers.truncate(sanitized, limit: 300)
     }
 
     private func performOCR(

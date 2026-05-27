@@ -107,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         self.model.releaseKeepAwakeSilently()
         self.model.stopStatsAutoRefresh()
+        self.model.stopAdminEventStream()
         self.statusPopover?.close()
     }
 
@@ -151,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             await self.model.loadAll()
             self.didLoadInitialData = true
             self.model.checkForAppUpdatesIfNeededOnLaunch()
+            self.model.startAdminEventStreamIfNeeded()
             if NSApp.isActive {
                 self.model.startStatsAutoRefreshIfNeeded(immediately: false)
                 self.presentHelpWindowIfNeeded()

@@ -785,10 +785,11 @@ public final class SQLiteStore: @unchecked Sendable {
         return record
     }
 
-    public func recordTrace(_ trace: ProxyRequestTrace) throws {
+    @discardableResult
+    public func recordTrace(_ trace: ProxyRequestTrace) throws -> Int64 {
         try self.upsertMetric(trace, granularity: "hour", bucketStart: self.traceHourStart(for: trace.timestamp))
         try self.upsertMetric(trace, granularity: "day", bucketStart: self.traceDayStart(for: trace.timestamp))
-        try self.insertRequestLog(trace)
+        return try self.insertRequestLog(trace)
     }
 
     public func loadStatsSummary(
@@ -1347,6 +1348,124 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func insertOCRRecognitionLog(_ entry: OCRRecognitionLogEntry) throws -> OCRRecognitionLogEntry {
+        let createdAt = entry.createdAt > 0 ? entry.createdAt : Helpers.now()
+        try self.execute(
+            """
+            INSERT INTO ocr_recognition_logs (
+                created_at, endpoint, account_key, account_label, requested_model, ocr_model,
+                image_index, image_hash, mime_type, byte_count, status, cache_hit, latency_ms, error_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            bindings: [
+                .int(createdAt),
+                .text(entry.endpoint),
+                .text(entry.accountKey),
+                .text(entry.accountLabel),
+                .text(entry.requestedModel),
+                .text(entry.ocrModel),
+                .int(Int64(entry.imageIndex)),
+                .text(entry.imageHash),
+                .text(entry.mimeType),
+                .int(Int64(entry.byteCount)),
+                .text(entry.status.rawValue),
+                .int(entry.cacheHit ? 1 : 0),
+                .int(entry.latencyMS),
+                .text(entry.errorSummary),
+            ]
+        )
+        let insertedID = try self.querySingle("SELECT last_insert_rowid() AS id;")?.int("id") ?? 0
+        var stored = entry
+        stored.id = insertedID
+        stored.createdAt = createdAt
+        return stored
+    }
+
+    func listOCRRecognitionLogs(_ request: OCRRecognitionLogListRequest) throws -> OCRRecognitionLogListResponse {
+        let (whereSQL, bindings) = self.ocrRecognitionLogFilterSQL(status: request.status)
+        let countSQL = "SELECT COUNT(*) AS total_count FROM ocr_recognition_logs\(whereSQL);"
+        let totalCount = Int((try self.querySingle(countSQL, bindings: bindings))?.int("total_count") ?? 0)
+        let rows = try self.query(
+            """
+            SELECT id, created_at, endpoint, account_key, account_label, requested_model, ocr_model,
+                   image_index, image_hash, mime_type, byte_count, status, cache_hit, latency_ms, error_summary
+            FROM ocr_recognition_logs
+            \(whereSQL)
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?;
+            """,
+            bindings: bindings + [.int(Int64(request.limit)), .int(Int64(request.offset))]
+        )
+        return OCRRecognitionLogListResponse(
+            entries: rows.map(self.ocrRecognitionLogEntry(from:)),
+            totalCount: totalCount
+        )
+    }
+
+    func loadOCRRecognitionLog(id: Int64) throws -> OCRRecognitionLogEntry? {
+        try self.querySingle(
+            """
+            SELECT id, created_at, endpoint, account_key, account_label, requested_model, ocr_model,
+                   image_index, image_hash, mime_type, byte_count, status, cache_hit, latency_ms, error_summary
+            FROM ocr_recognition_logs
+            WHERE id = ?
+            LIMIT 1;
+            """,
+            bindings: [.int(id)]
+        ).map(self.ocrRecognitionLogEntry(from:))
+    }
+
+    func loadOCRRecognitionResult(logID: Int64, now: Int64 = Helpers.now()) throws -> OCRRecognitionResultLookupResponse {
+        guard let entry = try self.loadOCRRecognitionLog(id: logID) else {
+            throw ProxyError.message("OCR recognition log not found.")
+        }
+        guard let imageHash = entry.imageHash, imageHash.isEmpty == false else {
+            return OCRRecognitionResultLookupResponse(
+                entry: entry,
+                available: false,
+                message: "OCR 缓存已清理，无法查看正文。"
+            )
+        }
+        guard let cached = try self.loadOCRResultCacheEntry(imageHash: imageHash, now: now) else {
+            return OCRRecognitionResultLookupResponse(
+                entry: entry,
+                available: false,
+                message: "OCR 缓存已清理，无法查看正文。"
+            )
+        }
+        return OCRRecognitionResultLookupResponse(entry: entry, available: true, text: cached.text)
+    }
+
+    private func ocrRecognitionLogFilterSQL(
+        status: OCRRecognitionLogStatus?
+    ) -> (sql: String, bindings: [Binding]) {
+        guard let status else {
+            return ("", [])
+        }
+        return (" WHERE status = ?", [.text(status.rawValue)])
+    }
+
+    private func ocrRecognitionLogEntry(from row: SQLiteRow) -> OCRRecognitionLogEntry {
+        OCRRecognitionLogEntry(
+            id: row.int("id"),
+            createdAt: row.int("created_at"),
+            endpoint: row.text("endpoint"),
+            accountKey: row.text("account_key"),
+            accountLabel: row.text("account_label"),
+            requestedModel: row.text("requested_model"),
+            ocrModel: row.text("ocr_model"),
+            imageIndex: Int(row.int("image_index")),
+            imageHash: row.optionalText("image_hash"),
+            mimeType: row.text("mime_type"),
+            byteCount: Int(row.int("byte_count")),
+            status: OCRRecognitionLogStatus(rawValue: row.text("status")) ?? .failed,
+            cacheHit: row.int("cache_hit") == 1,
+            latencyMS: row.int("latency_ms"),
+            errorSummary: row.optionalText("error_summary")
+        )
+    }
+
     private func enforceOCRResultCacheCapacity(_ capacity: Int) throws {
         let capacity = max(1, capacity)
         let count = Int((try self.querySingle(
@@ -1569,6 +1688,32 @@ public final class SQLiteStore: @unchecked Sendable {
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_hash ON request_logs(api_key_hash);", on: db)
         try self.execute(
             """
+            CREATE TABLE IF NOT EXISTS diagnostic_request_bodies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_log_id INTEGER,
+                created_at INTEGER NOT NULL,
+                endpoint TEXT NOT NULL,
+                upstream_url TEXT,
+                account_key TEXT NOT NULL,
+                account_label TEXT NOT NULL,
+                model TEXT NOT NULL,
+                actual_model TEXT,
+                body_sha256 TEXT NOT NULL,
+                prefix_sha256 TEXT NOT NULL,
+                byte_count INTEGER NOT NULL DEFAULT 0,
+                relative_path TEXT,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_summary TEXT
+            );
+            """,
+            on: db
+        )
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_request_log_id ON diagnostic_request_bodies(request_log_id);", on: db)
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_created_at ON diagnostic_request_bodies(created_at DESC);", on: db)
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_expires_at ON diagnostic_request_bodies(expires_at);", on: db)
+        try self.execute(
+            """
             CREATE TABLE IF NOT EXISTS chat_completions_reasoning_cache (
                 cache_key TEXT PRIMARY KEY,
                 account_key TEXT NOT NULL,
@@ -1603,6 +1748,40 @@ public final class SQLiteStore: @unchecked Sendable {
         )
         try self.execute("CREATE INDEX IF NOT EXISTS idx_ocr_result_cache_touched_at ON ocr_result_cache(touched_at);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_ocr_result_cache_expires_at ON ocr_result_cache(expires_at);", on: db)
+        try self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ocr_recognition_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                endpoint TEXT NOT NULL DEFAULT '',
+                account_key TEXT NOT NULL DEFAULT '',
+                account_label TEXT NOT NULL DEFAULT '',
+                requested_model TEXT NOT NULL DEFAULT '',
+                ocr_model TEXT NOT NULL DEFAULT '',
+                image_index INTEGER NOT NULL,
+                image_hash TEXT,
+                mime_type TEXT NOT NULL DEFAULT '',
+                byte_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                cache_hit INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                error_summary TEXT
+            );
+            """,
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ocr_recognition_logs_created_at ON ocr_recognition_logs(created_at DESC);",
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ocr_recognition_logs_status ON ocr_recognition_logs(status);",
+            on: db
+        )
+        try self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ocr_recognition_logs_image_hash ON ocr_recognition_logs(image_hash);",
+            on: db
+        )
         try self.execute(
             "CREATE INDEX IF NOT EXISTS idx_reasoning_cache_expires_at ON chat_completions_reasoning_cache(expires_at);",
             on: db
@@ -1853,7 +2032,8 @@ public final class SQLiteStore: @unchecked Sendable {
         )
     }
 
-    private func insertRequestLog(_ trace: ProxyRequestTrace) throws {
+    @discardableResult
+    private func insertRequestLog(_ trace: ProxyRequestTrace) throws -> Int64 {
         let encryptedAPIKey: Data?
         if trace.apiKeyValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             encryptedAPIKey = nil
@@ -1892,6 +2072,261 @@ public final class SQLiteStore: @unchecked Sendable {
                 .text(trace.lastError),
             ]
         )
+        return sqlite3_last_insert_rowid(self.db)
+    }
+
+    public func insertDiagnosticRequestBody(_ input: DiagnosticRequestBodyCaptureInput) throws -> DiagnosticRequestBodyEntry {
+        let bodySHA256 = DiagnosticRequestBodySupport.bodySHA256(input.body)
+        let prefixSHA256 = DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: input.bodyObject)
+        let expiresAt = input.createdAt + Int64(max(1, input.config.retentionDays)) * 24 * 60 * 60
+        var status: DiagnosticRequestBodyCaptureStatus = .captured
+        var relativePath: String?
+        var errorSummary: String?
+
+        if input.config.captureJSONOnly,
+           (try? JSONSerialization.jsonObject(with: input.body)) == nil
+        {
+            status = .skipped
+            errorSummary = "请求体不是可解析 JSON，已跳过完整正文保存。"
+        } else if input.body.count > input.config.maxBodySizeBytes {
+            status = .skipped
+            errorSummary = "请求体超过诊断保存上限：\(input.body.count) bytes > \(input.config.maxBodySizeBytes) bytes。"
+        } else {
+            do {
+                let directory = Paths.diagnosticRequestBodiesDirectoryURL(in: self.dataDirectory)
+                try Helpers.ensureDirectory(directory)
+                let filename = "\(input.createdAt)-\(UUID().uuidString).cpxdiag"
+                let sealed = try CryptoBox.seal(input.body, using: self.secretStore.masterKey())
+                try sealed.write(to: directory.appendingPathComponent(filename), options: .atomic)
+                relativePath = filename
+            } catch {
+                status = .failed
+                errorSummary = Helpers.truncate(error.localizedDescription)
+            }
+        }
+
+        try self.execute(
+            """
+            INSERT INTO diagnostic_request_bodies (
+                request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model,
+                actual_model, body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            bindings: [
+                .int(nil),
+                .int(input.createdAt),
+                .text(input.endpoint),
+                .text(input.upstreamURL),
+                .text(input.accountKey),
+                .text(input.accountLabel),
+                .text(input.model),
+                .text(input.actualModel),
+                .text(bodySHA256),
+                .text(prefixSHA256),
+                .int(Int64(input.body.count)),
+                .text(relativePath),
+                .int(expiresAt),
+                .text(status.rawValue),
+                .text(errorSummary),
+            ]
+        )
+
+        return DiagnosticRequestBodyEntry(
+            id: sqlite3_last_insert_rowid(self.db),
+            requestLogID: nil,
+            createdAt: input.createdAt,
+            endpoint: input.endpoint,
+            upstreamURL: input.upstreamURL,
+            accountKey: input.accountKey,
+            accountLabel: input.accountLabel,
+            model: input.model,
+            actualModel: input.actualModel,
+            bodySHA256: bodySHA256,
+            prefixSHA256: prefixSHA256,
+            byteCount: input.body.count,
+            expiresAt: expiresAt,
+            status: status,
+            errorSummary: errorSummary
+        )
+    }
+
+    public func linkDiagnosticRequestBody(id: Int64, requestLogID: Int64) throws {
+        guard id > 0, requestLogID > 0 else { return }
+        try self.execute(
+            "UPDATE diagnostic_request_bodies SET request_log_id = ? WHERE id = ?;",
+            bindings: [.int(requestLogID), .int(id)]
+        )
+    }
+
+    public func diagnosticRequestBodySummary(now: Int64 = Helpers.now()) throws -> DiagnosticRequestBodySummary {
+        let row = try self.querySingle(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                COALESCE(SUM(CASE WHEN status = 'captured' THEN 1 ELSE 0 END), 0) AS captured_count,
+                COALESCE(SUM(CASE WHEN expires_at <= ? THEN 1 ELSE 0 END), 0) AS expired_count,
+                COALESCE(SUM(byte_count), 0) AS total_bytes,
+                MIN(created_at) AS oldest_created_at,
+                MAX(created_at) AS newest_created_at
+            FROM diagnostic_request_bodies;
+            """,
+            bindings: [.int(now)]
+        )
+        return DiagnosticRequestBodySummary(
+            totalCount: Int(row?.int("total_count") ?? 0),
+            capturedCount: Int(row?.int("captured_count") ?? 0),
+            expiredCount: Int(row?.int("expired_count") ?? 0),
+            totalBytes: row?.int("total_bytes") ?? 0,
+            oldestCreatedAt: row?.optionalInt("oldest_created_at"),
+            newestCreatedAt: row?.optionalInt("newest_created_at")
+        )
+    }
+
+    public func listDiagnosticRequestBodies(requestLogID: Int64? = nil, limit: Int = 20) throws -> [DiagnosticRequestBodyEntry] {
+        let normalizedLimit = min(max(limit, 1), 200)
+        let whereSQL: String
+        let bindings: [Binding]
+        if let requestLogID, requestLogID > 0 {
+            whereSQL = " WHERE request_log_id = ?"
+            bindings = [.int(requestLogID)]
+        } else {
+            whereSQL = ""
+            bindings = []
+        }
+        let rows = try self.query(
+            """
+            SELECT id, request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model, actual_model,
+                   body_sha256, prefix_sha256, byte_count, expires_at, status, error_summary
+            FROM diagnostic_request_bodies\(whereSQL)
+            ORDER BY created_at DESC
+            LIMIT \(normalizedLimit);
+            """,
+            bindings: bindings
+        )
+        return rows.map(self.diagnosticRequestBodyEntry)
+    }
+
+    public func loadDiagnosticRequestBodyDetail(id: Int64) throws -> DiagnosticRequestBodyDetail {
+        let row = try self.querySingle(
+            """
+            SELECT id, request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model, actual_model,
+                   body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary
+            FROM diagnostic_request_bodies
+            WHERE id = ?;
+            """,
+            bindings: [.int(id)]
+        )
+        guard let row else {
+            throw ProxyError.message("Request body diagnostic not found.")
+        }
+        let entry = self.diagnosticRequestBodyEntry(from: row)
+        guard entry.status == DiagnosticRequestBodyCaptureStatus.captured,
+              let relativePath = row.optionalText("relative_path"),
+              relativePath.isEmpty == false
+        else {
+            return DiagnosticRequestBodyDetail(
+                entry: entry,
+                available: false,
+                message: entry.errorSummary ?? "该诊断记录没有保存完整请求体。"
+            )
+        }
+
+        let fileURL = Paths.diagnosticRequestBodiesDirectoryURL(in: self.dataDirectory)
+            .appendingPathComponent(relativePath)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return DiagnosticRequestBodyDetail(
+                entry: entry,
+                available: false,
+                message: "请求体诊断文件已被清理或丢失。"
+            )
+        }
+        do {
+            let sealed = try Data(contentsOf: fileURL)
+            let body = try CryptoBox.open(sealed, using: self.secretStore.masterKey())
+            return DiagnosticRequestBodyDetail(
+                entry: entry,
+                bodyText: String(decoding: body, as: UTF8.self),
+                available: true
+            )
+        } catch {
+            return DiagnosticRequestBodyDetail(
+                entry: entry,
+                available: false,
+                message: "请求体诊断文件无法解密：\(Helpers.truncate(error.localizedDescription))"
+            )
+        }
+    }
+
+    public func clearDiagnosticRequestBodies(
+        _ request: ClearDiagnosticRequestBodiesRequest,
+        now: Int64 = Helpers.now()
+    ) throws -> ClearDiagnosticRequestBodiesResult {
+        let (whereSQL, bindings) = self.diagnosticRequestBodyClearConditions(for: request, now: now)
+        let rows = try self.query(
+            "SELECT id, relative_path FROM diagnostic_request_bodies\(whereSQL);",
+            bindings: bindings
+        )
+        for row in rows {
+            if let relativePath = row.optionalText("relative_path"), relativePath.isEmpty == false {
+                let url = Paths.diagnosticRequestBodiesDirectoryURL(in: self.dataDirectory)
+                    .appendingPathComponent(relativePath)
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        try self.execute("DELETE FROM diagnostic_request_bodies\(whereSQL);", bindings: bindings)
+        return ClearDiagnosticRequestBodiesResult(
+            deletedCount: Int(sqlite3_changes(self.db)),
+            summary: try self.diagnosticRequestBodySummary(now: now)
+        )
+    }
+
+    private func diagnosticRequestBodyEntry(from row: SQLiteRow) -> DiagnosticRequestBodyEntry {
+        DiagnosticRequestBodyEntry(
+            id: row.int("id"),
+            requestLogID: row.optionalInt("request_log_id"),
+            createdAt: row.int("created_at"),
+            endpoint: row.text("endpoint"),
+            upstreamURL: row.optionalText("upstream_url"),
+            accountKey: row.text("account_key"),
+            accountLabel: row.text("account_label"),
+            model: row.text("model"),
+            actualModel: row.optionalText("actual_model"),
+            bodySHA256: row.text("body_sha256"),
+            prefixSHA256: row.text("prefix_sha256"),
+            byteCount: Int(row.int("byte_count")),
+            expiresAt: row.int("expires_at"),
+            status: DiagnosticRequestBodyCaptureStatus(rawValue: row.text("status")) ?? .failed,
+            errorSummary: row.optionalText("error_summary")
+        )
+    }
+
+    private func diagnosticRequestBodyClearConditions(
+        for request: ClearDiagnosticRequestBodiesRequest,
+        now: Int64
+    ) -> (String, [Binding]) {
+        if request.clearAll {
+            return ("", [])
+        }
+
+        var clauses: [String] = []
+        var bindings: [Binding] = []
+        if request.expiredOnly {
+            clauses.append("expires_at <= ?")
+            bindings.append(.int(now))
+        }
+        if let olderThanSeconds = request.olderThanSeconds {
+            clauses.append("created_at < ?")
+            bindings.append(.int(now - olderThanSeconds))
+        }
+        if request.requestLogIDs.isEmpty == false {
+            let placeholders = Array(repeating: "?", count: request.requestLogIDs.count).joined(separator: ", ")
+            clauses.append("request_log_id IN (\(placeholders))")
+            bindings.append(contentsOf: request.requestLogIDs.map { .int($0) })
+        }
+        guard clauses.isEmpty == false else {
+            return (" WHERE 0", [])
+        }
+        return (" WHERE " + clauses.joined(separator: " AND "), bindings)
     }
 
     private func requestLogConditions(for query: RequestLogQuery) -> (String, [Binding]) {
@@ -1939,7 +2374,8 @@ public final class SQLiteStore: @unchecked Sendable {
             """
             SELECT id, created_at, endpoint, upstream_url, client_source, api_key_cipher, account_key, account_label, model, actual_model, reasoning_effort,
                    success, latency_ms, input_tokens, output_tokens, total_tokens, cache_hit_tokens,
-                   failure_category, last_error
+                   failure_category, last_error,
+                   EXISTS(SELECT 1 FROM diagnostic_request_bodies WHERE request_log_id = request_logs.id AND status = 'captured') AS has_diagnostic_request_body
             FROM request_logs\(whereSQL)
             ORDER BY \(orderBy)\(limitClause);
             """,
@@ -1973,7 +2409,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 totalTokens: row.int("total_tokens"),
                 cacheHitTokens: row.optionalInt("cache_hit_tokens"),
                 failureCategory: row.text("failure_category"),
-                errorSummary: row.optionalText("last_error")
+                errorSummary: row.optionalText("last_error"),
+                hasDiagnosticRequestBody: row.int("has_diagnostic_request_body") == 1
             )
         }
     }

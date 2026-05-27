@@ -33,6 +33,7 @@ final class DesktopAppModel: ObservableObject {
     typealias ConfirmBatchRemoveAccountsHandler = (BatchRemoveAccountsConfirmationContent) -> Bool
     typealias ConfirmClearReasoningCacheHandler = (ReasoningCacheClearConfirmationContent) -> Bool
     typealias ConfirmClearOCRCacheHandler = (OCRCacheClearConfirmationContent) -> Bool
+    typealias ConfirmClearDiagnosticRequestBodiesHandler = (DiagnosticRequestBodyClearConfirmationContent) -> Bool
     typealias ConfirmInterfaceModeSwitchHandler = (DesktopInterfaceMode) -> Bool
     typealias ConfirmDeleteRemoteHostHandler = (RemoteHostConfig) -> Bool
     typealias ConfirmInstallUpdateHandler = (AppUpdatePackage) -> AppUpdatePromptDecision
@@ -44,6 +45,7 @@ final class DesktopAppModel: ObservableObject {
     typealias ProxyTestImageFileWriter = (Data, URL) throws -> Void
     typealias ProxyTestImageFilenameTokenProvider = () -> String
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
+    typealias OCRCacheLogsWindowFactory = (DesktopAppModel) -> OCRCacheLogsWindowControlling
     typealias RemoteAdminWindowFactory = (
         RemoteHostConfig,
         DesktopPreferences,
@@ -125,6 +127,12 @@ final class DesktopAppModel: ObservableObject {
     }
 
     struct OCRCacheClearConfirmationContent: Equatable {
+        var title: String
+        var informativeText: String
+        var actionTitle: String
+    }
+
+    struct DiagnosticRequestBodyClearConfirmationContent: Equatable {
         var title: String
         var informativeText: String
         var actionTitle: String
@@ -513,6 +521,20 @@ final class DesktopAppModel: ObservableObject {
     @Published var ocrCacheIsRefreshing = false
     @Published var ocrCacheIsClearing = false
     @Published var ocrCacheOlderThanSeconds: Int64 = 604_800
+    @Published var ocrRecognitionLogPage = OCRRecognitionLogListResponse()
+    @Published var ocrRecognitionLogStatusFilter: OCRRecognitionLogStatus?
+    @Published var ocrRecognitionLogsIsRefreshing = false
+    @Published var ocrRecognitionResultIsLoading = false
+    @Published var ocrRecognitionResult: OCRRecognitionResultLookupResponse?
+    @Published var isOCRCacheLogsPresented = false
+    @Published var isOCRRecognitionResultPresented = false
+    @Published var diagnosticRequestBodySummary = DiagnosticRequestBodySummary()
+    @Published var diagnosticRequestBodyIsRefreshing = false
+    @Published var diagnosticRequestBodyIsClearing = false
+    @Published var diagnosticRequestBodyOlderThanSeconds: Int64 = 604_800
+    @Published var diagnosticRequestBodyDetail: DiagnosticRequestBodyDetail?
+    @Published var diagnosticRequestBodyDetailIsLoading = false
+    @Published var isDiagnosticRequestBodyPresented = false
     @Published var proxyAPIKeyUsageFilter = ProxyAPIKeyUsageFilter()
     @Published var proxyAPIKeyUsageReport = ProxyAPIKeyUsageReport(from: 0, to: 0)
     @Published var proxyAPIKeyUsageIsRefreshing = false
@@ -533,6 +555,7 @@ final class DesktopAppModel: ObservableObject {
     private let confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler?
     let confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler?
     let confirmClearOCRCacheHandler: ConfirmClearOCRCacheHandler?
+    let confirmClearDiagnosticRequestBodiesHandler: ConfirmClearDiagnosticRequestBodiesHandler?
     private let confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler?
     private let confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler?
     let confirmInstallUpdateHandler: ConfirmInstallUpdateHandler?
@@ -548,6 +571,7 @@ final class DesktopAppModel: ObservableObject {
     var appUpdateCurrentAppURLProvider: () -> URL?
     let appUpdateTerminateHandler: () -> Void
     let clientConfigManagerWindowFactory: ClientConfigManagerWindowFactory
+    let ocrCacheLogsWindowFactory: OCRCacheLogsWindowFactory
     private let remoteAdminWindowFactory: RemoteAdminWindowFactory
     let aboutWindowFactory: (DesktopAppModel) -> AboutWindowControlling
     let helpWindowFactory: (DesktopAppModel) -> HelpWindowControlling
@@ -562,6 +586,7 @@ final class DesktopAppModel: ObservableObject {
     var proxyTestWindowController: ProxyTestWindowController?
     var managedProxyWindowController: ManagedProxyWindowController?
     var clientConfigManagerWindowController: ClientConfigManagerWindowControlling?
+    var ocrCacheLogsWindowController: OCRCacheLogsWindowControlling?
     var clientConfigManagerRefreshGeneration = 0
     var clientConfigManagerBackupLoadGeneration = 0
     var requestLogsWindowController: RequestLogsWindowController?
@@ -573,6 +598,12 @@ final class DesktopAppModel: ObservableObject {
     var statsAutoRefreshInterval: Duration = .seconds(30)
     private var statsAutoRefreshTask: Task<Void, Never>?
     private var statsAutoRefreshGeneration: UInt64 = 0
+    var adminEventStatsRefreshDebounce: Duration = .milliseconds(250)
+    var adminEventReconnectInitialDelaySeconds: Int64 = 1
+    var adminEventReconnectMaxDelaySeconds: Int64 = 30
+    private var adminEventStreamTask: Task<Void, Never>?
+    private var adminEventStatsRefreshTask: Task<Void, Never>?
+    private var adminEventStreamGeneration: UInt64 = 0
     private var hasPreparedMinimalProxyDraft = false
     private var syncedMinimalProxyDraft = MinimalProxyDraft()
     private var hasPreparedSettingsOutboundProxyDraft = false
@@ -602,6 +633,7 @@ final class DesktopAppModel: ObservableObject {
         appUpdateCurrentAppURLProvider: @escaping () -> URL? = { Bundle.main.bundleURL },
         appUpdateTerminateHandler: @escaping () -> Void = { NSApp.terminate(nil) },
         clientConfigManagerWindowFactory: @escaping ClientConfigManagerWindowFactory = { ClientConfigManagerWindowController(model: $0) },
+        ocrCacheLogsWindowFactory: @escaping OCRCacheLogsWindowFactory = { OCRCacheLogsWindowController(model: $0) },
         remoteAdminWindowFactory: @escaping RemoteAdminWindowFactory = {
             RemoteAdminWindowController(
                 host: $0,
@@ -620,6 +652,7 @@ final class DesktopAppModel: ObservableObject {
         confirmBatchRemoveAccountsHandler: ConfirmBatchRemoveAccountsHandler? = nil,
         confirmClearReasoningCacheHandler: ConfirmClearReasoningCacheHandler? = nil,
         confirmClearOCRCacheHandler: ConfirmClearOCRCacheHandler? = nil,
+        confirmClearDiagnosticRequestBodiesHandler: ConfirmClearDiagnosticRequestBodiesHandler? = nil,
         confirmInterfaceModeSwitchHandler: ConfirmInterfaceModeSwitchHandler? = nil,
         confirmDeleteRemoteHostHandler: ConfirmDeleteRemoteHostHandler? = nil,
         confirmInstallUpdateHandler: ConfirmInstallUpdateHandler? = nil,
@@ -648,6 +681,7 @@ final class DesktopAppModel: ObservableObject {
         self.appUpdateCurrentAppURLProvider = appUpdateCurrentAppURLProvider
         self.appUpdateTerminateHandler = appUpdateTerminateHandler
         self.clientConfigManagerWindowFactory = clientConfigManagerWindowFactory
+        self.ocrCacheLogsWindowFactory = ocrCacheLogsWindowFactory
         self.remoteAdminWindowFactory = remoteAdminWindowFactory
         self.aboutWindowFactory = aboutWindowFactory
         self.helpWindowFactory = helpWindowFactory
@@ -658,6 +692,7 @@ final class DesktopAppModel: ObservableObject {
         self.confirmBatchRemoveAccountsHandler = confirmBatchRemoveAccountsHandler
         self.confirmClearReasoningCacheHandler = confirmClearReasoningCacheHandler
         self.confirmClearOCRCacheHandler = confirmClearOCRCacheHandler
+        self.confirmClearDiagnosticRequestBodiesHandler = confirmClearDiagnosticRequestBodiesHandler
         self.confirmInterfaceModeSwitchHandler = confirmInterfaceModeSwitchHandler
         self.confirmDeleteRemoteHostHandler = confirmDeleteRemoteHostHandler
         self.confirmInstallUpdateHandler = confirmInstallUpdateHandler
@@ -3369,6 +3404,24 @@ final class DesktopAppModel: ObservableObject {
         self.statsAutoRefreshTask = nil
     }
 
+    func startAdminEventStreamIfNeeded() {
+        guard self.adminEventStreamTask == nil else { return }
+
+        self.adminEventStreamGeneration += 1
+        let generation = self.adminEventStreamGeneration
+        self.adminEventStreamTask = Task { [weak self] in
+            await self?.runAdminEventStreamLoop(generation: generation)
+        }
+    }
+
+    func stopAdminEventStream() {
+        self.adminEventStreamGeneration += 1
+        self.adminEventStreamTask?.cancel()
+        self.adminEventStreamTask = nil
+        self.adminEventStatsRefreshTask?.cancel()
+        self.adminEventStatsRefreshTask = nil
+    }
+
     private func runStatsAutoRefreshLoop(
         generation: UInt64,
         interval: Duration,
@@ -3408,6 +3461,75 @@ final class DesktopAppModel: ObservableObject {
             self.stats = stats
         } catch is CancellationError {
             return
+        } catch {
+            return
+        }
+    }
+
+    private func runAdminEventStreamLoop(generation: UInt64) async {
+        defer {
+            if self.adminEventStreamGeneration == generation {
+                self.adminEventStreamTask = nil
+            }
+        }
+
+        var reconnectDelay = max(1, self.adminEventReconnectInitialDelaySeconds)
+        let maxReconnectDelay = max(reconnectDelay, self.adminEventReconnectMaxDelaySeconds)
+        while Task.isCancelled == false, self.adminEventStreamGeneration == generation {
+            do {
+                let stream = try await self.admin.streamAdminEvents()
+                reconnectDelay = max(1, self.adminEventReconnectInitialDelaySeconds)
+                for try await event in stream {
+                    guard Task.isCancelled == false, self.adminEventStreamGeneration == generation else {
+                        return
+                    }
+                    await self.handleAdminEvent(event, generation: generation)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                // The 30-second stats polling loop remains the fallback while the event stream reconnects.
+            }
+
+            guard Task.isCancelled == false, self.adminEventStreamGeneration == generation else {
+                return
+            }
+            do {
+                try await Task.sleep(for: .seconds(reconnectDelay))
+            } catch {
+                return
+            }
+            reconnectDelay = min(maxReconnectDelay, reconnectDelay * 2)
+        }
+    }
+
+    private func handleAdminEvent(_ event: AdminEvent, generation: UInt64) async {
+        switch event.type {
+        case .requestLogged, .statsChanged:
+            self.scheduleStatsRefreshFromAdminEvent(generation: generation)
+        }
+    }
+
+    private func scheduleStatsRefreshFromAdminEvent(generation: UInt64) {
+        self.adminEventStatsRefreshTask?.cancel()
+        let debounce = self.adminEventStatsRefreshDebounce
+        self.adminEventStatsRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: debounce)
+            } catch {
+                return
+            }
+            await self?.refreshStatsFromAdminEvent(generation: generation)
+        }
+    }
+
+    private func refreshStatsFromAdminEvent(generation: UInt64) async {
+        guard self.adminEventStreamGeneration == generation else { return }
+        do {
+            let stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
+            try Task.checkCancellation()
+            guard self.adminEventStreamGeneration == generation else { return }
+            self.stats = stats
         } catch {
             return
         }
@@ -4574,6 +4696,7 @@ final class DesktopAppModel: ObservableObject {
         self.proxyTestWindowController?.refreshWindow()
         self.managedProxyWindowController?.refreshWindow()
         self.clientConfigManagerWindowController?.refreshWindow()
+        self.ocrCacheLogsWindowController?.refreshWindow()
         self.requestLogsWindowController?.refreshWindow()
         self.remoteAdminWindowControllers.values.forEach { $0.refreshWindow(preferences: self.preferences) }
     }

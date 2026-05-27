@@ -583,6 +583,7 @@ public final class DaemonController: @unchecked Sendable {
     private let accountModelDiscoveryCache: AccountModelDiscoveryCache
     private let chatCompletionsReasoningCache: ChatCompletionsReasoningCache
     private let ocrImageProcessor: OCRImageProcessor
+    private let adminEventHub: AdminEventHub
 
     public convenience init(
         dataDirectory: URL = Paths.defaultDataDirectory(),
@@ -620,7 +621,8 @@ public final class DaemonController: @unchecked Sendable {
         self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
         self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
         self.chatCompletionsReasoningCache = ChatCompletionsReasoningCache(store: self.store)
-        self.ocrImageProcessor = OCRImageProcessor(cache: OCRResultCache(store: self.store))
+        self.ocrImageProcessor = OCRImageProcessor(cache: OCRResultCache(store: self.store), store: self.store)
+        self.adminEventHub = AdminEventHub()
         self.managedProxyRuntime = manageManagedProxyRuntime
             ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
             : nil
@@ -955,6 +957,10 @@ public final class DaemonController: @unchecked Sendable {
         try self.store.loadStatsSummary(apiKey: apiKey)
     }
 
+    public func adminEvents() async -> AsyncStream<AdminEvent> {
+        await self.adminEventHub.subscribe()
+    }
+
     public func reasoningCacheSummary() async throws -> ReasoningCacheSummary {
         try self.chatCompletionsReasoningCache.summary()
     }
@@ -969,6 +975,14 @@ public final class DaemonController: @unchecked Sendable {
 
     public func clearOCRCache(_ request: ClearOCRCacheRequest) async throws -> ClearOCRCacheResult {
         try await self.ocrImageProcessor.clearCache(request)
+    }
+
+    public func ocrRecognitionLogs(request: OCRRecognitionLogListRequest) async throws -> OCRRecognitionLogListResponse {
+        try self.store.listOCRRecognitionLogs(request)
+    }
+
+    public func ocrRecognitionResult(logID: Int64) async throws -> OCRRecognitionResultLookupResponse {
+        try self.store.loadOCRRecognitionResult(logID: logID)
     }
 
     public func proxyAPIKeyUsage(query: RequestLogQuery) async throws -> ProxyAPIKeyUsageReport {
@@ -1055,6 +1069,22 @@ public final class DaemonController: @unchecked Sendable {
     public func exportRequestLogs(query: RequestLogQuery) async throws -> Data {
         let entries = try self.store.loadAllRequestLogs(query: query)
         return RequestLogCSVExport.data(entries: entries, maskAPIKeys: true)
+    }
+
+    public func diagnosticRequestBodySummary() async throws -> DiagnosticRequestBodySummary {
+        try self.store.diagnosticRequestBodySummary()
+    }
+
+    public func diagnosticRequestBodies(requestLogID: Int64? = nil) async throws -> [DiagnosticRequestBodyEntry] {
+        try self.store.listDiagnosticRequestBodies(requestLogID: requestLogID)
+    }
+
+    public func diagnosticRequestBodyDetail(id: Int64) async throws -> DiagnosticRequestBodyDetail {
+        try self.store.loadDiagnosticRequestBodyDetail(id: id)
+    }
+
+    public func clearDiagnosticRequestBodies(_ request: ClearDiagnosticRequestBodiesRequest) async throws -> ClearDiagnosticRequestBodiesResult {
+        try self.store.clearDiagnosticRequestBodies(request)
     }
 
     public func managedProxySnapshot() async throws -> ManagedProxySnapshot {
@@ -3024,7 +3054,7 @@ public final class DaemonController: @unchecked Sendable {
         let category = self.classifyFailure(status: statusCode, text: bodyText)
         let publicMessage = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: bodyText)
         let latency = Helpers.nowMilliseconds() - startMS
-        try self.store.recordTrace(
+        try self.recordTrace(
             ProxyRequestTrace(
                 endpoint: endpoint.rawValue,
                 upstreamURL: upstreamURL,
@@ -3070,7 +3100,7 @@ public final class DaemonController: @unchecked Sendable {
         promptCacheContext: PromptCacheContext
     ) async throws {
         await self.setActive(candidate)
-        try self.store.recordTrace(
+        try self.recordTrace(
             ProxyRequestTrace(
                 endpoint: endpoint.rawValue,
                 upstreamURL: upstreamURL,
@@ -3109,7 +3139,7 @@ public final class DaemonController: @unchecked Sendable {
                     for try await chunk in upstreamBody {
                         continuation.yield(chunk)
                     }
-                    try? self.store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint.rawValue,
                             upstreamURL: upstreamURL,
@@ -3127,7 +3157,7 @@ public final class DaemonController: @unchecked Sendable {
                     try? self.noteCandidateAttemptSuccess(candidate)
                     continuation.finish()
                 } catch is CancellationError {
-                    try? self.store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint.rawValue,
                             upstreamURL: upstreamURL,
@@ -3146,7 +3176,7 @@ public final class DaemonController: @unchecked Sendable {
                     )
                     continuation.finish()
                 } catch {
-                    try? self.store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint.rawValue,
                             upstreamURL: upstreamURL,
@@ -3740,7 +3770,7 @@ public final class DaemonController: @unchecked Sendable {
                         )
                         errors.append(publicMessage)
                         let latency = Helpers.nowMilliseconds() - startMS
-                        try self.store.recordTrace(
+                        try self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
@@ -3818,7 +3848,7 @@ public final class DaemonController: @unchecked Sendable {
                     )
                     errors.append(publicMessage)
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -3858,7 +3888,7 @@ public final class DaemonController: @unchecked Sendable {
                 let usage = self.geminiUsage(from: payload)
                 let latency = Helpers.nowMilliseconds() - startMS
                 await self.setActive(candidate)
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: endpoint,
                         upstreamURL: upstreamURL,
@@ -3961,7 +3991,7 @@ public final class DaemonController: @unchecked Sendable {
                 text: upstreamError.rawText
             )
             let latency = Helpers.nowMilliseconds() - startMS
-            try self.store.recordTrace(
+            try self.recordTrace(
                 ProxyRequestTrace(
                     endpoint: "/v1beta/models/\(requestedModel):countTokens",
                     upstreamURL: upstreamURL,
@@ -4006,7 +4036,7 @@ public final class DaemonController: @unchecked Sendable {
         let usage = self.geminiUsage(from: payload)
         let latency = Helpers.nowMilliseconds() - startMS
         await self.setActive(candidate)
-        try self.store.recordTrace(
+        try self.recordTrace(
             ProxyRequestTrace(
                 endpoint: "/v1beta/models/\(requestedModel):countTokens",
                 upstreamURL: upstreamURL,
@@ -4200,7 +4230,7 @@ public final class DaemonController: @unchecked Sendable {
                     let category = self.classifyFailure(status: response.statusCode, text: text)
                     errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: "/v1/messages/count_tokens",
                             upstreamURL: upstreamURL,
@@ -4253,7 +4283,7 @@ public final class DaemonController: @unchecked Sendable {
                 let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
                 let payload = try JSONSerialization.data(withJSONObject: AnthropicTranscoder.countTokensResponse(from: usage))
                 let latency = Helpers.nowMilliseconds() - startMS
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: "/v1/messages/count_tokens",
                         upstreamURL: upstreamURL,
@@ -4489,7 +4519,9 @@ public final class DaemonController: @unchecked Sendable {
                     preparedRawAnthropicRequest = await self.anthropicRequestByApplyingOCRIfNeeded(
                         rawAnthropicRequest,
                         candidate: candidate,
-                        config: resolvedConfig
+                        config: resolvedConfig,
+                        endpoint: "/v1/messages",
+                        requestedModel: requestedModel
                     )
                 } else {
                     preparedRawAnthropicRequest = nil
@@ -4537,7 +4569,7 @@ public final class DaemonController: @unchecked Sendable {
                         let category = self.classifyFailure(status: response.statusCode, text: text)
                         errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                         let latency = Helpers.nowMilliseconds() - startMS
-                        try self.store.recordTrace(
+                        try self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
@@ -4625,7 +4657,7 @@ public final class DaemonController: @unchecked Sendable {
                     let category = self.classifyFailure(status: response.statusCode, text: text)
                     errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -4698,7 +4730,7 @@ public final class DaemonController: @unchecked Sendable {
                 }
 
                 let latency = Helpers.nowMilliseconds() - startMS
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: endpoint,
                         upstreamURL: upstreamURL,
@@ -4809,7 +4841,9 @@ public final class DaemonController: @unchecked Sendable {
                     preparedRawAnthropicRequest = await self.anthropicRequestByApplyingOCRIfNeeded(
                         rawAnthropicRequest,
                         candidate: candidate,
-                        config: resolvedConfig
+                        config: resolvedConfig,
+                        endpoint: "/v1/messages/count_tokens",
+                        requestedModel: requestedModel
                     )
                 } else {
                     preparedRawAnthropicRequest = nil
@@ -4855,7 +4889,7 @@ public final class DaemonController: @unchecked Sendable {
                     let category = self.classifyFailure(status: response.statusCode, text: text)
                     errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: "/v1/messages/count_tokens",
                             upstreamURL: upstreamURL,
@@ -4891,7 +4925,7 @@ public final class DaemonController: @unchecked Sendable {
                 let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
                 let inputTokens = self.int64Value(payload["input_tokens"]) ?? 0
                 let latency = Helpers.nowMilliseconds() - startMS
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: "/v1/messages/count_tokens",
                         upstreamURL: upstreamURL,
@@ -4979,7 +5013,9 @@ public final class DaemonController: @unchecked Sendable {
         let upstreamCompatibleRequest = await self.requestByApplyingOCRIfNeeded(
             compatibleRequest,
             candidate: candidate,
-            config: config
+            config: config,
+            endpoint: endpoint,
+            requestedModel: requestedModel
         )
         let adapters = self.openAIUpstreamAdapters(for: candidate.auth)
 
@@ -5009,7 +5045,7 @@ public final class DaemonController: @unchecked Sendable {
             let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
             if downstreamStream {
-                let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
                     var upstream = self.openAIUpstreamRequest(
                         for: candidate.auth,
                         config: requestConfig,
@@ -5021,6 +5057,16 @@ public final class DaemonController: @unchecked Sendable {
                     {
                         upstream.headers["session_id"] = sessionID
                     }
+                    let diagnosticRequestBodyID = self.captureDiagnosticRequestBodyIfNeeded(
+                        config: config,
+                        endpoint: endpoint,
+                        upstreamURL: upstream.url,
+                        candidate: candidate,
+                        requestedModel: requestedModel,
+                        actualModel: actualModel,
+                        body: serialized,
+                        bodyObject: upstreamRequestBody
+                    )
                     return (
                         try await HTTPClientFactory.stream(
                             config: requestConfig,
@@ -5029,7 +5075,8 @@ public final class DaemonController: @unchecked Sendable {
                             headers: upstream.headers,
                             body: serialized
                         ),
-                        upstream.url
+                        upstream.url,
+                        diagnosticRequestBodyID
                     )
                 }
                 if (200..<300).contains(response.statusCode) == false {
@@ -5038,7 +5085,7 @@ public final class DaemonController: @unchecked Sendable {
                     let category = self.classifyFailure(status: response.statusCode, text: text)
                     let publicMessage = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text)
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -5054,7 +5101,8 @@ public final class DaemonController: @unchecked Sendable {
                             failureCategory: category,
                             lastError: Helpers.truncate(text),
                             apiKeyValue: apiKeyValue
-                        )
+                        ),
+                        diagnosticRequestBodyID: diagnosticRequestBodyID
                     )
                     await self.setLastError(publicMessage)
                     let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
@@ -5096,11 +5144,12 @@ public final class DaemonController: @unchecked Sendable {
                     geminiRequestContext: geminiRequestContext,
                     candidate: candidate,
                     startMS: startMS,
-                    reasoningEffort: reasoningEffort
+                    reasoningEffort: reasoningEffort,
+                    diagnosticRequestBodyID: diagnosticRequestBodyID
                 )
             }
 
-            let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+            let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
                 var upstream = self.openAIUpstreamRequest(
                     for: candidate.auth,
                     config: requestConfig,
@@ -5112,6 +5161,16 @@ public final class DaemonController: @unchecked Sendable {
                 {
                     upstream.headers["session_id"] = sessionID
                 }
+                let diagnosticRequestBodyID = self.captureDiagnosticRequestBodyIfNeeded(
+                    config: config,
+                    endpoint: endpoint,
+                    upstreamURL: upstream.url,
+                    candidate: candidate,
+                    requestedModel: requestedModel,
+                    actualModel: actualModel,
+                    body: serialized,
+                    bodyObject: upstreamRequestBody
+                )
                 return (
                     try await HTTPClientFactory.request(
                         config: requestConfig,
@@ -5120,7 +5179,8 @@ public final class DaemonController: @unchecked Sendable {
                         headers: upstream.headers,
                         body: serialized
                     ),
-                    upstream.url
+                    upstream.url,
+                    diagnosticRequestBodyID
                 )
             }
 
@@ -5129,7 +5189,7 @@ public final class DaemonController: @unchecked Sendable {
                 let category = self.classifyFailure(status: response.statusCode, text: text)
                 let publicMessage = self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text)
                 let latency = Helpers.nowMilliseconds() - startMS
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: endpoint,
                         upstreamURL: upstreamURL,
@@ -5145,7 +5205,8 @@ public final class DaemonController: @unchecked Sendable {
                         failureCategory: category,
                         lastError: Helpers.truncate(text),
                         apiKeyValue: apiKeyValue
-                    )
+                    ),
+                    diagnosticRequestBodyID: diagnosticRequestBodyID
                 )
                 await self.setLastError(publicMessage)
                 let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
@@ -5211,7 +5272,7 @@ public final class DaemonController: @unchecked Sendable {
             let successDiagnostic = usageRecognized
                 ? nil
                 : self.openAICompatibleMissingUsageDiagnostic(adapter: adapter)
-            try self.store.recordTrace(
+            try self.recordTrace(
                 ProxyRequestTrace(
                     endpoint: endpoint,
                     upstreamURL: upstreamURL,
@@ -5227,7 +5288,8 @@ public final class DaemonController: @unchecked Sendable {
                     usage: usage,
                     lastError: successDiagnostic.map { Helpers.truncate($0) },
                     apiKeyValue: apiKeyValue
-                )
+                ),
+                diagnosticRequestBodyID: diagnosticRequestBodyID
             )
             try self.noteCandidateAttemptSuccess(candidate)
             await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
@@ -5338,7 +5400,9 @@ public final class DaemonController: @unchecked Sendable {
                 let upstreamCompatibleRequest = await self.requestByApplyingOCRIfNeeded(
                     compatibleRequest,
                     candidate: candidate,
-                    config: config
+                    config: config,
+                    endpoint: endpoint,
+                    requestedModel: requestedModel
                 )
                 let adapterUsesChatCompletions = self.usesOpenAIChatCompletionsAdapter(candidate.auth)
                 let effectiveRequestedModel = (upstreamCompatibleRequest["model"] as? String)?
@@ -5373,13 +5437,23 @@ public final class DaemonController: @unchecked Sendable {
                 if downstreamStream {
                     let candidateAuth = candidate.auth
                     let upstreamSessionID = promptCacheContext.upstreamSessionID
-                    let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                    let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
                         var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
                         if candidateAuth.authMode == .chatGPT,
                            let sessionID = upstreamSessionID
                         {
                             upstream.headers["session_id"] = sessionID
                         }
+                        let diagnosticRequestBodyID = self.captureDiagnosticRequestBodyIfNeeded(
+                            config: config,
+                            endpoint: endpoint,
+                            upstreamURL: upstream.url,
+                            candidate: candidate,
+                            requestedModel: requestedModel,
+                            actualModel: actualModel,
+                            body: serialized,
+                            bodyObject: upstreamRequestBody
+                        )
                         return (
                             try await HTTPClientFactory.stream(
                                 config: requestConfig,
@@ -5388,7 +5462,8 @@ public final class DaemonController: @unchecked Sendable {
                                 headers: upstream.headers,
                                 body: serialized
                             ),
-                            upstream.url
+                            upstream.url,
+                            diagnosticRequestBodyID
                         )
                     }
                     if (200..<300).contains(response.statusCode) == false {
@@ -5397,7 +5472,7 @@ public final class DaemonController: @unchecked Sendable {
                         let category = self.classifyFailure(status: response.statusCode, text: text)
                         errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                         let latency = Helpers.nowMilliseconds() - startMS
-                        try self.store.recordTrace(
+                        try self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
@@ -5413,7 +5488,8 @@ public final class DaemonController: @unchecked Sendable {
                                 failureCategory: category,
                                 lastError: Helpers.truncate(text),
                                 apiKeyValue: apiKeyValue
-                            )
+                            ),
+                            diagnosticRequestBodyID: diagnosticRequestBodyID
                         )
                         await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
                         let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
@@ -5456,19 +5532,30 @@ public final class DaemonController: @unchecked Sendable {
                         geminiRequestContext: geminiRequestContext,
                         candidate: candidate,
                         startMS: startMS,
-                        reasoningEffort: reasoningEffort
+                        reasoningEffort: reasoningEffort,
+                        diagnosticRequestBodyID: diagnosticRequestBodyID
                     )
                 }
 
                 let candidateAuth = candidate.auth
                 let upstreamSessionID = promptCacheContext.upstreamSessionID
-                let (response, upstreamURL) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
+                let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
                     var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
                     if candidateAuth.authMode == .chatGPT,
                        let sessionID = upstreamSessionID
                     {
                         upstream.headers["session_id"] = sessionID
                     }
+                    let diagnosticRequestBodyID = self.captureDiagnosticRequestBodyIfNeeded(
+                        config: config,
+                        endpoint: endpoint,
+                        upstreamURL: upstream.url,
+                        candidate: candidate,
+                        requestedModel: requestedModel,
+                        actualModel: actualModel,
+                        body: serialized,
+                        bodyObject: upstreamRequestBody
+                    )
                     return (
                         try await HTTPClientFactory.request(
                             config: requestConfig,
@@ -5477,7 +5564,8 @@ public final class DaemonController: @unchecked Sendable {
                             headers: upstream.headers,
                             body: serialized
                         ),
-                        upstream.url
+                        upstream.url,
+                        diagnosticRequestBodyID
                     )
                 }
 
@@ -5486,7 +5574,7 @@ public final class DaemonController: @unchecked Sendable {
                     let category = self.classifyFailure(status: response.statusCode, text: text)
                     errors.append(self.publicFacingCandidateFailureMessage(candidate: candidate, rawText: text))
                     let latency = Helpers.nowMilliseconds() - startMS
-                    try self.store.recordTrace(
+                    try self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -5502,7 +5590,8 @@ public final class DaemonController: @unchecked Sendable {
                             failureCategory: category,
                             lastError: Helpers.truncate(text),
                             apiKeyValue: apiKeyValue
-                        )
+                        ),
+                        diagnosticRequestBodyID: diagnosticRequestBodyID
                     )
                     await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
                     let shouldContinueAfterRecovery = try await self.handleRecoverableFailure(
@@ -5560,7 +5649,7 @@ public final class DaemonController: @unchecked Sendable {
                     )
                 }
                 let latency = Helpers.nowMilliseconds() - startMS
-                try self.store.recordTrace(
+                try self.recordTrace(
                     ProxyRequestTrace(
                         endpoint: endpoint,
                         upstreamURL: upstreamURL,
@@ -5575,7 +5664,8 @@ public final class DaemonController: @unchecked Sendable {
                         latencyMS: latency,
                         usage: usage,
                         apiKeyValue: apiKeyValue
-                    )
+                    ),
+                    diagnosticRequestBodyID: diagnosticRequestBodyID
                 )
                 try self.noteCandidateAttemptSuccess(candidate)
                 await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
@@ -5767,23 +5857,45 @@ public final class DaemonController: @unchecked Sendable {
     private func requestByApplyingOCRIfNeeded(
         _ request: [String: Any],
         candidate: ProxyCandidate,
-        config: AppConfig
+        config: AppConfig,
+        endpoint: String,
+        requestedModel: String
     ) async -> [String: Any] {
         guard candidate.record.supportsVision == false else {
             return request
         }
-        return await self.ocrImageProcessor.requestByApplyingOCRIfNeeded(request, config: config)
+        return await self.ocrImageProcessor.requestByApplyingOCRIfNeeded(
+            request,
+            config: config,
+            logContext: self.ocrRecognitionLogContext(
+                candidate: candidate,
+                endpoint: endpoint,
+                requestedModel: requestedModel,
+                request: request
+            )
+        )
     }
 
     private func anthropicRequestByApplyingOCRIfNeeded(
         _ request: [String: Any],
         candidate: ProxyCandidate,
-        config: AppConfig
+        config: AppConfig,
+        endpoint: String,
+        requestedModel: String
     ) async -> [String: Any] {
         guard candidate.record.supportsVision == false else {
             return request
         }
-        return await self.ocrImageProcessor.anthropicRequestByApplyingOCRIfNeeded(request, config: config)
+        return await self.ocrImageProcessor.anthropicRequestByApplyingOCRIfNeeded(
+            request,
+            config: config,
+            logContext: self.ocrRecognitionLogContext(
+                candidate: candidate,
+                endpoint: endpoint,
+                requestedModel: requestedModel,
+                request: request
+            )
+        )
     }
 
     private func geminiNativeRequestByApplyingOCRIfNeeded(
@@ -5794,7 +5906,86 @@ public final class DaemonController: @unchecked Sendable {
         guard candidate.record.supportsVision == false else {
             return request
         }
-        return await self.ocrImageProcessor.geminiRequestByApplyingOCRIfNeeded(request, config: config)
+        return await self.ocrImageProcessor.geminiRequestByApplyingOCRIfNeeded(
+            request,
+            config: config,
+            logContext: self.ocrRecognitionLogContext(
+                candidate: candidate,
+                endpoint: "/v1beta/models/gemini:generateContent",
+                requestedModel: (request["model"] as? String) ?? "",
+                request: request
+            )
+        )
+    }
+
+    private func ocrRecognitionLogContext(
+        candidate: ProxyCandidate,
+        endpoint: String,
+        requestedModel: String,
+        request: [String: Any]
+    ) -> OCRRecognitionLogContext {
+        let requestModel = requestedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let payloadModel = (request["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return OCRRecognitionLogContext(
+            endpoint: endpoint,
+            accountKey: candidate.record.accountKey,
+            accountLabel: candidate.record.label,
+            requestedModel: requestModel.isEmpty ? payloadModel : requestModel
+        )
+    }
+
+    private func captureDiagnosticRequestBodyIfNeeded(
+        config: AppConfig,
+        endpoint: String,
+        upstreamURL: String,
+        candidate: ProxyCandidate,
+        requestedModel: String,
+        actualModel: String?,
+        body: Data,
+        bodyObject: [String: Any]
+    ) -> Int64? {
+        let captureConfig = config.diagnosticRequestBodyCapture
+        guard captureConfig.enabled else {
+            return nil
+        }
+        do {
+            let entry = try self.store.insertDiagnosticRequestBody(
+                DiagnosticRequestBodyCaptureInput(
+                    endpoint: endpoint,
+                    upstreamURL: upstreamURL,
+                    accountKey: candidate.record.accountKey,
+                    accountLabel: candidate.record.label,
+                    model: requestedModel,
+                    actualModel: actualModel,
+                    body: body,
+                    bodyObject: bodyObject,
+                    config: captureConfig
+                )
+            )
+            return entry.id
+        } catch {
+            print("[diagnostic-request-body] capture failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    @discardableResult
+    private func recordTrace(
+        _ trace: ProxyRequestTrace,
+        diagnosticRequestBodyID: Int64? = nil
+    ) throws -> Int64 {
+        let requestLogID = try self.store.recordTrace(trace)
+        if let diagnosticRequestBodyID {
+            try? self.store.linkDiagnosticRequestBody(id: diagnosticRequestBodyID, requestLogID: requestLogID)
+        }
+        self.publishRequestLoggedEvent(requestLogID: requestLogID)
+        return requestLogID
+    }
+
+    private func publishRequestLoggedEvent(requestLogID: Int64) {
+        Task {
+            await self.adminEventHub.publishRequestLogged(requestLogID: requestLogID)
+        }
     }
 
     private func syntheticResponseInputData(from input: Any?) -> Data? {
@@ -6295,7 +6486,6 @@ public final class DaemonController: @unchecked Sendable {
             beta: anthropicBeta,
             contentType: "text/event-stream; charset=utf-8"
         )
-        let store = self.store
         let accountKey = candidate.record.accountKey
         let accountLabel = candidate.record.label
         let terminalTrace = StreamTerminalTraceCoordinator()
@@ -6308,7 +6498,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.success) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -6332,7 +6522,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.failure) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -6404,7 +6594,7 @@ public final class DaemonController: @unchecked Sendable {
                         guard await terminalTrace.begin(.cancelled) else {
                             return
                         }
-                        try? store.recordTrace(
+                        _ = try? self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
@@ -6890,11 +7080,11 @@ public final class DaemonController: @unchecked Sendable {
         geminiRequestContext: GeminiRequestContext?,
         candidate: ProxyCandidate,
         startMS: Int64,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        diagnosticRequestBodyID: Int64? = nil
     ) -> ProxyHTTPResponse {
         let accountKey = candidate.record.accountKey
         let accountLabel = candidate.record.label
-        let store = self.store
         let terminalTrace = StreamTerminalTraceCoordinator()
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             let keepaliveState = responseMode == .anthropicMessages ? AnthropicStreamKeepaliveState() : nil
@@ -6941,7 +7131,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.success) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -6957,7 +7147,8 @@ public final class DaemonController: @unchecked Sendable {
                             usage: usage,
                             lastError: diagnostic.map { Helpers.truncate($0) },
                             apiKeyValue: apiKeyValue
-                        )
+                        ),
+                        diagnosticRequestBodyID: diagnosticRequestBodyID
                     )
                     try? self.noteCandidateAttemptSuccess(candidate)
                 }
@@ -6966,7 +7157,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.failure) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -6982,7 +7173,8 @@ public final class DaemonController: @unchecked Sendable {
                             failureCategory: .upstream,
                             lastError: Helpers.truncate(message),
                             apiKeyValue: apiKeyValue
-                        )
+                        ),
+                        diagnosticRequestBodyID: diagnosticRequestBodyID
                     )
                     await self.setLastError(
                         self.publicFacingCandidateFailureMessage(
@@ -7192,7 +7384,7 @@ public final class DaemonController: @unchecked Sendable {
                         guard await terminalTrace.begin(.cancelled) else {
                             return
                         }
-                        try? store.recordTrace(
+                        _ = try? self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
@@ -7245,7 +7437,6 @@ public final class DaemonController: @unchecked Sendable {
     ) -> ProxyHTTPResponse {
         let accountKey = candidate.record.accountKey
         let accountLabel = candidate.record.label
-        let store = self.store
         let contentType = headers["content-type"] ?? "text/event-stream; charset=utf-8"
         let terminalTrace = StreamTerminalTraceCoordinator()
         let stream = AsyncThrowingStream<Data, Error> { continuation in
@@ -7280,7 +7471,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.success) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -7304,7 +7495,7 @@ public final class DaemonController: @unchecked Sendable {
                     guard await terminalTrace.begin(.failure) else {
                         return
                     }
-                    try? store.recordTrace(
+                    _ = try? self.recordTrace(
                         ProxyRequestTrace(
                             endpoint: endpoint,
                             upstreamURL: upstreamURL,
@@ -7387,7 +7578,7 @@ public final class DaemonController: @unchecked Sendable {
                         guard await terminalTrace.begin(.cancelled) else {
                             return
                         }
-                        try? store.recordTrace(
+                        _ = try? self.recordTrace(
                             ProxyRequestTrace(
                                 endpoint: endpoint,
                                 upstreamURL: upstreamURL,
