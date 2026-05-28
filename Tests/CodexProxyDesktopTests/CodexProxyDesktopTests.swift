@@ -4645,6 +4645,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         let ocrCacheLogsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRCacheLogsView.swift")
         let ocrWindowSource = try Self.repoFileText("Sources/CodexProxyDesktop/OCRCacheLogsWindowController.swift")
         let adminSource = try Self.repoFileText("Sources/CodexProxyDesktop/AdminAPIClient.swift")
+        let localOCRModelSupportSource = try Self.repoFileText("Sources/CodexProxyCore/LocalOCRModelSupport.swift")
+        let localOCRManagementSupportSource = try Self.repoFileText("Sources/CodexProxyDesktop/LocalOCRModelManagementSupport.swift")
         let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
 
         XCTAssertTrue(settingsSource.contains(".actionOpenOCRModelManager"))
@@ -4660,6 +4662,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertFalse(ocrSettingsSource.contains(".labelOCRPrompt"))
         XCTAssertFalse(ocrSettingsSource.contains("LocalOCRModelManagerRow"))
         XCTAssertFalse(ocrSettingsSource.contains("downloadLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains("TabView(selection: self.$selectedTab)"))
+        XCTAssertTrue(ocrModelManagerSource.contains(".sectionOCRCommonSettings"))
         XCTAssertTrue(ocrModelManagerSource.contains(".sectionOnlineOCRModels"))
         XCTAssertTrue(ocrModelManagerSource.contains(".sectionLocalOCRModels"))
         XCTAssertTrue(ocrModelManagerSource.contains("OnlineOCRProfileEditorSheet"))
@@ -4673,6 +4677,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(ocrModelManagerSource.contains("self.model.deleteLocalOCRModel"))
         XCTAssertTrue(ocrModelManagerSource.contains("self.model.selectLocalOCRModel"))
         XCTAssertTrue(ocrModelManagerSource.contains("self.model.stopLocalOCRRuntime"))
+        XCTAssertTrue(ocrModelManagerSource.contains("ProgressView(value: self.status.progress)"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.downloadProgressText"))
         XCTAssertTrue(ocrModelManagerWindowSource.contains("OCRModelManagerWindowController"))
         XCTAssertTrue(ocrModelManagerWindowSource.contains("OCRModelManagerView(model: model)"))
         XCTAssertTrue(ocrCacheLogsSource.contains(".sectionOCRCache"))
@@ -4689,6 +4695,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(adminSource.contains("/ocr-local-models"))
         XCTAssertTrue(adminSource.contains("/ocr-local-runtime/stop"))
         XCTAssertTrue(adminSource.contains("Self.pathComponent(id)"))
+        XCTAssertTrue(localOCRModelSupportSource.contains("private func downloadFile("))
+        XCTAssertTrue(localOCRModelSupportSource.contains("for try await byte in bytes"))
+        XCTAssertTrue(localOCRModelSupportSource.contains("updateDownloadProgress("))
+        XCTAssertTrue(localOCRManagementSupportSource.contains("startLocalOCRModelProgressRefreshIfNeeded()"))
+        XCTAssertTrue(localOCRManagementSupportSource.contains("Task.sleep(for: .seconds(1))"))
+        XCTAssertTrue(localOCRManagementSupportSource.contains("stopLocalOCRModelProgressRefresh()"))
         XCTAssertTrue(preferencesSource.contains(".ocrCacheLogsWindowTitle: \"OCR 缓存与识别日志\""))
         XCTAssertTrue(preferencesSource.contains(".ocrCacheLogsWindowTitle: \"OCR Cache & Recognition Logs\""))
         XCTAssertTrue(preferencesSource.contains(".actionOpenOCRCacheLogs: \"查看 OCR 缓存与识别日志\""))
@@ -8457,14 +8469,18 @@ final class CodexProxyDesktopTests: XCTestCase {
         model.preferences.languageMode = .english
         XCTAssertEqual(
             model.text(.overviewTrafficHint),
-            "Review local request totals at a glance, compare Today, This Week, and This Month, then inspect the latest four weeks through daily and weekly token trends."
+            "Review local request totals at a glance, compare Today, This Week, and This Month, then inspect the latest four weeks and last 12 months through token trends."
         )
+        XCTAssertEqual(model.text(.labelMonthlyTrend), "Monthly Trend")
+        XCTAssertEqual(model.text(.labelRecentTwelveMonths), "Last 12 Months")
 
         model.preferences.languageMode = .zhHans
         XCTAssertEqual(
             model.text(.overviewTrafficHint),
-            "先看本地请求汇总，再对比今天、本周和本月的 Token 用量，并结合最近 4 周的按日、按周趋势判断流量变化。"
+            "先看本地请求汇总，再对比今天、本周和本月的 Token 用量，并结合最近 4 周和最近 12 个月的趋势判断流量变化。"
         )
+        XCTAssertEqual(model.text(.labelMonthlyTrend), "按月趋势")
+        XCTAssertEqual(model.text(.labelRecentTwelveMonths), "最近 12 个月")
     }
 
     @MainActor
@@ -9479,6 +9495,102 @@ final class CodexProxyDesktopTests: XCTestCase {
         ])
         XCTAssertEqual(points[3].title, model.text(.optionThisWeek))
         XCTAssertEqual(points[3].detailText, "4月13日 - 4月19日")
+    }
+
+    @MainActor
+    func testOverviewMonthlyTrendPointsCoverRecentTwelveMonths() throws {
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .english
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
+
+        func makeDate(year: Int, month: Int, day: Int, hour: Int = 0, minute: Int = 0) throws -> Date {
+            var components = DateComponents()
+            components.calendar = calendar
+            components.timeZone = calendar.timeZone
+            components.year = year
+            components.month = month
+            components.day = day
+            components.hour = hour
+            components.minute = minute
+            return try XCTUnwrap(calendar.date(from: components))
+        }
+
+        let now = try makeDate(year: 2026, month: 4, day: 15, hour: 12, minute: 30)
+        let february = try makeDate(year: 2026, month: 2, day: 1)
+        let april = try makeDate(year: 2026, month: 4, day: 1)
+
+        model.stats = AdminStatsSummary(
+            totalRequests: 0,
+            totalFailures: 0,
+            totalAuthFailures: 0,
+            totalRateLimits: 0,
+            totalQuotaFailures: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalTokens: 0,
+            naturalTokenUsage: .init(
+                monthlyTrend: [
+                    .init(
+                        bucketStart: Int64(february.timeIntervalSince1970),
+                        windowSeconds: 28 * 86_400,
+                        requestCount: 1,
+                        inputTokens: 20,
+                        outputTokens: 5,
+                        cacheHitTokens: 7,
+                        cacheMissTokens: 13
+                    ),
+                    .init(
+                        bucketStart: Int64(april.timeIntervalSince1970),
+                        windowSeconds: 30 * 86_400,
+                        requestCount: 2,
+                        inputTokens: 40,
+                        outputTokens: 6,
+                        cacheHitTokens: 8,
+                        cacheMissTokens: 32
+                    ),
+                ]
+            ),
+            latestBuckets: []
+        )
+
+        let points = model.overviewMonthlyTrendPoints(now: now, calendar: calendar)
+
+        XCTAssertEqual(points.count, 12)
+        XCTAssertEqual(points.first?.title, "May 2025")
+        XCTAssertEqual(points.first?.xAxisPrimaryLabel, "May")
+        XCTAssertEqual(points.first?.xAxisSecondaryLabel, "2025")
+        XCTAssertEqual(points[9].title, "Feb 2026")
+        XCTAssertEqual(points[9].totalTokens, 25)
+        XCTAssertEqual(points[9].requestCount, 1)
+        XCTAssertEqual(points[9].cacheHitTokens, 7)
+        XCTAssertEqual(points[9].cacheMissTokens, 13)
+        XCTAssertEqual(points[10].title, "Mar 2026")
+        XCTAssertEqual(points[10].totalTokens, 0)
+        XCTAssertEqual(points[11].title, "Apr 2026")
+        XCTAssertEqual(points[11].detailText, "Apr 1 - Apr 15")
+        XCTAssertEqual(points[11].totalTokens, 46)
+        XCTAssertEqual(points[11].inputTokens, 40)
+        XCTAssertEqual(points[11].outputTokens, 6)
+        XCTAssertEqual(points[11].requestCount, 2)
+        XCTAssertTrue(model.overviewHasTrafficTrendData)
+    }
+
+    func testOverviewMonthlyTrendUIAndLocalizationAreDeclared() throws {
+        let overviewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let supportSource = try Self.repoFileText("Sources/CodexProxyDesktop/OverviewSupport.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertTrue(overviewSource.contains(".labelMonthlyTrend"))
+        XCTAssertTrue(overviewSource.contains(".labelRecentTwelveMonths"))
+        XCTAssertTrue(overviewSource.contains("points: self.model.overviewMonthlyTrendPoints"))
+        XCTAssertTrue(supportSource.contains("overviewMonthlyTrendPoints"))
+        XCTAssertTrue(supportSource.contains("monthlyTrend"))
+        XCTAssertTrue(preferencesSource.contains(".labelMonthlyTrend: \"Monthly Trend\""))
+        XCTAssertTrue(preferencesSource.contains(".labelMonthlyTrend: \"按月趋势\""))
+        XCTAssertTrue(preferencesSource.contains(".labelRecentTwelveMonths: \"Last 12 Months\""))
+        XCTAssertTrue(preferencesSource.contains(".labelRecentTwelveMonths: \"最近 12 个月\""))
     }
 
     @MainActor

@@ -15,6 +15,7 @@ extension DesktopAppModel {
         defer { self.localOCRModelsIsRefreshing = false }
         do {
             self.localOCRModelsResponse = try await self.admin.getLocalOCRModels()
+            self.reconcileLocalOCRModelProgressRefresh()
         } catch {
             self.present(error: error, context: .loadOCRCache)
         }
@@ -36,6 +37,7 @@ extension DesktopAppModel {
         await self.performLocalOCRModelAction(id: descriptor.id) {
             try await self.admin.downloadLocalOCRModel(id: descriptor.id)
         }
+        self.reconcileLocalOCRModelProgressRefresh()
     }
 
     func verifyLocalOCRModel(_ descriptor: LocalOCRModelDescriptor) async {
@@ -48,6 +50,12 @@ extension DesktopAppModel {
         await self.performLocalOCRModelAction(id: descriptor.id) {
             try await self.admin.deleteLocalOCRModel(id: descriptor.id)
         }
+        self.reconcileLocalOCRModelProgressRefresh()
+    }
+
+    func stopLocalOCRModelProgressRefresh() {
+        self.localOCRModelProgressRefreshTask?.cancel()
+        self.localOCRModelProgressRefreshTask = nil
     }
 
     func stopLocalOCRRuntime() async {
@@ -91,6 +99,51 @@ extension DesktopAppModel {
             self.present(error: error, context: .loadOCRCache)
             await self.refreshLocalOCRModels()
         }
+    }
+
+    private var hasDownloadingLocalOCRModels: Bool {
+        self.localOCRModelsResponse.models.contains { $0.phase == .downloading }
+    }
+
+    private func reconcileLocalOCRModelProgressRefresh() {
+        if self.hasDownloadingLocalOCRModels {
+            self.startLocalOCRModelProgressRefreshIfNeeded()
+        } else {
+            self.stopLocalOCRModelProgressRefresh()
+        }
+    }
+
+    private func startLocalOCRModelProgressRefreshIfNeeded() {
+        guard self.localOCRModelProgressRefreshTask == nil else {
+            return
+        }
+        self.localOCRModelProgressRefreshTask = Task { [weak self] in
+            while Task.isCancelled == false {
+                try? await Task.sleep(for: .seconds(1))
+                guard Task.isCancelled == false, let self else {
+                    break
+                }
+                await self.refreshLocalOCRModelsForProgress()
+                let shouldContinue = self.hasDownloadingLocalOCRModels
+                if shouldContinue == false {
+                    break
+                }
+            }
+            self?.clearLocalOCRModelProgressRefreshTask()
+        }
+    }
+
+    private func refreshLocalOCRModelsForProgress() async {
+        do {
+            self.localOCRModelsResponse = try await self.admin.getLocalOCRModels()
+        } catch {
+            self.stopLocalOCRModelProgressRefresh()
+            self.present(error: error, context: .loadOCRCache)
+        }
+    }
+
+    private func clearLocalOCRModelProgressRefreshTask() {
+        self.localOCRModelProgressRefreshTask = nil
     }
 }
 #endif

@@ -2,26 +2,59 @@
 import CodexProxyCore
 import SwiftUI
 
+enum OCRManagerTab: Hashable, CaseIterable {
+    case settings
+    case online
+    case local
+}
+
 struct OCRModelManagerView: View {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: DesktopAppModel
     @State private var editingOnlineProfile: OnlineOCRModelProfile?
+    @State private var selectedTab: OCRManagerTab = .settings
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 ShellBackground()
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        self.header
-                        self.commonSettingsPanel
-                        self.onlineModelsPanel
-                        self.localModelsPanel
+                VStack(alignment: .leading, spacing: 12) {
+                    self.header
+                        .padding(.horizontal, 24)
+                        .padding(.top, 22)
+
+                    TabView(selection: self.$selectedTab) {
+                        ScrollView {
+                            self.commonSettingsPanel
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 18)
+                        }
+                        .tabItem {
+                            Label(self.model.text(.sectionOCRCommonSettings), systemImage: "gearshape")
+                        }
+                        .tag(OCRManagerTab.settings)
+
+                        ScrollView {
+                            self.onlineModelsPanel
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 18)
+                        }
+                        .tabItem {
+                            Label(self.model.text(.sectionOnlineOCRModels), systemImage: "cloud")
+                        }
+                        .tag(OCRManagerTab.online)
+
+                        ScrollView {
+                            self.localModelsPanel
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 18)
+                        }
+                        .tabItem {
+                            Label(self.model.text(.sectionLocalOCRModels), systemImage: "desktopcomputer")
+                        }
+                        .tag(OCRManagerTab.local)
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 22)
                 }
 
                 ToastStackView(
@@ -450,7 +483,13 @@ private struct LocalOCRModelManagerRow: View {
             }
 
             if self.status.phase == .downloading {
-                ProgressView(value: self.status.progress)
+                HStack(spacing: 10) {
+                    ProgressView(value: self.status.progress)
+                    Text(self.downloadProgressText)
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(palette.textSecondary)
+                        .frame(width: 42, alignment: .trailing)
+                }
             }
 
             HStack(alignment: .center, spacing: 8) {
@@ -541,6 +580,10 @@ private struct LocalOCRModelManagerRow: View {
         case .notInstalled:
             return .neutral
         }
+    }
+
+    private var downloadProgressText: String {
+        "\(Int((self.status.progress * 100).rounded()))%"
     }
 
     private var metadataText: String {

@@ -73,7 +73,7 @@ struct OCRCacheLogsView: View {
         Button(self.model.text(.actionRefreshOCRCache)) {
             Task { await self.model.refreshOCRCacheLogsWindowData() }
         }
-        .buttonStyle(QuietCapsuleButtonStyle(tint: palette.accent, symbol: "arrow.clockwise"))
+        .buttonStyle(TopBarCompactActionButtonStyle(kind: .secondary))
         .disabled(self.model.ocrCacheIsRefreshing || self.model.ocrRecognitionLogsIsRefreshing)
     }
 
@@ -217,6 +217,8 @@ struct OCRCacheLogsView: View {
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 self.recognitionLogPrivacyNotice
+                self.recognitionLogMetrics
+                self.recognitionLogCleanupActions
                 self.recognitionLogControls
                 self.recognitionLogList
             }
@@ -247,6 +249,101 @@ struct OCRCacheLogsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(palette.infoBorder.opacity(self.colorScheme == .dark ? 0.36 : 0.50), lineWidth: 1)
         )
+    }
+
+
+    private var recognitionLogMetrics: some View {
+        LazyVGrid(columns: self.metricColumns, spacing: 10) {
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheTotal),
+                value: "\(self.model.ocrRecognitionLogSummary.totalCount)",
+                footnote: self.model.text(.sectionOCRRecognitionLogs),
+                tone: .accent,
+                symbol: "list.bullet.rectangle.portrait",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheExpired),
+                value: "\(self.model.ocrRecognitionLogSummary.expiredCount)",
+                footnote: self.model.text(.actionClearExpiredOCRRecognitionLogs),
+                tone: self.model.ocrRecognitionLogSummary.expiredCount > 0 ? .warning : .neutral,
+                symbol: "clock.badge.exclamationmark",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheNewest),
+                value: self.model.ocrCacheTimestampText(self.model.ocrRecognitionLogSummary.newestCreatedAt),
+                footnote: self.model.text(.labelLastRefreshed),
+                tone: .neutral,
+                symbol: "clock.arrow.circlepath",
+                compact: true
+            )
+            MetricTile(
+                label: self.model.text(.labelReasoningCacheOldest),
+                value: self.model.ocrCacheTimestampText(self.model.ocrRecognitionLogSummary.oldestCreatedAt),
+                footnote: self.model.text(.labelTime),
+                tone: .neutral,
+                symbol: "clock",
+                compact: true
+            )
+        }
+    }
+
+    private var recognitionLogCleanupActions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FormFieldPanel(title: self.model.text(.labelReasoningCacheOlderThan)) {
+                Picker(
+                    self.model.text(.labelReasoningCacheOlderThan),
+                    selection: self.$model.ocrRecognitionLogOlderThanSeconds
+                ) {
+                    ForEach(ReasoningCacheOlderThanPreset.allCases) { preset in
+                        Text(self.model.reasoningCacheOlderThanLabel(preset.rawValue)).tag(preset.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(self.model.ocrRecognitionLogIsClearing)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    self.clearExpiredRecognitionLogsButton
+                    self.clearOlderRecognitionLogsButton
+                    self.clearAllRecognitionLogsButton
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    self.clearExpiredRecognitionLogsButton
+                    self.clearOlderRecognitionLogsButton
+                    self.clearAllRecognitionLogsButton
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var clearExpiredRecognitionLogsButton: some View {
+        Button(self.model.text(.actionClearExpiredOCRRecognitionLogs)) {
+            Task { await self.model.clearExpiredOCRRecognitionLogs() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(self.model.ocrRecognitionLogIsClearing)
+    }
+
+    private var clearOlderRecognitionLogsButton: some View {
+        Button(self.model.text(.actionClearOCRRecognitionLogsOlderThan)) {
+            Task { await self.model.clearOCRRecognitionLogsOlderThanSelectedPreset() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .disabled(!self.model.ocrRecognitionLogHasEntries || self.model.ocrRecognitionLogIsClearing)
+    }
+
+    private var clearAllRecognitionLogsButton: some View {
+        Button(self.model.text(.actionClearAllOCRRecognitionLogs)) {
+            Task { await self.model.clearAllOCRRecognitionLogs() }
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .danger))
+        .disabled(!self.model.ocrRecognitionLogHasEntries || self.model.ocrRecognitionLogIsClearing)
     }
 
     private var recognitionLogControls: some View {
@@ -358,6 +455,9 @@ private struct OCRRecognitionLogRow: View {
                     Text(DesktopDateTimeFormat.string(fromUnixSeconds: self.entry.createdAt))
                     Text(self.entry.accountLabel.isEmpty ? self.entry.accountKey : self.entry.accountLabel)
                     Text(self.entry.requestedModel.isEmpty ? "-" : self.entry.requestedModel)
+                    if !self.entry.ocrModel.isEmpty {
+                        Text("\(self.model.text(.labelOCRModel)): \(self.entry.ocrModel)")
+                    }
                     Text("\(self.entry.latencyMS)ms")
                 }
                 .font(.system(size: 10, weight: .medium))

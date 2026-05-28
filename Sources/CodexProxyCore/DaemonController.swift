@@ -996,6 +996,17 @@ public final class DaemonController: @unchecked Sendable {
         try self.store.loadOCRRecognitionResult(logID: logID)
     }
 
+
+    public func ocrRecognitionLogSummary() async throws -> OCRRecognitionLogSummary {
+        try self.store.ocrRecognitionLogSummary()
+    }
+
+    public func clearOCRRecognitionLogs(_ request: ClearOCRRecognitionLogsRequest) async throws -> ClearOCRRecognitionLogsResult {
+        let deletedCount = try self.store.clearOCRRecognitionLogs(request)
+        let summary = try self.store.ocrRecognitionLogSummary()
+        return ClearOCRRecognitionLogsResult(deletedCount: deletedCount, summary: summary)
+    }
+
     public func testOCRModel(_ request: OCRModelTestRequest) async throws -> OCRModelTestResult {
         var config = try await self.loadConfig()
         config.ocrModel = request.ocrModel

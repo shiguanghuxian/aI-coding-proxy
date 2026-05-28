@@ -3007,19 +3007,22 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
         public var month: NaturalRangeTokenUsage
         public var dailyTrend: [NaturalTimeBucketUsage]
         public var weeklyTrend: [NaturalTimeBucketUsage]
+        public var monthlyTrend: [NaturalTimeBucketUsage]
 
         public init(
             today: NaturalRangeTokenUsage = NaturalRangeTokenUsage(),
             week: NaturalRangeTokenUsage = NaturalRangeTokenUsage(),
             month: NaturalRangeTokenUsage = NaturalRangeTokenUsage(),
             dailyTrend: [NaturalTimeBucketUsage] = [],
-            weeklyTrend: [NaturalTimeBucketUsage] = []
+            weeklyTrend: [NaturalTimeBucketUsage] = [],
+            monthlyTrend: [NaturalTimeBucketUsage] = []
         ) {
             self.today = today
             self.week = week
             self.month = month
             self.dailyTrend = dailyTrend
             self.weeklyTrend = weeklyTrend
+            self.monthlyTrend = monthlyTrend
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -3028,6 +3031,7 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             case month
             case dailyTrend
             case weeklyTrend
+            case monthlyTrend
         }
 
         public init(from decoder: Decoder) throws {
@@ -3040,7 +3044,8 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
                 month: try container.decodeIfPresent(NaturalRangeTokenUsage.self, forKey: .month)
                     ?? NaturalRangeTokenUsage(),
                 dailyTrend: try container.decodeIfPresent([NaturalTimeBucketUsage].self, forKey: .dailyTrend) ?? [],
-                weeklyTrend: try container.decodeIfPresent([NaturalTimeBucketUsage].self, forKey: .weeklyTrend) ?? []
+                weeklyTrend: try container.decodeIfPresent([NaturalTimeBucketUsage].self, forKey: .weeklyTrend) ?? [],
+                monthlyTrend: try container.decodeIfPresent([NaturalTimeBucketUsage].self, forKey: .monthlyTrend) ?? []
             )
         }
 
@@ -3051,6 +3056,7 @@ public struct AdminStatsSummary: Codable, Sendable, Equatable {
             try container.encode(self.month, forKey: .month)
             try container.encode(self.dailyTrend, forKey: .dailyTrend)
             try container.encode(self.weeklyTrend, forKey: .weeklyTrend)
+            try container.encode(self.monthlyTrend, forKey: .monthlyTrend)
         }
     }
 
@@ -4287,6 +4293,82 @@ public struct OCRRecognitionResultLookupResponse: Codable, Sendable, Equatable {
         self.message = normalizedMessage.isEmpty ? nil : normalizedMessage
     }
 }
+
+public struct OCRRecognitionLogSummary: Codable, Sendable, Equatable {
+    public var totalCount: Int
+    public var expiredCount: Int
+    public var oldestCreatedAt: Int64?
+    public var newestCreatedAt: Int64?
+
+    public init(
+        totalCount: Int = 0,
+        expiredCount: Int = 0,
+        oldestCreatedAt: Int64? = nil,
+        newestCreatedAt: Int64? = nil
+    ) {
+        self.totalCount = max(0, totalCount)
+        self.expiredCount = max(0, expiredCount)
+        self.oldestCreatedAt = oldestCreatedAt
+        self.newestCreatedAt = newestCreatedAt
+    }
+}
+
+public struct ClearOCRRecognitionLogsRequest: Codable, Sendable, Equatable {
+    public var expiredOnly: Bool
+    public var olderThanSeconds: Int64?
+    public var clearAll: Bool
+
+    public init(
+        expiredOnly: Bool = false,
+        olderThanSeconds: Int64? = nil,
+        clearAll: Bool = false
+    ) {
+        self.expiredOnly = expiredOnly
+        self.olderThanSeconds = olderThanSeconds.flatMap { $0 > 0 ? $0 : nil }
+        self.clearAll = clearAll
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiredOnly
+        case expiredOnlySnake = "expired_only"
+        case olderThanSeconds
+        case olderThanSecondsSnake = "older_than_seconds"
+        case clearAll
+        case clearAllSnake = "clear_all"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            expiredOnly: try container.decodeIfPresent(Bool.self, forKey: .expiredOnly)
+                ?? container.decodeIfPresent(Bool.self, forKey: .expiredOnlySnake)
+                ?? false,
+            olderThanSeconds: try container.decodeIfPresent(Int64.self, forKey: .olderThanSeconds)
+                ?? container.decodeIfPresent(Int64.self, forKey: .olderThanSecondsSnake),
+            clearAll: try container.decodeIfPresent(Bool.self, forKey: .clearAll)
+                ?? container.decodeIfPresent(Bool.self, forKey: .clearAllSnake)
+                ?? false
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.expiredOnly, forKey: .expiredOnly)
+        try container.encodeIfPresent(self.olderThanSeconds, forKey: .olderThanSeconds)
+        try container.encode(self.clearAll, forKey: .clearAll)
+    }
+}
+
+public struct ClearOCRRecognitionLogsResult: Codable, Sendable, Equatable {
+    public var deletedCount: Int
+    public var summary: OCRRecognitionLogSummary
+
+    public init(deletedCount: Int, summary: OCRRecognitionLogSummary) {
+        self.deletedCount = max(0, deletedCount)
+        self.summary = summary
+    }
+}
+
 
 public struct OCRModelTestRequest: Codable, Sendable, Equatable {
     public var ocrModel: OCRModelConfig

@@ -662,15 +662,29 @@ struct RequestLogsView: View {
                 .width(min: 144, ideal: 160)
 
                 TableColumn(self.model.text(.labelStatus)) { entry in
-                    StatusPill(
-                        text: self.model.requestLogStatusText(entry),
-                        tone: self.model.requestLogStatusTone(entry)
-                    )
+                    HStack(spacing: 6) {
+                        StatusPill(
+                            text: self.model.requestLogStatusText(entry),
+                            tone: self.model.requestLogStatusTone(entry)
+                        )
+                        if entry.hasDiagnosticRequestBody {
+                            Button {
+                                Task { await self.model.loadDiagnosticRequestBody(for: entry) }
+                            } label: {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(AppearanceStore.palette(for: self.colorScheme).accent)
+                            }
+                            .buttonStyle(.plain)
+                            .help(self.model.text(.actionViewDiagnosticRequestBody))
+                            .disabled(self.model.diagnosticRequestBodyDetailIsLoading)
+                        }
+                    }
                     .contextMenu {
                         self.requestLogContextMenu(for: entry)
                     }
                 }
-                .width(min: 94, ideal: 104)
+                .width(min: 94, ideal: 120)
 
                 TableColumn(self.model.text(.labelLatency)) { entry in
                     self.selectableTextCell(

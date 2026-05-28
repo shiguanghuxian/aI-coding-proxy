@@ -18,6 +18,7 @@ extension DesktopAppModel {
     func handleOCRModelManagerWindowDidClose() {
         self.isOCRModelManagerPresented = false
         self.ocrModelTestDraft = nil
+        self.stopLocalOCRModelProgressRefresh()
     }
 }
 #endif

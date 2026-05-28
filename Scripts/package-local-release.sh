@@ -76,6 +76,30 @@ normalize_arch_selection() {
   esac
 }
 
+release_notes_for_version() {
+  if [[ -n "${CODEX_PROXY_RELEASE_NOTES:-}" ]]; then
+    printf "%s" "$CODEX_PROXY_RELEASE_NOTES"
+    return
+  fi
+
+  local notes_path="$ROOT_DIR/Packaging/release-notes/$VERSION.md"
+  if [[ -f "$notes_path" ]]; then
+    python3 - "$notes_path" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+lines = text.splitlines()
+if lines and lines[0].lstrip().startswith("#"):
+    lines = lines[1:]
+print("\n".join(lines).strip())
+PY
+    return
+  fi
+
+  printf "%s" "根据自己电脑CPU系统架构下载对应软件包"
+}
+
 cleanup() {
   rm -rf "$STAGING_DIR"
 }
@@ -150,7 +174,7 @@ fi
 RELEASE_TAG="${CODEX_PROXY_RELEASE_TAG:-$VERSION}"
 RELEASE_BASE_URL="${CODEX_PROXY_RELEASE_BASE_URL:-https://github.com/shiguanghuxian/aI-coding-proxy/releases/download/$RELEASE_TAG}"
 RELEASE_PAGE_URL="${CODEX_PROXY_RELEASE_PAGE_URL:-https://github.com/shiguanghuxian/aI-coding-proxy/releases/tag/$RELEASE_TAG}"
-RELEASE_NOTES="${CODEX_PROXY_RELEASE_NOTES:-根据自己电脑CPU系统架构下载对应软件包}"
+RELEASE_NOTES="$(release_notes_for_version)"
 PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 APPCAST_PATH="$APPCAST_PATH" \

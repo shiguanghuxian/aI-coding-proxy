@@ -498,6 +498,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionClearAllOCRCache
     case actionClearOCRCacheConfirm
     case actionRefreshOCRRecognitionLogs
+    case actionClearExpiredOCRRecognitionLogs
+    case actionClearOCRRecognitionLogsOlderThan
+    case actionClearAllOCRRecognitionLogs
+    case actionClearOCRRecognitionLogsConfirm
     case actionViewOCRResult
     case actionOpenOCRCacheLogs
     case actionOpenOCRModelManager
@@ -770,8 +774,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case remoteLogsHint
     case proxyConnectionHint
     case labelRecentFourWeeks
+    case labelRecentTwelveMonths
     case labelDailyTrend
     case labelWeeklyTrend
+    case labelMonthlyTrend
     case labelOverviewTrafficAPIKeyFilter
     case optionAllProxyAPIKeys
     case overviewServiceHint
@@ -893,6 +899,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successRequestLogsExported
     case successReasoningCacheCleared
     case successOCRCacheCleared
+    case successOCRRecognitionLogsCleared
     case successOCRModelTest
     case successDiagnosticRequestBodiesCleared
     case successCopiedDiagnosticRequestBody
@@ -942,6 +949,11 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case confirmClearOCRCacheOlderThanTitle
     case confirmClearOCRCacheAllTitle
     case confirmClearOCRCacheAllMessage
+    case confirmClearOCRRecognitionLogsExpiredTitle
+    case confirmClearOCRRecognitionLogsExpiredMessage
+    case confirmClearOCRRecognitionLogsOlderThanTitle
+    case confirmClearOCRRecognitionLogsAllTitle
+    case confirmClearOCRRecognitionLogsAllMessage
     case confirmClearDiagnosticRequestBodiesExpiredTitle
     case confirmClearDiagnosticRequestBodiesExpiredMessage
     case confirmClearDiagnosticRequestBodiesOlderThanTitle
@@ -2470,6 +2482,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearAllOCRCache: "Clear All",
             .actionClearOCRCacheConfirm: "Clear OCR Cache",
             .actionRefreshOCRRecognitionLogs: "Refresh Logs",
+            .actionClearExpiredOCRRecognitionLogs: "Clear Expired Logs",
+            .actionClearOCRRecognitionLogsOlderThan: "Clear Older Than",
+            .actionClearAllOCRRecognitionLogs: "Clear All Logs",
+            .actionClearOCRRecognitionLogsConfirm: "Clear Recognition Logs",
             .actionViewOCRResult: "View Result",
             .actionOpenOCRCacheLogs: "View OCR Cache & Logs",
             .actionOpenOCRModelManager: "Manage OCR Models",
@@ -2742,12 +2758,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .remoteLogsHint: "Live operational logs help verify service health after deploy, start, and stop actions.",
             .proxyConnectionHint: "Use these connection details from your local OpenAI-compatible client.",
             .labelRecentFourWeeks: "Recent 4 Weeks",
+            .labelRecentTwelveMonths: "Last 12 Months",
             .labelDailyTrend: "Daily Trend",
             .labelWeeklyTrend: "Weekly Trend",
+            .labelMonthlyTrend: "Monthly Trend",
             .labelOverviewTrafficAPIKeyFilter: "Local API Key",
             .optionAllProxyAPIKeys: "All API Keys",
             .overviewServiceHint: "A concise health view for your local proxy runtime and recent request distribution.",
-            .overviewTrafficHint: "Review local request totals at a glance, compare Today, This Week, and This Month, then inspect the latest four weeks through daily and weekly token trends.",
+            .overviewTrafficHint: "Review local request totals at a glance, compare Today, This Week, and This Month, then inspect the latest four weeks and last 12 months through token trends.",
             .helperOverviewTrafficAPIKeyFilter: "Filter traffic statistics by the local proxy API key that received the request.",
             .helperOverviewTrafficAPIKeyFilterAll: "Showing combined traffic from every local proxy API key.",
             .overviewDiagnosticsHint: "Detailed service diagnostics and local log paths remain under Settings > Service.",
@@ -2865,6 +2883,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "Request logs exported",
             .successReasoningCacheCleared: "Reasoning cache cleared",
             .successOCRCacheCleared: "OCR cache cleared",
+            .successOCRRecognitionLogsCleared: "Recognition logs cleared",
             .successOCRModelTest: "OCR test completed",
             .successDiagnosticRequestBodiesCleared: "Request body diagnostics cleared",
             .successCopiedDiagnosticRequestBody: "Request body copied",
@@ -2908,6 +2927,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearOCRCacheOlderThanTitle: "Clear older OCR cache?",
             .confirmClearOCRCacheAllTitle: "Clear all OCR cache?",
             .confirmClearOCRCacheAllMessage: "All encrypted OCR result cache entries will be removed. This does not delete accounts, API keys, request logs, or original images.",
+            .confirmClearOCRRecognitionLogsExpiredTitle: "Expired Recognition Logs",
+            .confirmClearOCRRecognitionLogsExpiredMessage: "This removes OCR recognition log entries older than 30 days. The OCR result cache is not affected.",
+            .confirmClearOCRRecognitionLogsOlderThanTitle: "Clear Older Recognition Logs",
+            .confirmClearOCRRecognitionLogsAllTitle: "Clear All Recognition Logs",
+            .confirmClearOCRRecognitionLogsAllMessage: "All OCR recognition log entries will be removed. The OCR result cache is not affected.",
             .confirmClearDiagnosticRequestBodiesExpiredTitle: "Clear expired request body diagnostics?",
             .confirmClearDiagnosticRequestBodiesExpiredMessage: "Expired encrypted request body files and their metadata will be removed.",
             .confirmClearDiagnosticRequestBodiesOlderThanTitle: "Clear older request body diagnostics?",
@@ -3309,6 +3333,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionClearAllOCRCache: "全部清理",
             .actionClearOCRCacheConfirm: "确认清理 OCR 缓存",
             .actionRefreshOCRRecognitionLogs: "刷新日志",
+            .actionClearExpiredOCRRecognitionLogs: "清理过期日志",
+            .actionClearOCRRecognitionLogsOlderThan: "清理早于",
+            .actionClearAllOCRRecognitionLogs: "清理全部日志",
+            .actionClearOCRRecognitionLogsConfirm: "确认清理识别日志",
             .actionViewOCRResult: "查看结果",
             .actionOpenOCRCacheLogs: "查看 OCR 缓存与识别日志",
             .actionOpenOCRModelManager: "管理 OCR 模型",
@@ -3581,12 +3609,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .remoteLogsHint: "部署、启动、停止后可通过这里快速确认服务是否健康。",
             .proxyConnectionHint: "将以下接入信息用于本地 OpenAI 兼容客户端。",
             .labelRecentFourWeeks: "最近 4 周",
+            .labelRecentTwelveMonths: "最近 12 个月",
             .labelDailyTrend: "按日趋势",
             .labelWeeklyTrend: "按周趋势",
+            .labelMonthlyTrend: "按月趋势",
             .labelOverviewTrafficAPIKeyFilter: "本地 API Key",
             .optionAllProxyAPIKeys: "全部 API Key",
             .overviewServiceHint: "用更专业的视图快速掌握本地代理运行状态和最近请求分布。",
-            .overviewTrafficHint: "先看本地请求汇总，再对比今天、本周和本月的 Token 用量，并结合最近 4 周的按日、按周趋势判断流量变化。",
+            .overviewTrafficHint: "先看本地请求汇总，再对比今天、本周和本月的 Token 用量，并结合最近 4 周和最近 12 个月的趋势判断流量变化。",
             .helperOverviewTrafficAPIKeyFilter: "按接收请求的本地代理 API Key 筛选流量统计。",
             .helperOverviewTrafficAPIKeyFilterAll: "正在显示所有本地代理 API Key 的合并流量。",
             .overviewDiagnosticsHint: "更详细的服务诊断和本地日志路径请到 设置 > 服务 查看。",
@@ -3704,6 +3734,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "请求日志已导出",
             .successReasoningCacheCleared: "Reasoning 缓存已清理",
             .successOCRCacheCleared: "OCR 缓存已清理",
+            .successOCRRecognitionLogsCleared: "识别日志已清理",
             .successOCRModelTest: "OCR 测试已完成",
             .successDiagnosticRequestBodiesCleared: "请求体诊断数据已清理",
             .successCopiedDiagnosticRequestBody: "请求体已复制",
@@ -3736,6 +3767,11 @@ public struct LocalizationStore: Sendable, Equatable {
             .confirmClearOCRCacheOlderThanTitle: "清理较早的 OCR 缓存？",
             .confirmClearOCRCacheAllTitle: "清理全部 OCR 缓存？",
             .confirmClearOCRCacheAllMessage: "将删除所有加密 OCR 结果缓存。不会删除账号、API Key、请求日志或原始图片。",
+            .confirmClearOCRRecognitionLogsExpiredTitle: "清理过期识别日志",
+            .confirmClearOCRRecognitionLogsExpiredMessage: "将清理创建时间超过 30 天的识别日志。OCR 结果缓存不受影响。",
+            .confirmClearOCRRecognitionLogsOlderThanTitle: "清理早于指定时间的识别日志",
+            .confirmClearOCRRecognitionLogsAllTitle: "清理全部识别日志",
+            .confirmClearOCRRecognitionLogsAllMessage: "将删除所有识别日志。OCR 结果缓存不受影响。",
             .confirmClearDiagnosticRequestBodiesExpiredTitle: "清理过期请求体诊断数据？",
             .confirmClearDiagnosticRequestBodiesExpiredMessage: "将删除已过期的加密请求体文件和对应元数据。",
             .confirmClearDiagnosticRequestBodiesOlderThanTitle: "清理较早的请求体诊断数据？",

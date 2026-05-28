@@ -10183,6 +10183,8 @@ final class CodexProxyCoreTests: XCTestCase {
         }
 
         let summary = try store.loadStatsSummary(now: now, calendar: calendar)
+        let marchStart = Int64(try makeDate(year: 2026, month: 3, day: 1, hour: 0, minute: 0).timeIntervalSince1970)
+        let aprilStart = Int64(try makeDate(year: 2026, month: 4, day: 1, hour: 0, minute: 0).timeIntervalSince1970)
 
         XCTAssertEqual(summary.naturalTokenUsage.today.requestCount, 1)
         XCTAssertEqual(summary.naturalTokenUsage.today.inputTokens, 10)
@@ -10201,6 +10203,13 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.map(\.requestCount), [0, 1, 1, 3])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.map(\.inputTokens), [0, 50, 40, 60])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.map(\.outputTokens), [0, 9, 8, 18])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.count, 12)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.suffix(2).map(\.bucketStart), [marchStart, aprilStart])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.suffix(2).map(\.requestCount), [1, 4])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.suffix(2).map(\.inputTokens), [50, 100])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.suffix(2).map(\.outputTokens), [9, 26])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.suffix(2).map(\.cacheMissTokens), [50, 100])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.last?.windowSeconds, 30 * 86_400)
     }
 
     func testSQLiteStoreLoadStatsSummaryFiltersByProxyAPIKey() throws {
@@ -10272,6 +10281,13 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(filteredSummary.naturalTokenUsage.month.inputTokens, 40)
         XCTAssertEqual(filteredSummary.naturalTokenUsage.month.outputTokens, 12)
         XCTAssertEqual(filteredSummary.naturalTokenUsage.month.cacheHitTokens, 4)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.count, 12)
+        XCTAssertEqual(allSummary.naturalTokenUsage.monthlyTrend.last?.requestCount, 3)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.last?.requestCount, 2)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.last?.inputTokens, 40)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.last?.outputTokens, 12)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.last?.cacheHitTokens, 4)
+        XCTAssertEqual(filteredSummary.naturalTokenUsage.monthlyTrend.last?.cacheMissTokens, 36)
         XCTAssertTrue(filteredSummary.latestBuckets.allSatisfy { $0.apiKeyHash == Helpers.sha256("sk-local-a") })
     }
 
@@ -10292,6 +10308,10 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend, [])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend.count, 4)
         XCTAssertTrue(summary.naturalTokenUsage.weeklyTrend.allSatisfy {
+            $0.requestCount == 0 && $0.inputTokens == 0 && $0.outputTokens == 0
+        })
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.count, 12)
+        XCTAssertTrue(summary.naturalTokenUsage.monthlyTrend.allSatisfy {
             $0.requestCount == 0 && $0.inputTokens == 0 && $0.outputTokens == 0
         })
     }
@@ -10501,6 +10521,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.month.inputTokens, 181)
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend, [])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend, [])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend, [])
         XCTAssertEqual(summary.latestBuckets.count, 1)
         XCTAssertEqual(summary.latestBuckets[0].totalLatencyMS, 31_000)
         XCTAssertEqual(summary.latestBuckets[0].p95LatencyMS, 5_000)
@@ -10551,6 +10572,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.month.cacheMissTokens, 0)
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend, [])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend, [])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend, [])
     }
 
     func testAdminStatsSummaryDefaultsMissingNaturalTokenUsageToZero() throws {
@@ -10575,6 +10597,7 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.month, .init())
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend, [])
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend, [])
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend, [])
     }
 
     func testAdminStatsSummaryDecodesNaturalTrendBuckets() throws {
@@ -10621,6 +10644,15 @@ final class CodexProxyCoreTests: XCTestCase {
                 "input_tokens": 44,
                 "output_tokens": 22
               }
+            ],
+            "monthly_trend": [
+              {
+                "bucket_start": 1775001600,
+                "window_seconds": 2592000,
+                "request_count": 4,
+                "input_tokens": 44,
+                "output_tokens": 22
+              }
             ]
           },
           "latest_buckets": []
@@ -10639,6 +10671,11 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].requestCount, 4)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheHitTokens, 0)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheMissTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend.count, 1)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].windowSeconds, 2_592_000)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].requestCount, 4)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].cacheHitTokens, 0)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].cacheMissTokens, 0)
     }
 
 
@@ -10696,6 +10733,17 @@ final class CodexProxyCoreTests: XCTestCase {
                 "cache_hit_tokens": 120,
                 "cache_miss_tokens": 80
               }
+            ],
+            "monthly_trend": [
+              {
+                "bucket_start": 1775001600,
+                "window_seconds": 2592000,
+                "request_count": 2,
+                "input_tokens": 200,
+                "output_tokens": 50,
+                "cache_hit_tokens": 120,
+                "cache_miss_tokens": 80
+              }
             ]
           },
           "latest_buckets": []
@@ -10714,6 +10762,8 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(summary.naturalTokenUsage.dailyTrend[0].cacheMissTokens, 80)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheHitTokens, 120)
         XCTAssertEqual(summary.naturalTokenUsage.weeklyTrend[0].cacheMissTokens, 80)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].cacheHitTokens, 120)
+        XCTAssertEqual(summary.naturalTokenUsage.monthlyTrend[0].cacheMissTokens, 80)
     }
 
     func testNaturalTokenUsageCacheMissDoesNotGoNegative() throws {

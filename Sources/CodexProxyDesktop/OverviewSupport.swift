@@ -145,6 +145,42 @@ private enum OverviewDateFormatting {
         return formatter.string(from: date)
     }
 
+    static func monthText(
+        _ date: Date,
+        languageMode: DesktopLanguageMode
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.locale = self.locale(for: languageMode)
+        formatter.setLocalizedDateFormatFromTemplate("MMM")
+        return formatter.string(from: date)
+    }
+
+    static func yearText(
+        _ date: Date,
+        languageMode: DesktopLanguageMode
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.locale = self.locale(for: languageMode)
+        formatter.setLocalizedDateFormatFromTemplate("y")
+        return formatter.string(from: date)
+    }
+
+    static func monthYearText(
+        _ date: Date,
+        languageMode: DesktopLanguageMode
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.locale = self.locale(for: languageMode)
+        formatter.setLocalizedDateFormatFromTemplate("MMMy")
+        return formatter.string(from: date)
+    }
+
     private static func locale(for languageMode: DesktopLanguageMode) -> Locale {
         switch languageMode {
         case .system:
@@ -373,10 +409,61 @@ extension DesktopAppModel {
         }
     }
 
+    var overviewMonthlyTrendPoints: [OverviewTrafficTrendPoint] {
+        self.overviewMonthlyTrendPoints(now: Date(), calendar: .current)
+    }
+
+    func overviewMonthlyTrendPoints(
+        now: Date,
+        calendar: Calendar
+    ) -> [OverviewTrafficTrendPoint] {
+        let currentMonthStart = calendar.dateInterval(of: .month, for: now)?.start ?? calendar.startOfDay(for: now)
+        var buckets: [Int64: AdminStatsSummary.NaturalTimeBucketUsage] = [:]
+        for bucket in self.stats.naturalTokenUsage.monthlyTrend {
+            buckets[bucket.bucketStart] = bucket
+        }
+
+        return stride(from: 11, through: 0, by: -1).compactMap { offset in
+            guard let monthStart = calendar.date(byAdding: .month, value: -offset, to: currentMonthStart),
+                  let nextMonthStart = calendar.date(byAdding: .month, value: 1, to: monthStart)
+            else {
+                return nil
+            }
+
+            let bucketStart = Int64(monthStart.timeIntervalSince1970)
+            let bucket = buckets[bucketStart]
+            let inputTokens = bucket?.inputTokens ?? 0
+            let outputTokens = bucket?.outputTokens ?? 0
+            let endDate = offset == 0 ? now : calendar.date(byAdding: .day, value: -1, to: nextMonthStart) ?? monthStart
+
+            return OverviewTrafficTrendPoint(
+                bucketStart: bucketStart,
+                date: monthStart,
+                xAxisPrimaryLabel: OverviewDateFormatting.monthText(monthStart, languageMode: self.preferences.languageMode),
+                xAxisSecondaryLabel: OverviewDateFormatting.yearText(monthStart, languageMode: self.preferences.languageMode),
+                title: OverviewDateFormatting.monthYearText(monthStart, languageMode: self.preferences.languageMode),
+                detailText: OverviewDateFormatting.rangeText(
+                    start: monthStart,
+                    end: endDate,
+                    languageMode: self.preferences.languageMode
+                ),
+                totalTokens: self.combineOverviewTokenValues(inputTokens: inputTokens, outputTokens: outputTokens),
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                cacheHitTokens: bucket?.cacheHitTokens ?? 0,
+                cacheMissTokens: bucket?.cacheMissTokens ?? 0,
+                requestCount: bucket?.requestCount ?? 0,
+                isFuture: false
+            )
+        }
+    }
+
     var overviewHasTrafficTrendData: Bool {
         self.stats.naturalTokenUsage.dailyTrend.contains { bucket in
             bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0 || bucket.cacheHitTokens > 0 || bucket.cacheMissTokens > 0
         } || self.stats.naturalTokenUsage.weeklyTrend.contains { bucket in
+            bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0 || bucket.cacheHitTokens > 0 || bucket.cacheMissTokens > 0
+        } || self.stats.naturalTokenUsage.monthlyTrend.contains { bucket in
             bucket.requestCount > 0 || bucket.inputTokens > 0 || bucket.outputTokens > 0 || bucket.cacheHitTokens > 0 || bucket.cacheMissTokens > 0
         }
     }

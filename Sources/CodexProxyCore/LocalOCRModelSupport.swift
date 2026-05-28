@@ -270,14 +270,21 @@ public actor LocalOCRModelManager {
         guard files.isEmpty == false else {
             throw LocalOCRModelError.downloadSourceUnavailable("Hugging Face 仓库没有可下载文件。")
         }
-        let totalBytes = files.reduce(Int64(0)) { $0 + max($1.sizeBytes ?? 0, 0) }
+        var totalBytes = files.reduce(Int64(0)) { $0 + max($1.sizeBytes ?? 0, 0) }
         var completedBytes: Int64 = 0
-        for file in files {
+        var lastProgressUpdateMS: Int64 = 0
+        for (fileIndex, file) in files.enumerated() {
             try Task.checkCancellation()
             let destination = partial.appendingPathComponent(file.path)
             try self.fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             let url = try self.downloadURL(for: file.path, descriptor: descriptor, config: config)
-            let progress = totalBytes > 0 ? min(Double(completedBytes) / Double(totalBytes), 0.999) : 0
+            let progress = self.downloadProgressValue(
+                completedBytes: completedBytes,
+                currentFileBytes: 0,
+                totalBytes: totalBytes,
+                fileIndex: fileIndex,
+                fileCount: files.count
+            )
             self.downloadProgress[descriptor.huggingFaceRepo] = self.downloadingStatus(
                 for: descriptor,
                 config: config,
@@ -291,23 +298,42 @@ public actor LocalOCRModelManager {
             if config.hfToken.isEmpty == false {
                 request.setValue("Bearer \(config.hfToken)", forHTTPHeaderField: "Authorization")
             }
-            let (tempURL, response) = try await self.session.download(for: request)
-            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) == false {
-                throw LocalOCRModelError.networkFailure("\(url.absoluteString) 返回 HTTP \(http.statusCode)。")
-            }
             if self.fileManager.fileExists(atPath: destination.path) {
                 try self.fileManager.removeItem(at: destination)
             }
-            try self.fileManager.moveItem(at: tempURL, to: destination)
-            if let expected = file.sizeBytes {
+            let result = try await self.downloadFile(
+                request: request,
+                destination: destination,
+                expectedSize: file.sizeBytes,
+                descriptor: descriptor,
+                config: config,
+                completedBytesBeforeFile: completedBytes,
+                totalBytes: &totalBytes,
+                fileIndex: fileIndex,
+                fileCount: files.count,
+                lastProgressUpdateMS: &lastProgressUpdateMS
+            )
+            if let expected = result.expectedBytes {
                 let actual = self.fileSize(destination)
                 guard actual == expected else {
                     throw LocalOCRModelError.invalidSnapshot("\(file.path) 文件大小不匹配，期望 \(expected) bytes，实际 \(actual) bytes。")
                 }
                 completedBytes += expected
             } else {
-                completedBytes += self.fileSize(destination)
+                completedBytes += result.writtenBytes
             }
+            self.updateDownloadProgress(
+                descriptor: descriptor,
+                config: config,
+                completedBytes: completedBytes,
+                currentFileBytes: 0,
+                totalBytes: totalBytes,
+                fileIndex: min(fileIndex + 1, files.count - 1),
+                fileCount: files.count,
+                detail: "下载 \(file.path)",
+                force: true,
+                lastProgressUpdateMS: &lastProgressUpdateMS
+            )
         }
 
         let manifest = SnapshotManifest(
@@ -332,6 +358,154 @@ public actor LocalOCRModelManager {
             localPath: target.path,
             compatibility: .compatible
         )
+    }
+
+    private struct DownloadedFileResult: Sendable, Equatable {
+        var writtenBytes: Int64
+        var expectedBytes: Int64?
+    }
+
+    private func downloadFile(
+        request: URLRequest,
+        destination: URL,
+        expectedSize: Int64?,
+        descriptor: LocalOCRModelDescriptor,
+        config: LocalMLXOCRConfig,
+        completedBytesBeforeFile: Int64,
+        totalBytes: inout Int64,
+        fileIndex: Int,
+        fileCount: Int,
+        lastProgressUpdateMS: inout Int64
+    ) async throws -> DownloadedFileResult {
+        let temporaryDestination = destination.deletingLastPathComponent()
+            .appendingPathComponent(destination.lastPathComponent + ".download")
+        if self.fileManager.fileExists(atPath: temporaryDestination.path) {
+            try self.fileManager.removeItem(at: temporaryDestination)
+        }
+        self.fileManager.createFile(atPath: temporaryDestination.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: temporaryDestination)
+        do {
+            let (bytes, response) = try await self.session.bytes(for: request)
+            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) == false {
+                throw LocalOCRModelError.networkFailure("\(request.url?.absoluteString ?? "") 返回 HTTP \(http.statusCode)。")
+            }
+            let responseExpected = self.expectedByteCount(from: response)
+            if expectedSize == nil, let responseExpected, responseExpected > 0 {
+                totalBytes += responseExpected
+            }
+            var writtenBytes: Int64 = 0
+            var buffer = [UInt8]()
+            buffer.reserveCapacity(64 * 1024)
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                buffer.append(byte)
+                if buffer.count >= 64 * 1024 {
+                    try handle.write(contentsOf: Data(buffer))
+                    writtenBytes += Int64(buffer.count)
+                    buffer.removeAll(keepingCapacity: true)
+                    self.updateDownloadProgress(
+                        descriptor: descriptor,
+                        config: config,
+                        completedBytes: completedBytesBeforeFile,
+                        currentFileBytes: writtenBytes,
+                        totalBytes: totalBytes,
+                        fileIndex: fileIndex,
+                        fileCount: fileCount,
+                        detail: "下载 \(destination.lastPathComponent)",
+                        force: false,
+                        lastProgressUpdateMS: &lastProgressUpdateMS
+                    )
+                }
+            }
+            if buffer.isEmpty == false {
+                try handle.write(contentsOf: Data(buffer))
+                writtenBytes += Int64(buffer.count)
+            }
+            try handle.close()
+            if self.fileManager.fileExists(atPath: destination.path) {
+                try self.fileManager.removeItem(at: destination)
+            }
+            try self.fileManager.moveItem(at: temporaryDestination, to: destination)
+            self.updateDownloadProgress(
+                descriptor: descriptor,
+                config: config,
+                completedBytes: completedBytesBeforeFile,
+                currentFileBytes: writtenBytes,
+                totalBytes: totalBytes,
+                fileIndex: fileIndex,
+                fileCount: fileCount,
+                detail: "下载 \(destination.lastPathComponent)",
+                force: true,
+                lastProgressUpdateMS: &lastProgressUpdateMS
+            )
+            return DownloadedFileResult(
+                writtenBytes: writtenBytes,
+                expectedBytes: expectedSize ?? responseExpected
+            )
+        } catch {
+            try? handle.close()
+            try? self.fileManager.removeItem(at: temporaryDestination)
+            throw error
+        }
+    }
+
+    private func expectedByteCount(from response: URLResponse) -> Int64? {
+        if response.expectedContentLength > 0 {
+            return response.expectedContentLength
+        }
+        guard let http = response as? HTTPURLResponse,
+              let rawValue = http.value(forHTTPHeaderField: "Content-Length"),
+              let value = Int64(rawValue),
+              value > 0
+        else {
+            return nil
+        }
+        return value
+    }
+
+    private func updateDownloadProgress(
+        descriptor: LocalOCRModelDescriptor,
+        config: LocalMLXOCRConfig,
+        completedBytes: Int64,
+        currentFileBytes: Int64,
+        totalBytes: Int64,
+        fileIndex: Int,
+        fileCount: Int,
+        detail: String,
+        force: Bool,
+        lastProgressUpdateMS: inout Int64
+    ) {
+        let nowMS = Helpers.nowMilliseconds()
+        guard force || nowMS - lastProgressUpdateMS >= 250 else {
+            return
+        }
+        lastProgressUpdateMS = nowMS
+        self.downloadProgress[descriptor.huggingFaceRepo] = self.downloadingStatus(
+            for: descriptor,
+            config: config,
+            progress: self.downloadProgressValue(
+                completedBytes: completedBytes,
+                currentFileBytes: currentFileBytes,
+                totalBytes: totalBytes,
+                fileIndex: fileIndex,
+                fileCount: fileCount
+            ),
+            detail: detail
+        )
+    }
+
+    private func downloadProgressValue(
+        completedBytes: Int64,
+        currentFileBytes: Int64,
+        totalBytes: Int64,
+        fileIndex: Int,
+        fileCount: Int
+    ) -> Double {
+        if totalBytes > 0 {
+            return min(max(Double(completedBytes + currentFileBytes) / Double(totalBytes), 0), 0.999)
+        }
+        guard fileCount > 0 else { return 0 }
+        return min(max(Double(fileIndex) / Double(fileCount), 0), 0.999)
     }
 
     private func snapshotFiles(for descriptor: LocalOCRModelDescriptor, config: LocalMLXOCRConfig) async throws -> [SnapshotFile] {

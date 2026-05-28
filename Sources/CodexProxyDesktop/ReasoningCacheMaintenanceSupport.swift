@@ -269,6 +269,79 @@ extension DesktopAppModel {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+
+    var ocrRecognitionLogHasEntries: Bool {
+        self.ocrRecognitionLogSummary.totalCount > 0
+    }
+
+    func loadOCRRecognitionLogSummary() async {
+        do {
+            self.ocrRecognitionLogSummary = try await self.admin.getOCRRecognitionLogSummary()
+        } catch {
+            self.present(error: error, context: .loadOCRCache)
+        }
+    }
+
+    func clearExpiredOCRRecognitionLogs() async {
+        await self.clearOCRRecognitionLogs(
+            request: ClearOCRRecognitionLogsRequest(expiredOnly: true),
+            title: self.text(.confirmClearOCRRecognitionLogsExpiredTitle),
+            message: self.text(.confirmClearOCRRecognitionLogsExpiredMessage)
+        )
+    }
+
+    func clearOCRRecognitionLogsOlderThanSelectedPreset() async {
+        let seconds = max(1, self.ocrRecognitionLogOlderThanSeconds)
+        await self.clearOCRRecognitionLogs(
+            request: ClearOCRRecognitionLogsRequest(olderThanSeconds: seconds),
+            title: self.text(.confirmClearOCRRecognitionLogsOlderThanTitle),
+            message: self.localized(
+                zh: "将清理创建时间早于 \(self.reasoningCacheOlderThanLabel(seconds)) 的识别日志。",
+                en: "This clears OCR recognition logs created more than \(self.reasoningCacheOlderThanLabel(seconds)) ago."
+            )
+        )
+    }
+
+    func clearAllOCRRecognitionLogs() async {
+        await self.clearOCRRecognitionLogs(
+            request: ClearOCRRecognitionLogsRequest(clearAll: true),
+            title: self.text(.confirmClearOCRRecognitionLogsAllTitle),
+            message: self.text(.confirmClearOCRRecognitionLogsAllMessage)
+        )
+    }
+
+    private func clearOCRRecognitionLogs(
+        request: ClearOCRRecognitionLogsRequest,
+        title: String,
+        message: String
+    ) async {
+        guard self.ocrRecognitionLogHasEntries || request.expiredOnly else { return }
+        let confirmation = OCRCacheClearConfirmationContent(
+            title: title,
+            informativeText: message,
+            actionTitle: self.text(.actionClearOCRRecognitionLogsConfirm)
+        )
+        guard self.confirmClearOCRCache(confirmation) else { return }
+
+        self.ocrRecognitionLogIsClearing = true
+        defer { self.ocrRecognitionLogIsClearing = false }
+        do {
+            let result = try await self.admin.clearOCRRecognitionLogs(request)
+            self.ocrRecognitionLogSummary = result.summary
+            self.publishBanner(
+                .success,
+                title: self.text(.successOCRRecognitionLogsCleared),
+                detail: self.localized(
+                    zh: "已清理 \(result.deletedCount) 条识别日志。",
+                    en: "Cleared \(result.deletedCount) recognition log entries."
+                )
+            )
+            await self.loadOCRRecognitionLogs()
+        } catch {
+            self.present(error: error, context: .clearOCRCache)
+        }
+    }
+
     var diagnosticRequestBodyHasEntries: Bool {
         self.diagnosticRequestBodySummary.totalCount > 0
     }

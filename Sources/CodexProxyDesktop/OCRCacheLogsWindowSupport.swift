@@ -23,6 +23,7 @@ extension DesktopAppModel {
 
     func refreshOCRCacheLogsWindowData() async {
         await self.loadOCRCacheSummary()
+        await self.loadOCRRecognitionLogSummary()
         await self.loadOCRRecognitionLogs()
     }
 }

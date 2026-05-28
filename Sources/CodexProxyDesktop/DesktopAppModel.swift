@@ -528,6 +528,9 @@ final class DesktopAppModel: ObservableObject {
     @Published var ocrRecognitionLogsIsRefreshing = false
     @Published var ocrRecognitionResultIsLoading = false
     @Published var ocrRecognitionResult: OCRRecognitionResultLookupResponse?
+    @Published var ocrRecognitionLogSummary = OCRRecognitionLogSummary()
+    @Published var ocrRecognitionLogOlderThanSeconds: Int64 = 604_800
+    @Published var ocrRecognitionLogIsClearing = false
     @Published var isOCRCacheLogsPresented = false
     @Published var isOCRModelManagerPresented = false
     @Published var isOCRRecognitionResultPresented = false
@@ -535,6 +538,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var localOCRModelsIsRefreshing = false
     @Published var localOCRModelOperationIDs: Set<String> = []
     @Published var localOCRRuntimeIsStopping = false
+    var localOCRModelProgressRefreshTask: Task<Void, Never>?
     @Published var ocrModelTestDraft: OCRModelTestDraft?
     @Published var diagnosticRequestBodySummary = DiagnosticRequestBodySummary()
     @Published var diagnosticRequestBodyIsRefreshing = false

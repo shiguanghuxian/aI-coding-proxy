@@ -1437,6 +1437,76 @@ public final class SQLiteStore: @unchecked Sendable {
         return OCRRecognitionResultLookupResponse(entry: entry, available: true, text: cached.text)
     }
 
+
+    func ocrRecognitionLogSummary(now: Int64 = Helpers.now()) throws -> OCRRecognitionLogSummary {
+        let thirtyDays: Int64 = 30 * 24 * 3600
+        let row = try self.querySingle(
+            """
+            SELECT COUNT(*) AS total_count,
+                   SUM(CASE WHEN created_at <= ? THEN 1 ELSE 0 END) AS expired_count,
+                   MIN(created_at) AS oldest_created_at,
+                   MAX(created_at) AS newest_created_at
+            FROM ocr_recognition_logs;
+            """,
+            bindings: [.int(now - thirtyDays)]
+        )
+        return OCRRecognitionLogSummary(
+            totalCount: Int(row?.int("total_count") ?? 0),
+            expiredCount: Int(row?.int("expired_count") ?? 0),
+            oldestCreatedAt: row?.optionalInt("oldest_created_at"),
+            newestCreatedAt: row?.optionalInt("newest_created_at")
+        )
+    }
+
+    @discardableResult
+    func pruneExpiredOCRRecognitionLogs(now: Int64 = Helpers.now()) throws -> Int {
+        let thirtyDays: Int64 = 30 * 24 * 3600
+        return try self.deleteOCRRecognitionLogs(
+            whereSQL: "created_at <= ?",
+            bindings: [.int(now - thirtyDays)]
+        )
+    }
+
+    @discardableResult
+    func clearOCRRecognitionLogs(_ request: ClearOCRRecognitionLogsRequest, now: Int64 = Helpers.now()) throws -> Int {
+        if request.clearAll {
+            return try self.deleteOCRRecognitionLogs(whereSQL: nil, bindings: [])
+        }
+
+        let thirtyDays: Int64 = 30 * 24 * 3600
+        var clauses: [String] = []
+        var bindings: [Binding] = []
+        if request.expiredOnly {
+            clauses.append("created_at <= ?")
+            bindings.append(.int(now - thirtyDays))
+        }
+        if let olderThanSeconds = request.olderThanSeconds {
+            clauses.append("created_at < ?")
+            bindings.append(.int(max(0, now - olderThanSeconds)))
+        }
+        guard clauses.isEmpty == false else {
+            throw ProxyError.message("请选择要清理的识别日志范围。")
+        }
+        return try self.deleteOCRRecognitionLogs(
+            whereSQL: clauses.joined(separator: " AND "),
+            bindings: bindings
+        )
+    }
+
+    @discardableResult
+    private func deleteOCRRecognitionLogs(whereSQL: String?, bindings: [Binding]) throws -> Int {
+        let sql: String
+        if let whereSQL, whereSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            sql = "DELETE FROM ocr_recognition_logs WHERE \(whereSQL);"
+        } else {
+            sql = "DELETE FROM ocr_recognition_logs;"
+        }
+        return try self.withDatabaseLock {
+            try self.execute(sql, bindings: bindings)
+            return Int(sqlite3_changes(self.db))
+        }
+    }
+
     private func ocrRecognitionLogFilterSQL(
         status: OCRRecognitionLogStatus?
     ) -> (sql: String, bindings: [Binding]) {
@@ -2448,6 +2518,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let monthStart = calendar.dateInterval(of: .month, for: now)?.start ?? todayStart
         let upperBound = Int64(now.timeIntervalSince1970)
         let earliestTrendWeekStart = calendar.date(byAdding: .day, value: -21, to: weekStart) ?? weekStart
+        let earliestTrendMonthStart = calendar.date(byAdding: .month, value: -11, to: monthStart) ?? monthStart
         let dailyTrend = try self.loadNaturalDailyTrend(
             from: Int64(earliestTrendWeekStart.timeIntervalSince1970),
             to: upperBound,
@@ -2458,6 +2529,13 @@ public final class SQLiteStore: @unchecked Sendable {
             dailyTrend: dailyTrend,
             currentWeekStart: weekStart,
             calendar: calendar
+        )
+        let monthlyTrend = try self.loadNaturalMonthlyTrend(
+            from: Int64(earliestTrendMonthStart.timeIntervalSince1970),
+            to: upperBound,
+            currentMonthStart: monthStart,
+            calendar: calendar,
+            apiKeyHash: apiKeyHash
         )
 
         return AdminStatsSummary.NaturalTokenUsageSummary(
@@ -2477,7 +2555,8 @@ public final class SQLiteStore: @unchecked Sendable {
                 apiKeyHash: apiKeyHash
             ),
             dailyTrend: dailyTrend,
-            weeklyTrend: weeklyTrend
+            weeklyTrend: weeklyTrend,
+            monthlyTrend: monthlyTrend
         )
     }
 
@@ -2565,6 +2644,66 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    private func loadNaturalMonthlyTrend(
+        from: Int64,
+        to: Int64,
+        currentMonthStart: Date,
+        calendar: Calendar,
+        apiKeyHash: String? = nil
+    ) throws -> [AdminStatsSummary.NaturalTimeBucketUsage] {
+        let apiKeySQL = apiKeyHash == nil ? "" : " AND api_key_hash = ?"
+        var bindings: [Binding] = [
+            .int(from),
+            .int(to),
+        ]
+        if let apiKeyHash {
+            bindings.append(.text(apiKeyHash))
+        }
+        let rows = try self.query(
+            """
+            SELECT
+                strftime('%Y-%m', created_at, 'unixepoch', 'localtime') AS local_month,
+                COUNT(*) AS request_count,
+                COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                COALESCE(SUM(COALESCE(cache_hit_tokens, 0)), 0) AS total_cache_hit_tokens,
+                COALESCE(SUM(CASE WHEN input_tokens - COALESCE(cache_hit_tokens, 0) > 0 THEN input_tokens - COALESCE(cache_hit_tokens, 0) ELSE 0 END), 0) AS total_cache_miss_tokens
+            FROM request_logs
+            WHERE created_at >= ? AND created_at <= ?
+            \(apiKeySQL)
+            GROUP BY local_month
+            ORDER BY local_month ASC;
+            """,
+            bindings: bindings
+        )
+
+        var grouped: [Int64: AdminStatsSummary.NaturalTimeBucketUsage] = [:]
+        for row in rows {
+            let bucketStart = try self.localMonthStartTimestamp(from: row.text("local_month"), calendar: calendar)
+            let bucketDate = Date(timeIntervalSince1970: TimeInterval(bucketStart))
+            grouped[bucketStart] = AdminStatsSummary.NaturalTimeBucketUsage(
+                bucketStart: bucketStart,
+                windowSeconds: self.monthWindowSeconds(start: bucketDate, calendar: calendar),
+                requestCount: row.int("request_count"),
+                inputTokens: row.int("total_input_tokens"),
+                outputTokens: row.int("total_output_tokens"),
+                cacheHitTokens: row.int("total_cache_hit_tokens"),
+                cacheMissTokens: row.int("total_cache_miss_tokens")
+            )
+        }
+
+        return stride(from: 11, through: 0, by: -1).compactMap { offset in
+            guard let monthStart = calendar.date(byAdding: .month, value: -offset, to: currentMonthStart) else {
+                return nil
+            }
+            let timestamp = Int64(monthStart.timeIntervalSince1970)
+            return grouped[timestamp] ?? AdminStatsSummary.NaturalTimeBucketUsage(
+                bucketStart: timestamp,
+                windowSeconds: self.monthWindowSeconds(start: monthStart, calendar: calendar)
+            )
+        }
+    }
+
     private func loadTokenUsageRange(
         from: Int64,
         to: Int64,
@@ -2642,6 +2781,37 @@ public final class SQLiteStore: @unchecked Sendable {
             throw ProxyError.message("无法解析本地日期桶：\(text)")
         }
         return Int64(date.timeIntervalSince1970)
+    }
+
+    private func localMonthStartTimestamp(
+        from text: String,
+        calendar: Calendar
+    ) throws -> Int64 {
+        let components = text.split(separator: "-", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              let year = Int(components[0]),
+              let month = Int(components[1]),
+              let date = calendar.date(
+                  from: DateComponents(
+                      calendar: calendar,
+                      timeZone: calendar.timeZone,
+                      year: year,
+                      month: month,
+                      day: 1
+                  )
+              )
+        else {
+            throw ProxyError.message("无法解析本地月份桶：\(text)")
+        }
+        return Int64(date.timeIntervalSince1970)
+    }
+
+    private func monthWindowSeconds(
+        start: Date,
+        calendar: Calendar
+    ) -> Int64 {
+        let nextMonthStart = calendar.date(byAdding: .month, value: 1, to: start) ?? start.addingTimeInterval(31 * 86_400)
+        return max(0, Int64(nextMonthStart.timeIntervalSince(start)))
     }
 
     private func execute(_ sql: String, bindings: [Binding] = []) throws {

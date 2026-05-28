@@ -576,6 +576,13 @@ private struct OverviewTrafficCard: View {
                                         subtitle: self.model.overviewRecentFourWeeksRangeText,
                                         points: self.model.overviewWeeklyTrendPoints
                                     )
+
+                                    OverviewTrafficTrendPanel(
+                                        model: self.model,
+                                        title: self.model.text(.labelMonthlyTrend),
+                                        subtitle: self.model.text(.labelRecentTwelveMonths),
+                                        points: self.model.overviewMonthlyTrendPoints
+                                    )
                                 }
                             } else {
                                 ContentUnavailableView(

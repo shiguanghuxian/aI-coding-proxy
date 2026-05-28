@@ -656,6 +656,12 @@ final class DaemonHTTPService: @unchecked Sendable {
             return try self.codableResponse(
                 try await self.controller.ocrRecognitionLogs(request: self.ocrRecognitionLogListRequest(from: request))
             )
+        case ("GET", "/admin/ocr-recognition-logs/summary"):
+            return try self.codableResponse(try await self.controller.ocrRecognitionLogSummary())
+        case ("POST", "/admin/ocr-recognition-logs/clear"):
+            let payload = try self.decode(ClearOCRRecognitionLogsRequest.self, from: request.body)
+            return try self.codableResponse(try await self.controller.clearOCRRecognitionLogs(payload))
+
         case ("POST", "/admin/ocr-test"):
             let payload = try self.decode(OCRModelTestRequest.self, from: request.body)
             return try self.codableResponse(try await self.controller.testOCRModel(payload))
