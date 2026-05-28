@@ -70,6 +70,12 @@ chmod +x Scripts/prepare-swift-static-linux-sdk.sh Scripts/build-linux-artifacts
 ./Scripts/package-local-release.sh
 ```
 
+本机快速验证时，可以只构建当前 Mac 架构并跳过 appcast：
+
+```bash
+./Scripts/package-local-release.sh --host-only
+```
+
 只刷新 macOS 的 `mihomo` 缓存，并保持仅本地打包流程不触发 Linux SDK 准备：
 
 ```bash
@@ -100,7 +106,9 @@ chmod +x Scripts/prepare-swift-static-linux-sdk.sh Scripts/build-linux-artifacts
 - `Dist/local-only/AICodingProxy-macos-arm64-<version>-local.zip`
 - `Dist/local-only/AICodingProxy-macos-x86_64-<version>-local.zip`
 
-`package-local-release.sh` 会跳过 Static Linux SDK 准备步骤，并且仅在显式传入 `--force-refresh` 时刷新 macOS 的 `mihomo` 缓存。
+`package-local-release.sh` 会跳过 Static Linux SDK 准备步骤，并且仅在显式传入 `--force-refresh` 时刷新 macOS 的 `mihomo` 缓存。它支持 `--arch host|arm64|x86_64|all`；默认 `all` 保持双架构发布产物和 appcast 不变，`--host-only` 是本地验证用的单架构快速路径。
+
+本地打包还会默认复用 `.build/codex-proxy-build-cache/` 下的脚本构建缓存。可以用 `CODEX_PROXY_BUILD_CACHE_DIR` 改缓存目录，用 `CODEX_PROXY_REBUILD_MLX_OCR_HELPER=1` 强制重建缓存的 Local MLX OCR helper，用 `CODEX_PROXY_REBUILD_APP_ICON=1` 强制重新渲染 AppIcon。`--force-refresh` 仍只用于刷新 `mihomo` 这类外部下载/打包资源。
 
 如果直接通过 `Scripts/build-macos-app.sh` 构建，不带后缀的 `Dist/AI Coding Proxy.app`、`Dist/codex-proxyd-macos` 和 `Dist/mihomo-macos` 仍然是当前机器对应架构的原生输出。
 

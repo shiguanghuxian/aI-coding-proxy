@@ -278,6 +278,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelOCRImageHash
     case labelOCRCacheHit
     case labelOCRResult
+    case labelOCRModelProfileName
+    case labelSelectedOCRModel
+    case labelOCRTestPrompt
+    case labelOCRTestImage
     case labelLanguage
     case labelTheme
     case labelDisplay
@@ -371,10 +375,14 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case sectionGeminiOAuth
     case sectionOCRModel
     case sectionLocalOCRModels
+    case sectionOnlineOCRModels
+    case sectionOCRCommonSettings
     case sectionOCRCache
     case sectionOCRRecognitionLogs
     case ocrCacheLogsWindowTitle
     case ocrCacheLogsWindowSubtitle
+    case ocrModelManagerWindowTitle
+    case ocrModelManagerWindowSubtitle
     case sectionDiagnosticLogging
     case sectionDiagnosticRequestBodies
     case sectionOutboundProxy
@@ -492,6 +500,14 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case actionRefreshOCRRecognitionLogs
     case actionViewOCRResult
     case actionOpenOCRCacheLogs
+    case actionOpenOCRModelManager
+    case actionAddOnlineOCRModel
+    case actionEditOnlineOCRModel
+    case actionTestOCRModel
+    case actionOpenLocalModelDirectory
+    case actionOpenLocalModelCacheDirectory
+    case actionChooseOCRTestImage
+    case actionRunOCRTest
     case actionRefreshLocalOCRModels
     case actionDownloadLocalOCRModel
     case actionVerifyLocalOCRModel
@@ -608,6 +624,9 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperGeminiOAuthSettings
     case helperSupportsVision
     case helperOCRModelSettings
+    case helperOCRModelManager
+    case helperOnlineOCRModels
+    case helperOCRTest
     case helperOCRCache
     case helperOCRCachePrivacy
     case helperOCRRecognitionLogs
@@ -811,6 +830,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case errorReasoningCacheClearFailed
     case errorOCRCacheFailed
     case errorOCRCacheClearFailed
+    case errorOCRModelTestFailed
     case errorDiagnosticRequestBodyUnavailable
     case errorDiagnosticRequestBodySaveFailed
     case statusOCRAll
@@ -873,6 +893,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case successRequestLogsExported
     case successReasoningCacheCleared
     case successOCRCacheCleared
+    case successOCRModelTest
     case successDiagnosticRequestBodiesCleared
     case successCopiedDiagnosticRequestBody
     case successDiagnosticRequestBodySaved
@@ -2253,6 +2274,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRImageHash: "Image Hash",
             .labelOCRCacheHit: "Cache Hit",
             .labelOCRResult: "OCR Result",
+            .labelOCRModelProfileName: "Profile Name",
+            .labelSelectedOCRModel: "Selected OCR Model",
+            .labelOCRTestPrompt: "Test Prompt",
+            .labelOCRTestImage: "Test Image",
             .labelLanguage: "Language",
             .labelTheme: "Theme",
             .labelDisplay: "Display",
@@ -2322,10 +2347,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR Model",
             .sectionLocalOCRModels: "Local MLX Models",
+            .sectionOnlineOCRModels: "Online Models",
+            .sectionOCRCommonSettings: "OCR Runtime Settings",
             .sectionOCRCache: "OCR Cache",
             .sectionOCRRecognitionLogs: "Recognition Logs",
             .ocrCacheLogsWindowTitle: "OCR Cache & Recognition Logs",
             .ocrCacheLogsWindowSubtitle: "Inspect encrypted OCR cache metadata, clear cached results, and review recent recognition attempts.",
+            .ocrModelManagerWindowTitle: "OCR Model Manager",
+            .ocrModelManagerWindowSubtitle: "Manage online OCR profiles and Local MLX model downloads, then test either path with one image.",
             .sectionDiagnosticLogging: "Diagnostic Logging",
             .sectionDiagnosticRequestBodies: "Request Body Diagnostics",
             .sectionOutboundProxy: "Outbound Proxy",
@@ -2443,6 +2472,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRefreshOCRRecognitionLogs: "Refresh Logs",
             .actionViewOCRResult: "View Result",
             .actionOpenOCRCacheLogs: "View OCR Cache & Logs",
+            .actionOpenOCRModelManager: "Manage OCR Models",
+            .actionAddOnlineOCRModel: "Add Online Model",
+            .actionEditOnlineOCRModel: "Edit",
+            .actionTestOCRModel: "Test",
+            .actionOpenLocalModelDirectory: "Open Directory",
+            .actionOpenLocalModelCacheDirectory: "Open Cache Directory",
+            .actionChooseOCRTestImage: "Choose Image",
+            .actionRunOCRTest: "Run OCR Test",
             .actionRefreshLocalOCRModels: "Refresh Models",
             .actionDownloadLocalOCRModel: "Download",
             .actionVerifyLocalOCRModel: "Verify",
@@ -2558,7 +2595,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheNoEntries: "There are no reasoning backfill cache entries to clean up.",
             .helperGeminiOAuthSettings: "Configure the Google OAuth client used by Google / Gemini Login. Environment variables remain available as a fallback.",
             .helperSupportsVision: "Turn this on for models that can read image inputs directly. Turn it off to let the proxy inject OCR text when OCR is enabled.",
-            .helperOCRModelSettings: "Configure an independent OpenAI-compatible OCR model. It runs only when an account is marked as not supporting image context.",
+            .helperOCRModelSettings: "Enable OCR and choose the active OCR provider/model. Full online credentials, Local MLX downloads, prompt, and tests live in the model manager.",
+            .helperOCRModelManager: "Settings only choose the active OCR provider and model. Credentials, prompt, Local MLX downloads, and model tests are managed in the dedicated window.",
+            .helperOnlineOCRModels: "Each online OCR profile stores its own OpenAI-compatible model, base URL, and API key. API keys are never written to normal logs.",
+            .helperOCRTest: "Choose one image and run the selected OCR model with the prompt below. Tests reuse the real OCR flow, encrypted cache, and safe recognition logs.",
             .helperOCRCache: "Encrypted OCR result cache keyed by image content hash. It lets the same image reuse one recognition result across text-only model accounts.",
             .helperOCRCachePrivacy: "Only the image SHA-256 hash, safe metadata, and encrypted OCR text are stored. Original images, URLs, base64 payloads, and API keys are not stored or shown here.",
             .helperOCRRecognitionLogs: "Recent OCR attempts with safe metadata. Use this to tell whether a request recognized, reused, skipped, or failed OCR.",
@@ -2762,6 +2802,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorReasoningCacheClearFailed: "Reasoning cache cleanup failed",
             .errorOCRCacheFailed: "OCR cache failed to load",
             .errorOCRCacheClearFailed: "OCR cache cleanup failed",
+            .errorOCRModelTestFailed: "OCR model test failed",
             .errorDiagnosticRequestBodyUnavailable: "Request body diagnostic unavailable",
             .errorDiagnosticRequestBodySaveFailed: "Request body save failed",
             .statusOCRAll: "All",
@@ -2824,6 +2865,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "Request logs exported",
             .successReasoningCacheCleared: "Reasoning cache cleared",
             .successOCRCacheCleared: "OCR cache cleared",
+            .successOCRModelTest: "OCR test completed",
             .successDiagnosticRequestBodiesCleared: "Request body diagnostics cleared",
             .successCopiedDiagnosticRequestBody: "Request body copied",
             .successDiagnosticRequestBodySaved: "Request body saved",
@@ -3060,6 +3102,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelOCRImageHash: "图片哈希",
             .labelOCRCacheHit: "缓存命中",
             .labelOCRResult: "OCR 结果",
+            .labelOCRModelProfileName: "配置名称",
+            .labelSelectedOCRModel: "当前 OCR 模型",
+            .labelOCRTestPrompt: "测试 Prompt",
+            .labelOCRTestImage: "测试图片",
             .labelLanguage: "语言",
             .labelTheme: "主题",
             .labelDisplay: "显示",
@@ -3140,10 +3186,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .sectionGeminiOAuth: "Google / Gemini OAuth",
             .sectionOCRModel: "OCR 模型",
             .sectionLocalOCRModels: "本地 MLX 模型",
+            .sectionOnlineOCRModels: "在线模型",
+            .sectionOCRCommonSettings: "OCR 运行设置",
             .sectionOCRCache: "OCR 缓存",
             .sectionOCRRecognitionLogs: "识别日志",
             .ocrCacheLogsWindowTitle: "OCR 缓存与识别日志",
             .ocrCacheLogsWindowSubtitle: "查看加密 OCR 缓存元数据、清理识别结果缓存，并排查最近的图片识别记录。",
+            .ocrModelManagerWindowTitle: "OCR 模型管理",
+            .ocrModelManagerWindowSubtitle: "管理在线 OCR 配置和本地 MLX 模型下载，并用单张图片测试任一路径。",
             .sectionDiagnosticLogging: "诊断日志",
             .sectionDiagnosticRequestBodies: "请求体诊断数据",
             .sectionOutboundProxy: "出站代理",
@@ -3261,6 +3311,14 @@ public struct LocalizationStore: Sendable, Equatable {
             .actionRefreshOCRRecognitionLogs: "刷新日志",
             .actionViewOCRResult: "查看结果",
             .actionOpenOCRCacheLogs: "查看 OCR 缓存与识别日志",
+            .actionOpenOCRModelManager: "管理 OCR 模型",
+            .actionAddOnlineOCRModel: "新增在线模型",
+            .actionEditOnlineOCRModel: "编辑",
+            .actionTestOCRModel: "测试",
+            .actionOpenLocalModelDirectory: "打开目录",
+            .actionOpenLocalModelCacheDirectory: "打开缓存目录",
+            .actionChooseOCRTestImage: "选择图片",
+            .actionRunOCRTest: "运行 OCR 测试",
             .actionRefreshLocalOCRModels: "刷新模型",
             .actionDownloadLocalOCRModel: "下载",
             .actionVerifyLocalOCRModel: "校验",
@@ -3376,7 +3434,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperReasoningCacheNoEntries: "当前没有可清理的 reasoning 回传缓存。",
             .helperGeminiOAuthSettings: "配置 Google / Gemini 登录使用的 Google OAuth 客户端；环境变量仍会作为兼容 fallback。",
             .helperSupportsVision: "开启后图片会直接透传给上游模型；关闭后在 OCR 已启用时会自动识别图片并把结果作为文本上下文注入。",
-            .helperOCRModelSettings: "配置独立的 OpenAI 兼容 OCR 模型。只有账号标记为不支持图片上下文，且请求包含图片时才会调用。",
+            .helperOCRModelSettings: "启用 OCR 并选择当前 OCR 类型和模型。在线密钥、本地 MLX 下载、Prompt 和测试都在模型管理窗口维护。",
+            .helperOCRModelManager: "设置页只负责选择当前 OCR 类型和模型；在线密钥、Prompt、本地 MLX 下载和模型测试都在独立窗口中维护。",
+            .helperOnlineOCRModels: "每个在线 OCR 配置都保存自己的 OpenAI 兼容模型、Base URL 和 API Key。API Key 不会写入普通日志。",
+            .helperOCRTest: "选择一张图片，用下方 Prompt 测试当前 OCR 模型。测试会复用正式 OCR 流程、加密缓存和安全识别日志。",
             .helperOCRCache: "按图片内容哈希索引的加密 OCR 结果缓存。相同图片可在不同纯文本模型账号之间复用同一次识别结果。",
             .helperOCRCachePrivacy: "这里只保存图片 SHA-256 哈希、安全元数据和加密后的 OCR 文本。不会保存或展示原图、URL、base64 内容或 API Key。",
             .helperOCRRecognitionLogs: "最近的 OCR 尝试记录，用来判断请求是新识别、命中缓存、跳过还是失败。",
@@ -3580,6 +3641,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .errorReasoningCacheClearFailed: "Reasoning 缓存清理失败",
             .errorOCRCacheFailed: "OCR 缓存加载失败",
             .errorOCRCacheClearFailed: "OCR 缓存清理失败",
+            .errorOCRModelTestFailed: "OCR 模型测试失败",
             .errorDiagnosticRequestBodyUnavailable: "请求体诊断不可用",
             .errorDiagnosticRequestBodySaveFailed: "请求体保存失败",
             .statusOCRAll: "全部",
@@ -3642,6 +3704,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .successRequestLogsExported: "请求日志已导出",
             .successReasoningCacheCleared: "Reasoning 缓存已清理",
             .successOCRCacheCleared: "OCR 缓存已清理",
+            .successOCRModelTest: "OCR 测试已完成",
             .successDiagnosticRequestBodiesCleared: "请求体诊断数据已清理",
             .successCopiedDiagnosticRequestBody: "请求体已复制",
             .successDiagnosticRequestBodySaved: "请求体已保存",

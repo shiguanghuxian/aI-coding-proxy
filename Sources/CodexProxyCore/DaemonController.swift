@@ -996,6 +996,26 @@ public final class DaemonController: @unchecked Sendable {
         try self.store.loadOCRRecognitionResult(logID: logID)
     }
 
+    public func testOCRModel(_ request: OCRModelTestRequest) async throws -> OCRModelTestResult {
+        var config = try await self.loadConfig()
+        config.ocrModel = request.ocrModel
+        config.ocrModel.enabled = true
+        config.ocrModel.prompt = request.prompt
+        return try await self.ocrImageProcessor.testRecognition(
+            OCRModelTestRequest(
+                ocrModel: config.ocrModel,
+                imageBase64: request.imageBase64,
+                mimeType: request.mimeType,
+                prompt: request.prompt
+            ),
+            networkConfig: config,
+            logContext: OCRRecognitionLogContext(
+                endpoint: "/admin/ocr-test",
+                requestedModel: config.ocrModel.recognitionModelLabel
+            )
+        )
+    }
+
     public func localOCRModels() async throws -> LocalOCRModelsResponse {
         let config = try await self.loadConfig()
         let runtime = await self.localMLXOCRRuntime.status()

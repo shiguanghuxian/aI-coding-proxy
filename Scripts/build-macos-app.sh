@@ -8,6 +8,7 @@ BUILD_LINUX_ARTIFACTS_SCRIPT="$ROOT_DIR/Scripts/build-linux-artifacts.sh"
 BUILD_MLX_METALLIB_SCRIPT="$ROOT_DIR/Scripts/build-mlx-metallib.sh"
 THIRD_PARTY_NOTICE="$ROOT_DIR/Packaging/macOS/mihomo-third-party-notice.txt"
 REMOTE_ARTIFACTS_DIR="${CODEX_PROXY_REMOTE_ARTIFACTS_DIR:-$ROOT_DIR/Artifacts}"
+BUILD_CACHE_DIR="${CODEX_PROXY_BUILD_CACHE_DIR:-$ROOT_DIR/.build/codex-proxy-build-cache}"
 FORCE_REFRESH=0
 POSITIONAL_ARGS=()
 source "$ROOT_DIR/Scripts/swift-static-linux-common.sh"
@@ -94,6 +95,9 @@ case "$TARGET_ARCH" in
 esac
 
 SWIFT_BUILD_ARGS=(build -c "$CONFIGURATION" --arch "$TARGET_ARCH" --resolver-fingerprint-checking warn)
+MLX_OCR_HELPER_CACHE_DIR="$BUILD_CACHE_DIR/mlx-ocr-helper/$TARGET_ARCH/$CONFIGURATION"
+MLX_OCR_HELPER_CACHE_BIN="$MLX_OCR_HELPER_CACHE_DIR/CodexProxyMLXOCRServer"
+MLX_OCR_HELPER_CACHE_FINGERPRINT="$MLX_OCR_HELPER_CACHE_DIR/CodexProxyMLXOCRServer.fingerprint"
 
 clean_swiftpm_arch_build_cache() {
   echo "Cleaning SwiftPM $CONFIGURATION cache for $TARGET_ARCH before retry..." >&2
@@ -106,7 +110,7 @@ clean_swiftpm_arch_build_cache() {
 run_swift_build_for_bundle() {
   local log_file
   log_file="$(mktemp "${TMPDIR:-/tmp}/codex-proxy-swift-build.XXXXXX")"
-  if "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" 2>&1 | tee "$log_file"; then
+  if "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" "$@" 2>&1 | tee "$log_file"; then
     rm -f "$log_file"
     return 0
   fi
@@ -116,12 +120,98 @@ run_swift_build_for_bundle() {
     echo "SwiftPM reported missing _NumericsShims; retrying once after clearing stale arch build cache." >&2
     rm -f "$log_file"
     clean_swiftpm_arch_build_cache
-    "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}"
+    "$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" "$@"
     return $?
   fi
 
   rm -f "$log_file"
   return "$status"
+}
+
+hash_mlx_ocr_helper_inputs() {
+  (
+    cd "$ROOT_DIR"
+    for file in Package.swift Package.resolved; do
+      if [[ -f "$file" ]]; then
+        shasum -a 256 "$file"
+      fi
+    done
+    if [[ -d Sources/CodexProxyMLXOCRServer ]]; then
+      find Sources/CodexProxyMLXOCRServer -type f -print |
+        LC_ALL=C sort |
+        while IFS= read -r file; do
+          shasum -a 256 "$file"
+        done
+    fi
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
+hash_mlx_dependency_revisions() {
+  (
+    for checkout in mlx-swift mlx-swift-lm swift-transformers; do
+      checkout_dir="$ROOT_DIR/.build/checkouts/$checkout"
+      printf 'checkout=%s\n' "$checkout"
+      if [[ -d "$checkout_dir/.git" ]]; then
+        git -C "$checkout_dir" rev-parse HEAD 2>/dev/null || true
+        git -C "$checkout_dir" status --porcelain 2>/dev/null || true
+      else
+        printf 'missing\n'
+      fi
+    done
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
+mlx_ocr_helper_fingerprint() {
+  local swift_version sdk_version source_hash dependency_hash
+  swift_version="$("$SWIFT_EXEC" --version 2>&1)"
+  sdk_version="$(/usr/bin/xcrun -sdk macosx --show-sdk-version 2>/dev/null || echo "unknown")"
+  source_hash="$(hash_mlx_ocr_helper_inputs)"
+  dependency_hash="$(hash_mlx_dependency_revisions)"
+  {
+    printf 'target_arch=%s\n' "$TARGET_ARCH"
+    printf 'configuration=%s\n' "$CONFIGURATION"
+    printf 'sdk_version=%s\n' "$sdk_version"
+    printf 'swift_exec=%s\n' "$SWIFT_EXEC"
+    printf 'swift_version:\n%s\n' "$swift_version"
+    printf 'source_hash=%s\n' "$source_hash"
+    printf 'mlx_dependency_hash=%s\n' "$dependency_hash"
+  } | shasum -a 256 | awk '{print $1}'
+}
+
+prepare_mlx_ocr_helper() {
+  local build_dir="$1"
+  local build_helper="$build_dir/CodexProxyMLXOCRServer"
+  local current_fingerprint
+  current_fingerprint="$(mlx_ocr_helper_fingerprint)"
+
+  mkdir -p "$build_dir"
+  if [[ "${CODEX_PROXY_REBUILD_MLX_OCR_HELPER:-0}" != "1" ]] &&
+     [[ -x "$MLX_OCR_HELPER_CACHE_BIN" ]] &&
+     [[ -f "$MLX_OCR_HELPER_CACHE_FINGERPRINT" ]] &&
+     [[ "$(cat "$MLX_OCR_HELPER_CACHE_FINGERPRINT")" == "$current_fingerprint" ]]; then
+    cp "$MLX_OCR_HELPER_CACHE_BIN" "$build_helper"
+    chmod +x "$build_helper"
+    echo "Reusing cached Local MLX OCR helper: $MLX_OCR_HELPER_CACHE_BIN"
+    return 0
+  fi
+
+  if [[ "${CODEX_PROXY_REBUILD_MLX_OCR_HELPER:-0}" == "1" ]]; then
+    echo "Rebuilding Local MLX OCR helper cache because CODEX_PROXY_REBUILD_MLX_OCR_HELPER=1"
+  else
+    echo "Building Local MLX OCR helper; cache miss for $TARGET_ARCH/$CONFIGURATION"
+  fi
+
+  run_swift_build_for_bundle --product CodexProxyMLXOCRServer
+  if [[ ! -x "$build_helper" ]]; then
+    echo "Local MLX OCR helper build output not found: $build_helper" >&2
+    exit 1
+  fi
+
+  mkdir -p "$MLX_OCR_HELPER_CACHE_DIR"
+  cp "$build_helper" "$MLX_OCR_HELPER_CACHE_BIN"
+  chmod +x "$MLX_OCR_HELPER_CACHE_BIN"
+  printf '%s\n' "$current_fingerprint" > "$MLX_OCR_HELPER_CACHE_FINGERPRINT"
+  echo "Cached Local MLX OCR helper: $MLX_OCR_HELPER_CACHE_BIN"
 }
 
 mkdir -p "$OUTPUT_DIR"
@@ -140,8 +230,10 @@ if [[ "$BUNDLE_PROFILE" == "full" && "${CODEX_PROXY_SKIP_REMOTE_ARTIFACT_PREPARE
   fi
 fi
 
-run_swift_build_for_bundle
+run_swift_build_for_bundle --product CodexProxyDesktop
+run_swift_build_for_bundle --product codex-proxyd
 BUILD_DIR="$("$SWIFT_EXEC" "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)"
+prepare_mlx_ocr_helper "$BUILD_DIR"
 "$BUILD_MLX_METALLIB_SCRIPT"
 "$ICON_SCRIPT"
 if [[ "$FORCE_REFRESH" == "1" ]]; then

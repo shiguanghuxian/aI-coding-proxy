@@ -667,6 +667,77 @@ public struct OCRImageProcessor: Sendable {
         try await self.cache.clear(request)
     }
 
+    public func testRecognition(
+        _ request: OCRModelTestRequest,
+        networkConfig: AppConfig,
+        logContext: OCRRecognitionLogContext? = nil
+    ) async throws -> OCRModelTestResult {
+        guard let imageData = Data(base64Encoded: request.imageBase64), imageData.isEmpty == false else {
+            throw ProxyError.message("测试图片 base64 内容无效。")
+        }
+        var ocrConfig = request.ocrModel
+        ocrConfig.enabled = true
+        ocrConfig.prompt = request.prompt
+        guard ocrConfig.isReadyForRecognition else {
+            throw ProxyError.message("OCR 测试配置不完整。")
+        }
+        let activeOCRConfig = ocrConfig
+        let imageURL = "data:\(request.mimeType);base64,\(imageData.base64EncodedString())"
+        let reference = OCRImageReference(index: 1, imageURL: imageURL)
+        let startedMS = Helpers.nowMilliseconds()
+        do {
+            let prepared = try await self.preparedImage(imageURL, config: activeOCRConfig, networkConfig: networkConfig)
+            let lookup = try await self.cache.textWithStatus(
+                for: prepared.imageHash,
+                mimeType: prepared.mimeType,
+                byteCount: prepared.byteCount
+            ) {
+                try await self.performWithRetry(
+                    attempts: 2,
+                    debugMode: activeOCRConfig.debugMode
+                ) {
+                    try await self.performOCR(
+                        reference: reference,
+                        preparedImage: prepared,
+                        ocrConfig: activeOCRConfig,
+                        networkConfig: networkConfig
+                    )
+                }
+            }
+            self.recordRecognitionLog(
+                reference: reference,
+                prepared: prepared,
+                ocrConfig: activeOCRConfig,
+                logContext: logContext,
+                status: lookup.cacheHit ? .cacheHit : .recognized,
+                cacheHit: lookup.cacheHit,
+                startedMS: startedMS,
+                error: nil
+            )
+            return OCRModelTestResult(
+                text: lookup.text,
+                modelLabel: activeOCRConfig.recognitionModelLabel,
+                latencyMS: max(0, Helpers.nowMilliseconds() - startedMS),
+                cacheHit: lookup.cacheHit,
+                imageHash: prepared.imageHash,
+                mimeType: prepared.mimeType,
+                byteCount: prepared.byteCount
+            )
+        } catch {
+            self.recordRecognitionLog(
+                reference: reference,
+                prepared: nil,
+                ocrConfig: activeOCRConfig,
+                logContext: logContext,
+                status: .failed,
+                cacheHit: false,
+                startedMS: startedMS,
+                error: error.localizedDescription
+            )
+            throw error
+        }
+    }
+
     public func requestByApplyingOCRIfNeeded(
         _ request: [String: Any],
         config: AppConfig,
@@ -960,8 +1031,11 @@ public struct OCRImageProcessor: Sendable {
         ocrConfig: OCRModelConfig,
         networkConfig: AppConfig
     ) async throws -> String {
+        guard let profile = ocrConfig.effectiveOnlineProfile else {
+            throw ProxyError.message("OCR 在线模型配置不完整。")
+        }
         let url = try OpenAICompatibleUpstream.chatCompletionsURL(
-            from: ocrConfig.baseURL,
+            from: profile.baseURL,
             providerPreset: .genericOpenAICompatible,
             baseURLMode: .exactAPIPrefix
         )
@@ -970,7 +1044,7 @@ public struct OCRImageProcessor: Sendable {
             imageURLObject["detail"] = detail
         }
         let body: [String: Any] = [
-            "model": ocrConfig.model,
+            "model": profile.model,
             "stream": false,
             "messages": [
                 [
@@ -996,7 +1070,7 @@ public struct OCRImageProcessor: Sendable {
         ]
         let requestBody = try JSONSerialization.data(withJSONObject: body)
         let headers = OpenAICompatibleUpstream.requestHeaders(
-            apiKey: ocrConfig.apiKey,
+            apiKey: profile.apiKey,
             accept: "application/json",
             providerPreset: .genericOpenAICompatible
         )

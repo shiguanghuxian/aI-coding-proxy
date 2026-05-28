@@ -78,6 +78,7 @@ final class AdminAPIClient {
     typealias ClearOCRCacheHandler = @Sendable (ClearOCRCacheRequest) async throws -> ClearOCRCacheResult
     typealias OCRRecognitionLogsHandler = @Sendable (OCRRecognitionLogListRequest) async throws -> OCRRecognitionLogListResponse
     typealias OCRRecognitionResultHandler = @Sendable (Int64) async throws -> OCRRecognitionResultLookupResponse
+    typealias OCRModelTestHandler = @Sendable (OCRModelTestRequest) async throws -> OCRModelTestResult
     typealias LocalOCRModelsHandler = @Sendable () async throws -> LocalOCRModelsResponse
     typealias LocalOCRModelActionHandler = @Sendable (String) async throws -> LocalOCRModelActionResult
     typealias StopLocalOCRRuntimeHandler = @Sendable () async throws -> LocalMLXOCRRuntimeStatus
@@ -135,6 +136,7 @@ final class AdminAPIClient {
     private let clearOCRCacheHandler: ClearOCRCacheHandler?
     private let ocrRecognitionLogsHandler: OCRRecognitionLogsHandler?
     private let ocrRecognitionResultHandler: OCRRecognitionResultHandler?
+    private let ocrModelTestHandler: OCRModelTestHandler?
     private let localOCRModelsHandler: LocalOCRModelsHandler?
     private let downloadLocalOCRModelHandler: LocalOCRModelActionHandler?
     private let verifyLocalOCRModelHandler: LocalOCRModelActionHandler?
@@ -182,6 +184,15 @@ final class AdminAPIClient {
         self.target.capabilities
     }
 
+    var canOpenLocalFilePaths: Bool {
+        switch self.target {
+        case .local:
+            return true
+        case .remote:
+            return false
+        }
+    }
+
     init(
         dataDirectory: URL = Paths.defaultDataDirectory(),
         target: Target? = nil,
@@ -201,6 +212,7 @@ final class AdminAPIClient {
         clearOCRCacheHandler: ClearOCRCacheHandler? = nil,
         ocrRecognitionLogsHandler: OCRRecognitionLogsHandler? = nil,
         ocrRecognitionResultHandler: OCRRecognitionResultHandler? = nil,
+        ocrModelTestHandler: OCRModelTestHandler? = nil,
         localOCRModelsHandler: LocalOCRModelsHandler? = nil,
         downloadLocalOCRModelHandler: LocalOCRModelActionHandler? = nil,
         verifyLocalOCRModelHandler: LocalOCRModelActionHandler? = nil,
@@ -260,6 +272,7 @@ final class AdminAPIClient {
         self.clearOCRCacheHandler = clearOCRCacheHandler
         self.ocrRecognitionLogsHandler = ocrRecognitionLogsHandler
         self.ocrRecognitionResultHandler = ocrRecognitionResultHandler
+        self.ocrModelTestHandler = ocrModelTestHandler
         self.localOCRModelsHandler = localOCRModelsHandler
         self.downloadLocalOCRModelHandler = downloadLocalOCRModelHandler
         self.verifyLocalOCRModelHandler = verifyLocalOCRModelHandler
@@ -860,6 +873,20 @@ final class AdminAPIClient {
             return result
         }
         return try await self.controller().ocrRecognitionResult(logID: logID)
+    }
+
+    func testOCRModel(_ request: OCRModelTestRequest) async throws -> OCRModelTestResult {
+        if let ocrModelTestHandler {
+            return try await ocrModelTestHandler(request)
+        }
+        if let result: OCRModelTestResult = try await self.httpRequest(
+            "/ocr-test",
+            method: "POST",
+            body: request
+        ) {
+            return result
+        }
+        return try await self.controller().testOCRModel(request)
     }
 
     func getLocalOCRModels() async throws -> LocalOCRModelsResponse {

@@ -46,6 +46,8 @@ final class DesktopAppModel: ObservableObject {
     typealias ProxyTestImageFilenameTokenProvider = () -> String
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
     typealias OCRCacheLogsWindowFactory = (DesktopAppModel) -> OCRCacheLogsWindowControlling
+    typealias OCRModelManagerWindowFactory = (DesktopAppModel) -> OCRModelManagerWindowControlling
+    typealias OCRModelTestImageSelectionHandler = @MainActor () throws -> OCRModelTestImageSelection?
     typealias RemoteAdminWindowFactory = (
         RemoteHostConfig,
         DesktopPreferences,
@@ -527,11 +529,13 @@ final class DesktopAppModel: ObservableObject {
     @Published var ocrRecognitionResultIsLoading = false
     @Published var ocrRecognitionResult: OCRRecognitionResultLookupResponse?
     @Published var isOCRCacheLogsPresented = false
+    @Published var isOCRModelManagerPresented = false
     @Published var isOCRRecognitionResultPresented = false
     @Published var localOCRModelsResponse = LocalOCRModelsResponse()
     @Published var localOCRModelsIsRefreshing = false
     @Published var localOCRModelOperationIDs: Set<String> = []
     @Published var localOCRRuntimeIsStopping = false
+    @Published var ocrModelTestDraft: OCRModelTestDraft?
     @Published var diagnosticRequestBodySummary = DiagnosticRequestBodySummary()
     @Published var diagnosticRequestBodyIsRefreshing = false
     @Published var diagnosticRequestBodyIsClearing = false
@@ -570,12 +574,14 @@ final class DesktopAppModel: ObservableObject {
     let proxyTestImageDownloadHandler: ProxyTestImageDownloadHandler
     let proxyTestImageFileWriter: ProxyTestImageFileWriter
     let proxyTestImageFilenameTokenProvider: ProxyTestImageFilenameTokenProvider
+    let ocrModelTestImageSelectionHandler: OCRModelTestImageSelectionHandler
     let appUpdateService: any AppUpdateServicing
     let appUpdateInstaller: any AppUpdateInstalling
     var appUpdateCurrentAppURLProvider: () -> URL?
     let appUpdateTerminateHandler: () -> Void
     let clientConfigManagerWindowFactory: ClientConfigManagerWindowFactory
     let ocrCacheLogsWindowFactory: OCRCacheLogsWindowFactory
+    let ocrModelManagerWindowFactory: OCRModelManagerWindowFactory
     private let remoteAdminWindowFactory: RemoteAdminWindowFactory
     let aboutWindowFactory: (DesktopAppModel) -> AboutWindowControlling
     let helpWindowFactory: (DesktopAppModel) -> HelpWindowControlling
@@ -591,6 +597,7 @@ final class DesktopAppModel: ObservableObject {
     var managedProxyWindowController: ManagedProxyWindowController?
     var clientConfigManagerWindowController: ClientConfigManagerWindowControlling?
     var ocrCacheLogsWindowController: OCRCacheLogsWindowControlling?
+    var ocrModelManagerWindowController: OCRModelManagerWindowControlling?
     var clientConfigManagerRefreshGeneration = 0
     var clientConfigManagerBackupLoadGeneration = 0
     var requestLogsWindowController: RequestLogsWindowController?
@@ -638,6 +645,7 @@ final class DesktopAppModel: ObservableObject {
         appUpdateTerminateHandler: @escaping () -> Void = { NSApp.terminate(nil) },
         clientConfigManagerWindowFactory: @escaping ClientConfigManagerWindowFactory = { ClientConfigManagerWindowController(model: $0) },
         ocrCacheLogsWindowFactory: @escaping OCRCacheLogsWindowFactory = { OCRCacheLogsWindowController(model: $0) },
+        ocrModelManagerWindowFactory: @escaping OCRModelManagerWindowFactory = { OCRModelManagerWindowController(model: $0) },
         remoteAdminWindowFactory: @escaping RemoteAdminWindowFactory = {
             RemoteAdminWindowController(
                 host: $0,
@@ -670,7 +678,8 @@ final class DesktopAppModel: ObservableObject {
         proxyTestImageFileWriter: @escaping ProxyTestImageFileWriter = { data, url in
             try data.write(to: url, options: .atomic)
         },
-        proxyTestImageFilenameTokenProvider: @escaping ProxyTestImageFilenameTokenProvider = DesktopAppModel.defaultProxyTestImageFilenameToken
+        proxyTestImageFilenameTokenProvider: @escaping ProxyTestImageFilenameTokenProvider = DesktopAppModel.defaultProxyTestImageFilenameToken,
+        ocrModelTestImageSelectionHandler: @escaping OCRModelTestImageSelectionHandler = DesktopAppModel.defaultOCRModelTestImageSelection
     ) {
         self.admin = admin
         self.daemon = daemon
@@ -686,6 +695,7 @@ final class DesktopAppModel: ObservableObject {
         self.appUpdateTerminateHandler = appUpdateTerminateHandler
         self.clientConfigManagerWindowFactory = clientConfigManagerWindowFactory
         self.ocrCacheLogsWindowFactory = ocrCacheLogsWindowFactory
+        self.ocrModelManagerWindowFactory = ocrModelManagerWindowFactory
         self.remoteAdminWindowFactory = remoteAdminWindowFactory
         self.aboutWindowFactory = aboutWindowFactory
         self.helpWindowFactory = helpWindowFactory
@@ -707,6 +717,7 @@ final class DesktopAppModel: ObservableObject {
         self.proxyTestImageDownloadHandler = proxyTestImageDownloadHandler
         self.proxyTestImageFileWriter = proxyTestImageFileWriter
         self.proxyTestImageFilenameTokenProvider = proxyTestImageFilenameTokenProvider
+        self.ocrModelTestImageSelectionHandler = ocrModelTestImageSelectionHandler
         self.preferences = preferencesStore.load()
         self.systemColorScheme = AppearanceStore.currentSystemColorScheme()
         self.isKeepAwakeEnabled = keepAwakeController.isEnabled
@@ -4701,6 +4712,7 @@ final class DesktopAppModel: ObservableObject {
         self.managedProxyWindowController?.refreshWindow()
         self.clientConfigManagerWindowController?.refreshWindow()
         self.ocrCacheLogsWindowController?.refreshWindow()
+        self.ocrModelManagerWindowController?.refreshWindow()
         self.requestLogsWindowController?.refreshWindow()
         self.remoteAdminWindowControllers.values.forEach { $0.refreshWindow(preferences: self.preferences) }
     }

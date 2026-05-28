@@ -153,6 +153,54 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertTrue(config.ocrModel.debugMode)
         XCTAssertTrue(config.ocrModel.prompt.contains("你是一个专业的图片内容识别助手"))
         XCTAssertTrue(config.ocrModel.prompt.contains("[OCR识别结果]"))
+        XCTAssertEqual(config.ocrModel.onlineProfiles.count, 1)
+        XCTAssertEqual(config.ocrModel.effectiveOnlineProfile?.id, OnlineOCRModelProfile.legacyDefaultID)
+        XCTAssertEqual(config.ocrModel.effectiveOnlineProfile?.model, "gpt-4o-mini")
+        XCTAssertEqual(config.ocrModel.effectiveOnlineProfile?.apiKey, "sk-ocr")
+    }
+
+    func testOCRModelConfigSupportsOnlineProfilesAndSelection() throws {
+        let json = """
+        {
+          "ocr_model": {
+            "provider": "openai_compatible",
+            "enabled": true,
+            "online_profiles": [
+              {
+                "id": "fast",
+                "label": "Fast OCR",
+                "model": "qwen-vl-fast",
+                "base_url": "https://fast.example.com/v1",
+                "api_key": "sk-fast"
+              },
+              {
+                "id": "quality",
+                "label": "Quality OCR",
+                "model": "qwen-vl-quality",
+                "baseUrl": "https://quality.example.com/v1",
+                "apiKey": "sk-quality"
+              }
+            ],
+            "selected_online_profile_id": "quality"
+          }
+        }
+        """
+
+        let config = try Helpers.readJSON(AppConfig.self, from: Data(json.utf8))
+
+        XCTAssertEqual(config.ocrModel.onlineProfiles.count, 2)
+        XCTAssertEqual(config.ocrModel.selectedOnlineProfileID, "quality")
+        XCTAssertEqual(config.ocrModel.effectiveOnlineProfile?.displayLabel, "Quality OCR")
+        XCTAssertEqual(config.ocrModel.model, "qwen-vl-quality")
+        XCTAssertEqual(config.ocrModel.baseURL, "https://quality.example.com/v1")
+        XCTAssertEqual(config.ocrModel.apiKey, "sk-quality")
+        XCTAssertTrue(config.ocrModel.isReadyForRecognition)
+
+        let encoded = try JSONEncoder().encode(config.ocrModel)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["selectedOnlineProfileId"] as? String, "quality")
+        XCTAssertEqual(object["model"] as? String, "qwen-vl-quality")
+        XCTAssertNotNil(object["onlineProfiles"])
     }
 
     func testOCRModelConfigSupportsLocalMLXProviderAndSnakeCaseFields() throws {

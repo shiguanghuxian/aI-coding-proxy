@@ -395,6 +395,99 @@ public enum OCRModelProvider: String, Codable, Sendable, Equatable, CaseIterable
     case localMLX = "local_mlx"
 }
 
+public struct OnlineOCRModelProfile: Codable, Sendable, Equatable, Identifiable {
+    public static let legacyDefaultID = "default"
+
+    public var id: String
+    public var label: String
+    public var model: String
+    public var baseURL: String
+    public var apiKey: String
+
+    public init(
+        id: String = UUID().uuidString,
+        label: String = "",
+        model: String = "",
+        baseURL: String = OpenAICompatibleUpstream.defaultBaseURL,
+        apiKey: String = ""
+    ) {
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = normalizedID.isEmpty ? UUID().uuidString : normalizedID
+        self.label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.model = normalizedModel
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.baseURL = trimmedBaseURL.isEmpty ? OpenAICompatibleUpstream.defaultBaseURL : trimmedBaseURL
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public var displayLabel: String {
+        if self.label.isEmpty == false {
+            return self.label
+        }
+        if self.model.isEmpty == false {
+            return self.model
+        }
+        return self.id
+    }
+
+    public var isReadyForRecognition: Bool {
+        self.model.isEmpty == false && self.apiKey.isEmpty == false
+    }
+
+    public static func legacyProfile(model: String, baseURL: String, apiKey: String) -> OnlineOCRModelProfile? {
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedModel.isEmpty == false || trimmedAPIKey.isEmpty == false else {
+            return nil
+        }
+        return OnlineOCRModelProfile(
+            id: Self.legacyDefaultID,
+            label: trimmedModel.isEmpty ? "Default OCR" : trimmedModel,
+            model: trimmedModel,
+            baseURL: trimmedBaseURL.isEmpty ? OpenAICompatibleUpstream.defaultBaseURL : trimmedBaseURL,
+            apiKey: trimmedAPIKey
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case model
+        case baseURL
+        case baseUrl
+        case baseURLSnake = "base_url"
+        case apiKey
+        case apiKeySnake = "api_key"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            label: try container.decodeIfPresent(String.self, forKey: .label) ?? "",
+            model: try container.decodeIfPresent(String.self, forKey: .model) ?? "",
+            baseURL: try container.decodeIfPresent(String.self, forKey: .baseURL)
+                ?? container.decodeIfPresent(String.self, forKey: .baseUrl)
+                ?? container.decodeIfPresent(String.self, forKey: .baseURLSnake)
+                ?? OpenAICompatibleUpstream.defaultBaseURL,
+            apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey)
+                ?? container.decodeIfPresent(String.self, forKey: .apiKeySnake)
+                ?? ""
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.label, forKey: .label)
+        try container.encode(self.model, forKey: .model)
+        try container.encode(self.baseURL, forKey: .baseURL)
+        try container.encode(self.apiKey, forKey: .apiKey)
+    }
+}
+
 public struct LocalMLXOCRConfig: Codable, Sendable, Equatable {
     public static let defaultSelectedModelID = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     public static let defaultMaxTokens = 1_024
@@ -952,6 +1045,8 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
     public var enabled: Bool
     public var debugMode: Bool
     public var localMLX: LocalMLXOCRConfig
+    public var onlineProfiles: [OnlineOCRModelProfile]
+    public var selectedOnlineProfileID: String
 
     public init(
         provider: OCRModelProvider = .openAICompatible,
@@ -963,12 +1058,35 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         maxImageSize: Int = 4 * 1024 * 1024,
         enabled: Bool = false,
         debugMode: Bool = false,
-        localMLX: LocalMLXOCRConfig = .init()
+        localMLX: LocalMLXOCRConfig = .init(),
+        onlineProfiles: [OnlineOCRModelProfile] = [],
+        selectedOnlineProfileID: String = ""
     ) {
         self.provider = provider
-        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var normalizedProfiles: [OnlineOCRModelProfile] = []
+        var seenProfileIDs = Set<String>()
+        for profile in onlineProfiles {
+            guard seenProfileIDs.insert(profile.id).inserted else { continue }
+            normalizedProfiles.append(profile)
+        }
+        if normalizedProfiles.isEmpty,
+           let legacyProfile = OnlineOCRModelProfile.legacyProfile(
+            model: legacyModel,
+            baseURL: legacyBaseURL,
+            apiKey: legacyAPIKey
+           )
+        {
+            normalizedProfiles.append(legacyProfile)
+        }
+        let normalizedSelectedOnlineProfileID = selectedOnlineProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedProfile = normalizedProfiles.first { $0.id == normalizedSelectedOnlineProfileID }
+            ?? normalizedProfiles.first
+        self.model = selectedProfile?.model ?? legacyModel
+        self.apiKey = selectedProfile?.apiKey ?? legacyAPIKey
+        self.baseURL = selectedProfile?.baseURL ?? legacyBaseURL
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         self.prompt = trimmedPrompt.isEmpty ? Self.defaultPrompt : trimmedPrompt
         self.timeout = max(timeout, 1)
@@ -976,14 +1094,15 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         self.enabled = enabled
         self.debugMode = debugMode
         self.localMLX = localMLX
+        self.onlineProfiles = normalizedProfiles
+        self.selectedOnlineProfileID = selectedProfile?.id ?? normalizedSelectedOnlineProfileID
     }
 
     public var isReadyForRecognition: Bool {
         guard self.enabled else { return false }
         switch self.provider {
         case .openAICompatible:
-            return self.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                && self.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            return self.effectiveOnlineProfile?.isReadyForRecognition == true
         case .localMLX:
             return self.localMLX.effectiveModelID().isEmpty == false
         }
@@ -992,10 +1111,20 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
     public var recognitionModelLabel: String {
         switch self.provider {
         case .openAICompatible:
-            return self.model
+            return self.effectiveOnlineProfile?.displayLabel ?? self.model
         case .localMLX:
             return "Local MLX · \(self.localMLX.effectiveModelID())"
         }
+    }
+
+    public var effectiveOnlineProfile: OnlineOCRModelProfile? {
+        if let selected = self.onlineProfiles.first(where: { $0.id == self.selectedOnlineProfileID }) {
+            return selected
+        }
+        if let first = self.onlineProfiles.first {
+            return first
+        }
+        return OnlineOCRModelProfile.legacyProfile(model: self.model, baseURL: self.baseURL, apiKey: self.apiKey)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1016,6 +1145,11 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
         case localMLX
         case localMlx
         case localMLXSnake = "local_mlx"
+        case onlineProfiles
+        case onlineProfilesSnake = "online_profiles"
+        case selectedOnlineProfileID = "selectedOnlineProfileId"
+        case selectedOnlineProfileIDLegacy = "selectedOnlineProfileID"
+        case selectedOnlineProfileIDSnake = "selected_online_profile_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1042,22 +1176,32 @@ public struct OCRModelConfig: Codable, Sendable, Equatable {
             localMLX: try container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMLX)
                 ?? container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMlx)
                 ?? container.decodeIfPresent(LocalMLXOCRConfig.self, forKey: .localMLXSnake)
-                ?? .init()
+                ?? .init(),
+            onlineProfiles: try container.decodeIfPresent([OnlineOCRModelProfile].self, forKey: .onlineProfiles)
+                ?? container.decodeIfPresent([OnlineOCRModelProfile].self, forKey: .onlineProfilesSnake)
+                ?? [],
+            selectedOnlineProfileID: try container.decodeIfPresent(String.self, forKey: .selectedOnlineProfileID)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedOnlineProfileIDLegacy)
+                ?? container.decodeIfPresent(String.self, forKey: .selectedOnlineProfileIDSnake)
+                ?? ""
         )
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.provider, forKey: .provider)
-        try container.encode(self.model, forKey: .model)
-        try container.encode(self.apiKey, forKey: .apiKey)
-        try container.encode(self.baseURL, forKey: .baseURL)
+        let profile = self.effectiveOnlineProfile
+        try container.encode(profile?.model ?? self.model, forKey: .model)
+        try container.encode(profile?.apiKey ?? self.apiKey, forKey: .apiKey)
+        try container.encode(profile?.baseURL ?? self.baseURL, forKey: .baseURL)
         try container.encode(self.prompt, forKey: .prompt)
         try container.encode(self.timeout, forKey: .timeout)
         try container.encode(self.maxImageSize, forKey: .maxImageSize)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.debugMode, forKey: .debugMode)
         try container.encode(self.localMLX, forKey: .localMLX)
+        try container.encode(self.onlineProfiles, forKey: .onlineProfiles)
+        try container.encode(self.selectedOnlineProfileID, forKey: .selectedOnlineProfileID)
     }
 }
 
@@ -4141,6 +4285,131 @@ public struct OCRRecognitionResultLookupResponse: Codable, Sendable, Equatable {
         let normalizedMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.text = normalizedText.isEmpty ? nil : normalizedText
         self.message = normalizedMessage.isEmpty ? nil : normalizedMessage
+    }
+}
+
+public struct OCRModelTestRequest: Codable, Sendable, Equatable {
+    public var ocrModel: OCRModelConfig
+    public var imageBase64: String
+    public var mimeType: String
+    public var prompt: String
+
+    public init(
+        ocrModel: OCRModelConfig,
+        imageBase64: String,
+        mimeType: String = "image/png",
+        prompt: String = OCRModelConfig.defaultPrompt
+    ) {
+        self.ocrModel = ocrModel
+        self.imageBase64 = imageBase64.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMimeType = mimeType
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        self.mimeType = normalizedMimeType.isEmpty ? "image/png" : normalizedMimeType
+        let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.prompt = normalizedPrompt.isEmpty ? OCRModelConfig.defaultPrompt : normalizedPrompt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ocrModel
+        case ocrModelSnake = "ocr_model"
+        case imageBase64
+        case imageBase64Snake = "image_base64"
+        case mimeType
+        case mimeTypeSnake = "mime_type"
+        case prompt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            ocrModel: try container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModel)
+                ?? container.decodeIfPresent(OCRModelConfig.self, forKey: .ocrModelSnake)
+                ?? .init(),
+            imageBase64: try container.decodeIfPresent(String.self, forKey: .imageBase64)
+                ?? container.decodeIfPresent(String.self, forKey: .imageBase64Snake)
+                ?? "",
+            mimeType: try container.decodeIfPresent(String.self, forKey: .mimeType)
+                ?? container.decodeIfPresent(String.self, forKey: .mimeTypeSnake)
+                ?? "image/png",
+            prompt: try container.decodeIfPresent(String.self, forKey: .prompt) ?? OCRModelConfig.defaultPrompt
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.ocrModel, forKey: .ocrModel)
+        try container.encode(self.imageBase64, forKey: .imageBase64)
+        try container.encode(self.mimeType, forKey: .mimeType)
+        try container.encode(self.prompt, forKey: .prompt)
+    }
+}
+
+public struct OCRModelTestResult: Codable, Sendable, Equatable {
+    public var text: String
+    public var modelLabel: String
+    public var latencyMS: Int64
+    public var cacheHit: Bool
+    public var imageHash: String
+    public var mimeType: String
+    public var byteCount: Int
+
+    public init(
+        text: String,
+        modelLabel: String,
+        latencyMS: Int64,
+        cacheHit: Bool,
+        imageHash: String,
+        mimeType: String,
+        byteCount: Int
+    ) {
+        self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.modelLabel = modelLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.latencyMS = max(0, latencyMS)
+        self.cacheHit = cacheHit
+        self.imageHash = imageHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.mimeType = mimeType.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.byteCount = max(0, byteCount)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case modelLabel
+        case latencyMS = "latencyMs"
+        case latencyMSCamel = "latencyMS"
+        case cacheHit
+        case imageHash
+        case mimeType
+        case byteCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            text: try container.decodeIfPresent(String.self, forKey: .text) ?? "",
+            modelLabel: try container.decodeIfPresent(String.self, forKey: .modelLabel) ?? "",
+            latencyMS: try container.decodeIfPresent(Int64.self, forKey: .latencyMS)
+                ?? container.decodeIfPresent(Int64.self, forKey: .latencyMSCamel)
+                ?? 0,
+            cacheHit: try container.decodeIfPresent(Bool.self, forKey: .cacheHit) ?? false,
+            imageHash: try container.decodeIfPresent(String.self, forKey: .imageHash) ?? "",
+            mimeType: try container.decodeIfPresent(String.self, forKey: .mimeType) ?? "",
+            byteCount: try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.text, forKey: .text)
+        try container.encode(self.modelLabel, forKey: .modelLabel)
+        try container.encode(self.latencyMS, forKey: .latencyMS)
+        try container.encode(self.cacheHit, forKey: .cacheHit)
+        try container.encode(self.imageHash, forKey: .imageHash)
+        try container.encode(self.mimeType, forKey: .mimeType)
+        try container.encode(self.byteCount, forKey: .byteCount)
     }
 }
 

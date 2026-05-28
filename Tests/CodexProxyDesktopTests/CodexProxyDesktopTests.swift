@@ -97,6 +97,27 @@ private final class OCRCacheLogsWindowControllerSpy: OCRCacheLogsWindowControlli
     }
 }
 
+@MainActor
+private final class OCRModelManagerWindowControllerSpy: OCRModelManagerWindowControlling {
+    private(set) var showWindowCallCount = 0
+    private(set) var closeWindowCallCount = 0
+    private(set) var refreshWindowCallCount = 0
+    var onClose: (() -> Void)?
+
+    func showWindow() {
+        self.showWindowCallCount += 1
+    }
+
+    func closeWindow() {
+        self.closeWindowCallCount += 1
+        self.onClose?()
+    }
+
+    func refreshWindow() {
+        self.refreshWindowCallCount += 1
+    }
+}
+
 private enum KeepAwakeTestError: LocalizedError {
     case failed
 
@@ -4455,6 +4476,54 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testOpenOCRModelManagerWindowCreatesRefreshesAndReusesController() async {
+        let descriptor = LocalOCRModelDescriptor.recommendedModels[0]
+        let response = LocalOCRModelsResponse(
+            selectedModelID: descriptor.id,
+            models: [
+                LocalOCRModelStatus(
+                    descriptor: descriptor,
+                    phase: .installed,
+                    localPath: "/tmp/\(descriptor.snapshotDirectoryName)"
+                ),
+            ],
+            runtime: LocalMLXOCRRuntimeStatus(running: false)
+        )
+        let probe = LocalOCRModelManagementProbe(response: response)
+        let admin = AdminAPIClient(localOCRModelsHandler: { probe.models() })
+        let windowSpy = OCRModelManagerWindowControllerSpy()
+        var factoryCallCount = 0
+        let model = DesktopAppModel(
+            admin: admin,
+            ocrModelManagerWindowFactory: { _ in
+                factoryCallCount += 1
+                return windowSpy
+            }
+        )
+        windowSpy.onClose = { model.handleOCRModelManagerWindowDidClose() }
+
+        model.openOCRModelManagerWindow()
+        await Self.waitForCondition { probe.modelCallCount() == 1 }
+
+        XCTAssertTrue(model.isOCRModelManagerPresented)
+        XCTAssertEqual(factoryCallCount, 1)
+        XCTAssertEqual(windowSpy.showWindowCallCount, 1)
+        XCTAssertEqual(model.localOCRModelsResponse.models.first?.descriptor.id, descriptor.id)
+
+        model.openOCRModelManagerWindow()
+        await Self.waitForCondition { probe.modelCallCount() == 2 }
+        XCTAssertEqual(factoryCallCount, 1)
+        XCTAssertEqual(windowSpy.showWindowCallCount, 2)
+
+        model.refreshThemeSensitiveWindows()
+        XCTAssertEqual(windowSpy.refreshWindowCallCount, 1)
+
+        model.dismissOCRModelManagerWindow()
+        XCTAssertEqual(windowSpy.closeWindowCallCount, 1)
+        XCTAssertFalse(model.isOCRModelManagerPresented)
+    }
+
+    @MainActor
     func testLocalOCRModelManagementUsesAdminAPIAndUpdatesSettings() async {
         let descriptor = LocalOCRModelDescriptor.recommendedModels[0]
         let initialStatus = LocalOCRModelStatus(
@@ -4510,40 +4579,102 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.settings.ocrModel.maxImageSize, 2 * 1024 * 1024)
     }
 
+    @MainActor
+    func testOnlineOCRProfileManagementAndModelTestUseAdminAPI() async {
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+        let profile = OnlineOCRModelProfile(
+            id: "online-a",
+            label: "Vision OCR",
+            model: "qwen-vl-ocr",
+            baseURL: "https://ocr.example.com/v1",
+            apiKey: "sk-ocr"
+        )
+        let result = OCRModelTestResult(
+            text: "[OCR识别结果]\n文字内容：hello",
+            modelLabel: "Vision OCR",
+            latencyMS: 12,
+            cacheHit: false,
+            imageHash: "abc123",
+            mimeType: "image/png",
+            byteCount: imageData.count
+        )
+        final class Probe: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var requests: [OCRModelTestRequest] = []
+            func record(_ request: OCRModelTestRequest, result: OCRModelTestResult) -> OCRModelTestResult {
+                self.lock.lock()
+                self.requests.append(request)
+                self.lock.unlock()
+                return result
+            }
+        }
+        let probe = Probe()
+        let admin = AdminAPIClient(
+            ocrModelTestHandler: { request in probe.record(request, result: result) }
+        )
+        let model = DesktopAppModel(
+            admin: admin,
+            ocrModelTestImageSelectionHandler: {
+                OCRModelTestImageSelection(data: imageData, mimeType: "image/png", filename: "sample.png")
+            }
+        )
+
+        model.upsertOnlineOCRProfile(profile)
+        XCTAssertEqual(model.settings.ocrModel.selectedOnlineProfileID, profile.id)
+        XCTAssertEqual(model.settings.ocrModel.effectiveOnlineProfile, profile)
+
+        model.beginOnlineOCRModelTest(profileID: profile.id)
+        model.chooseOCRModelTestImage()
+        await model.runOCRModelTest()
+
+        XCTAssertEqual(model.ocrModelTestDraft?.result, result)
+        XCTAssertEqual(probe.requests.count, 1)
+        XCTAssertEqual(probe.requests.first?.ocrModel.effectiveOnlineProfile, profile)
+        XCTAssertEqual(probe.requests.first?.mimeType, "image/png")
+        XCTAssertEqual(Data(base64Encoded: probe.requests.first?.imageBase64 ?? ""), imageData)
+
+        model.deleteOnlineOCRProfile(id: profile.id)
+        XCTAssertTrue(model.settings.ocrModel.onlineProfiles.isEmpty)
+    }
+
     func testOCRRecognitionLogsSettingsUIAndLocalizationAreDeclared() throws {
         let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
         let ocrSettingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRSettingsPanel.swift")
+        let ocrModelManagerSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRModelManagerView.swift")
+        let ocrModelManagerWindowSource = try Self.repoFileText("Sources/CodexProxyDesktop/OCRModelManagerWindowController.swift")
         let ocrCacheLogsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRCacheLogsView.swift")
         let ocrWindowSource = try Self.repoFileText("Sources/CodexProxyDesktop/OCRCacheLogsWindowController.swift")
         let adminSource = try Self.repoFileText("Sources/CodexProxyDesktop/AdminAPIClient.swift")
         let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
 
-        XCTAssertTrue(settingsSource.contains(".actionOpenOCRCacheLogs"))
-        XCTAssertTrue(settingsSource.contains("self.model.openOCRCacheLogsWindow()"))
+        XCTAssertTrue(settingsSource.contains(".actionOpenOCRModelManager"))
+        XCTAssertTrue(settingsSource.contains("self.model.openOCRModelManagerWindow()"))
+        XCTAssertFalse(settingsSource.contains("self.model.loadOCRRecognitionLogs()"))
         XCTAssertFalse(settingsSource.contains(".sectionOCRRecognitionLogs"))
         XCTAssertFalse(settingsSource.contains("OCRRecognitionLogRow"))
-        XCTAssertFalse(settingsSource.contains("self.model.loadOCRRecognitionLogs()"))
         XCTAssertTrue(ocrSettingsSource.contains("case .localMLX:"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.localMLXFields"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRHFBaseURL"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRHFToken"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRModelCachePath"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRRuntimePath"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRCustomHFRepo"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRMaxTokens"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRIdleShutdownSeconds"))
-        XCTAssertTrue(ocrSettingsSource.contains(".labelOCRLocalConcurrency"))
-        XCTAssertTrue(ocrSettingsSource.contains(".helperLocalOCRLowResourceMode"))
-        XCTAssertTrue(ocrSettingsSource.contains(".actionUseLowResourceOCRPreset"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.applyLowResourceLocalOCRPreset()"))
-        XCTAssertTrue(ocrSettingsSource.contains(".statusLocalOCRLowResource"))
-        XCTAssertTrue(ocrSettingsSource.contains("SecureField(self.model.text(.labelOCRHFToken)"))
-        XCTAssertTrue(ocrSettingsSource.contains("LocalOCRModelRow"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.downloadLocalOCRModel"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.verifyLocalOCRModel"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.deleteLocalOCRModel"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.selectLocalOCRModel"))
-        XCTAssertTrue(ocrSettingsSource.contains("self.model.stopLocalOCRRuntime"))
+        XCTAssertTrue(ocrSettingsSource.contains(".labelSelectedOCRModel"))
+        XCTAssertFalse(ocrSettingsSource.contains(".actionOpenOCRModelManager"))
+        XCTAssertFalse(ocrSettingsSource.contains(".labelOCRAPIKey"))
+        XCTAssertFalse(ocrSettingsSource.contains(".labelOCRBaseURL"))
+        XCTAssertFalse(ocrSettingsSource.contains(".labelOCRPrompt"))
+        XCTAssertFalse(ocrSettingsSource.contains("LocalOCRModelManagerRow"))
+        XCTAssertFalse(ocrSettingsSource.contains("downloadLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains(".sectionOnlineOCRModels"))
+        XCTAssertTrue(ocrModelManagerSource.contains(".sectionLocalOCRModels"))
+        XCTAssertTrue(ocrModelManagerSource.contains("OnlineOCRProfileEditorSheet"))
+        XCTAssertTrue(ocrModelManagerSource.contains("OCRModelTestSheet"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.beginOnlineOCRModelTest"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.beginLocalOCRModelTest"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.openLocalOCRModelDirectory"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.openLocalOCRModelCacheDirectory"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.downloadLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.verifyLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.deleteLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.selectLocalOCRModel"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.stopLocalOCRRuntime"))
+        XCTAssertTrue(ocrModelManagerWindowSource.contains("OCRModelManagerWindowController"))
+        XCTAssertTrue(ocrModelManagerWindowSource.contains("OCRModelManagerView(model: model)"))
         XCTAssertTrue(ocrCacheLogsSource.contains(".sectionOCRCache"))
         XCTAssertTrue(ocrCacheLogsSource.contains(".sectionOCRRecognitionLogs"))
         XCTAssertTrue(ocrCacheLogsSource.contains(".helperOCRRecognitionLogPrivacy"))
@@ -4554,6 +4685,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(ocrWindowSource.contains("OCRCacheLogsView(model: model)"))
         XCTAssertTrue(adminSource.contains("/ocr-recognition-logs"))
         XCTAssertTrue(adminSource.contains("/ocr-recognition-logs/\\(logID)/result"))
+        XCTAssertTrue(adminSource.contains("/ocr-test"))
         XCTAssertTrue(adminSource.contains("/ocr-local-models"))
         XCTAssertTrue(adminSource.contains("/ocr-local-runtime/stop"))
         XCTAssertTrue(adminSource.contains("Self.pathComponent(id)"))
@@ -4561,6 +4693,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(preferencesSource.contains(".ocrCacheLogsWindowTitle: \"OCR Cache & Recognition Logs\""))
         XCTAssertTrue(preferencesSource.contains(".actionOpenOCRCacheLogs: \"查看 OCR 缓存与识别日志\""))
         XCTAssertTrue(preferencesSource.contains(".actionOpenOCRCacheLogs: \"View OCR Cache & Logs\""))
+        XCTAssertTrue(preferencesSource.contains(".ocrModelManagerWindowTitle: \"OCR 模型管理\""))
+        XCTAssertTrue(preferencesSource.contains(".ocrModelManagerWindowTitle: \"OCR Model Manager\""))
+        XCTAssertTrue(preferencesSource.contains(".actionOpenOCRModelManager: \"管理 OCR 模型\""))
+        XCTAssertTrue(preferencesSource.contains(".actionOpenOCRModelManager: \"Manage OCR Models\""))
+        XCTAssertTrue(preferencesSource.contains(".sectionOnlineOCRModels: \"在线模型\""))
+        XCTAssertTrue(preferencesSource.contains(".sectionOnlineOCRModels: \"Online Models\""))
         XCTAssertTrue(preferencesSource.contains(".sectionOCRRecognitionLogs: \"识别日志\""))
         XCTAssertTrue(preferencesSource.contains(".sectionOCRRecognitionLogs: \"Recognition Logs\""))
         XCTAssertTrue(preferencesSource.contains(".sectionLocalOCRModels: \"本地 MLX 模型\""))
@@ -7844,6 +7982,38 @@ final class CodexProxyDesktopTests: XCTestCase {
         )
     }
 
+    func testLocalPackagingScriptsDeclareBuildCacheAndSingleArchitectureMode() throws {
+        let buildScript = try Self.repoFileText("Scripts/build-macos-app.sh")
+        let localPackageScript = try Self.repoFileText("Scripts/package-local-release.sh")
+        let iconScript = try Self.repoFileText("Scripts/render-app-icon.sh")
+        let readme = try Self.repoFileText("README.md")
+        let readmeZH = try Self.repoFileText("README.zh-CN.md")
+
+        XCTAssertTrue(localPackageScript.contains("[--host-only] [--arch host|arm64|x86_64|all]"))
+        XCTAssertTrue(localPackageScript.contains("ARCH_SELECTION=\"all\""))
+        XCTAssertTrue(localPackageScript.contains("--host-only"))
+        XCTAssertTrue(localPackageScript.contains("TARGET_ARCHES=(\"$HOST_ARCH\" \"$OTHER_ARCH\")"))
+        XCTAssertTrue(localPackageScript.contains("rm -f \"$APPCAST_PATH\""))
+        XCTAssertTrue(localPackageScript.contains("Skipped appcast generation for single-architecture local package"))
+
+        XCTAssertTrue(buildScript.contains("CODEX_PROXY_BUILD_CACHE_DIR"))
+        XCTAssertTrue(buildScript.contains(".build/codex-proxy-build-cache"))
+        XCTAssertTrue(buildScript.contains("CODEX_PROXY_REBUILD_MLX_OCR_HELPER"))
+        XCTAssertTrue(buildScript.contains("run_swift_build_for_bundle --product CodexProxyDesktop"))
+        XCTAssertTrue(buildScript.contains("run_swift_build_for_bundle --product codex-proxyd"))
+        XCTAssertTrue(buildScript.contains("run_swift_build_for_bundle --product CodexProxyMLXOCRServer"))
+        XCTAssertTrue(buildScript.contains("Reusing cached Local MLX OCR helper"))
+
+        XCTAssertTrue(iconScript.contains("CODEX_PROXY_REBUILD_APP_ICON"))
+        XCTAssertTrue(iconScript.contains("AppIcon.fingerprint"))
+        XCTAssertTrue(iconScript.contains("Reusing cached AppIcon outputs"))
+
+        XCTAssertTrue(readme.contains("./Scripts/package-local-release.sh --host-only"))
+        XCTAssertTrue(readme.contains("CODEX_PROXY_BUILD_CACHE_DIR"))
+        XCTAssertTrue(readmeZH.contains("./Scripts/package-local-release.sh --host-only"))
+        XCTAssertTrue(readmeZH.contains("CODEX_PROXY_REBUILD_MLX_OCR_HELPER=1"))
+    }
+
     @MainActor
     func testDeployFailureBackfillsStatusAndLogsForSelectedHost() async {
         let host = Self.makeRemoteHost(id: "host-1", label: "Tokyo", host: "tokyo.example.com")
@@ -8156,10 +8326,18 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.sectionOCRModel), "OCR Model")
         XCTAssertEqual(model.text(.sectionOCRCache), "OCR Cache")
         XCTAssertEqual(model.text(.sectionLocalOCRModels), "Local MLX Models")
+        XCTAssertEqual(model.text(.sectionOnlineOCRModels), "Online Models")
+        XCTAssertEqual(model.text(.sectionOCRCommonSettings), "OCR Runtime Settings")
         XCTAssertEqual(model.text(.ocrCacheLogsWindowTitle), "OCR Cache & Recognition Logs")
+        XCTAssertEqual(model.text(.ocrModelManagerWindowTitle), "OCR Model Manager")
         XCTAssertEqual(model.text(.actionOpenOCRCacheLogs), "View OCR Cache & Logs")
+        XCTAssertEqual(model.text(.actionOpenOCRModelManager), "Manage OCR Models")
         XCTAssertEqual(model.text(.labelOCRProvider), "OCR Provider")
         XCTAssertEqual(model.text(.labelOCRModel), "OCR Model")
+        XCTAssertEqual(model.text(.labelSelectedOCRModel), "Selected OCR Model")
+        XCTAssertEqual(model.text(.labelOCRModelProfileName), "Profile Name")
+        XCTAssertEqual(model.text(.labelOCRTestPrompt), "Test Prompt")
+        XCTAssertEqual(model.text(.labelOCRTestImage), "Test Image")
         XCTAssertEqual(model.text(.labelOCRHFBaseURL), "HF Base URL")
         XCTAssertEqual(model.text(.labelOCRHFToken), "HF Token")
         XCTAssertEqual(model.text(.labelOCRModelCachePath), "Model Cache Path")
@@ -8177,6 +8355,10 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.actionDeleteLocalOCRModel), "Delete")
         XCTAssertEqual(model.text(.actionUseLocalOCRModel), "Use")
         XCTAssertEqual(model.text(.actionStopLocalOCRRuntime), "Stop Runtime")
+        XCTAssertEqual(model.text(.actionAddOnlineOCRModel), "Add Online Model")
+        XCTAssertEqual(model.text(.actionTestOCRModel), "Test")
+        XCTAssertEqual(model.text(.actionRunOCRTest), "Run OCR Test")
+        XCTAssertEqual(model.text(.actionOpenLocalModelDirectory), "Open Directory")
         XCTAssertEqual(model.text(.statusLocalOCRRecommended), "Recommended")
         XCTAssertEqual(model.text(.statusLocalOCRLowResource), "Low Resource")
         XCTAssertEqual(model.text(.statusLocalOCRExperimental), "Experimental")
@@ -8221,10 +8403,18 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.sectionOCRModel), "OCR 模型")
         XCTAssertEqual(model.text(.sectionOCRCache), "OCR 缓存")
         XCTAssertEqual(model.text(.sectionLocalOCRModels), "本地 MLX 模型")
+        XCTAssertEqual(model.text(.sectionOnlineOCRModels), "在线模型")
+        XCTAssertEqual(model.text(.sectionOCRCommonSettings), "OCR 运行设置")
         XCTAssertEqual(model.text(.ocrCacheLogsWindowTitle), "OCR 缓存与识别日志")
+        XCTAssertEqual(model.text(.ocrModelManagerWindowTitle), "OCR 模型管理")
         XCTAssertEqual(model.text(.actionOpenOCRCacheLogs), "查看 OCR 缓存与识别日志")
+        XCTAssertEqual(model.text(.actionOpenOCRModelManager), "管理 OCR 模型")
         XCTAssertEqual(model.text(.labelOCRProvider), "OCR 服务商")
         XCTAssertEqual(model.text(.labelOCRModel), "OCR 模型")
+        XCTAssertEqual(model.text(.labelSelectedOCRModel), "当前 OCR 模型")
+        XCTAssertEqual(model.text(.labelOCRModelProfileName), "配置名称")
+        XCTAssertEqual(model.text(.labelOCRTestPrompt), "测试 Prompt")
+        XCTAssertEqual(model.text(.labelOCRTestImage), "测试图片")
         XCTAssertEqual(model.text(.labelOCRHFBaseURL), "HF Base URL")
         XCTAssertEqual(model.text(.labelOCRHFToken), "HF Token")
         XCTAssertEqual(model.text(.labelOCRModelCachePath), "模型缓存路径")
@@ -8242,6 +8432,10 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.actionDeleteLocalOCRModel), "删除")
         XCTAssertEqual(model.text(.actionUseLocalOCRModel), "设为当前")
         XCTAssertEqual(model.text(.actionStopLocalOCRRuntime), "停止运行时")
+        XCTAssertEqual(model.text(.actionAddOnlineOCRModel), "新增在线模型")
+        XCTAssertEqual(model.text(.actionTestOCRModel), "测试")
+        XCTAssertEqual(model.text(.actionRunOCRTest), "运行 OCR 测试")
+        XCTAssertEqual(model.text(.actionOpenLocalModelDirectory), "打开目录")
         XCTAssertEqual(model.text(.statusLocalOCRRecommended), "推荐")
         XCTAssertEqual(model.text(.statusLocalOCRLowResource), "低资源")
         XCTAssertEqual(model.text(.statusLocalOCRExperimental), "实验项")
@@ -11623,6 +11817,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         let accountsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/AccountsView.swift")
         let settingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/SettingsView.swift")
         let ocrSettingsSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRSettingsPanel.swift")
+        let ocrModelManagerSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OCRModelManagerView.swift")
         let manualAPIKeySource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ManualAPIKeyAccountForm.swift")
 
         XCTAssertTrue(accountsSource.contains("account-pool-batch-remove-button"))
@@ -11636,12 +11831,17 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(settingsSource.contains("case .ocr:"))
         XCTAssertTrue(settingsSource.contains("SettingsOCRPanel(model: self.model)"))
         XCTAssertTrue(settingsSource.contains("OCRSettingsPanel(model: self.model)"))
-        XCTAssertTrue(settingsSource.contains(".actionOpenOCRCacheLogs"))
-        XCTAssertTrue(settingsSource.contains("self.model.openOCRCacheLogsWindow()"))
+        XCTAssertTrue(settingsSource.contains(".actionOpenOCRModelManager"))
+        XCTAssertTrue(settingsSource.contains("self.model.openOCRModelManagerWindow()"))
         XCTAssertFalse(settingsSource.contains("self.model.clearExpiredOCRCache()"))
         XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.enabled"))
-        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.apiKey"))
-        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.prompt"))
+        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.provider"))
+        XCTAssertTrue(ocrSettingsSource.contains("$model.settings.ocrModel.selectedOnlineProfileID"))
+        XCTAssertFalse(ocrSettingsSource.contains("$model.settings.ocrModel.apiKey"))
+        XCTAssertFalse(ocrSettingsSource.contains("$model.settings.ocrModel.prompt"))
+        XCTAssertTrue(ocrModelManagerSource.contains(".actionOpenOCRCacheLogs"))
+        XCTAssertTrue(ocrModelManagerSource.contains("self.model.openOCRCacheLogsWindow()"))
+        XCTAssertTrue(ocrModelManagerSource.contains("$model.settings.ocrModel.prompt"))
         XCTAssertTrue(manualAPIKeySource.contains(".labelSupportsVision"))
         XCTAssertTrue(manualAPIKeySource.contains("$draft.supportsVision"))
     }

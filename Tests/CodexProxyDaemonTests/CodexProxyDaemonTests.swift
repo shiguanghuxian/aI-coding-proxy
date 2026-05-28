@@ -9260,6 +9260,74 @@ final class CodexProxyDaemonTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: modelDirectory.path))
     }
 
+    func testAdminOCRModelTestRequiresAuthAndUsesOnlineOCRProfile() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let unauthorized = await harness.service.handle(
+            DaemonHTTPService.Request(
+                method: "POST",
+                target: "/admin/ocr-test",
+                path: "/admin/ocr-test",
+                headers: [:],
+                body: Data()
+            ),
+            kind: .admin
+        )
+        XCTAssertEqual(unauthorized.statusCode, 401)
+
+        let ocrProbe = OCRProxyProbe()
+        let ocrUpstream = Self.makeOCRUpstreamApplication(probe: ocrProbe)
+        try await ocrUpstream.test(.ahc()) { ocrClient in
+            var config = harness.config
+            config.ocrModel = OCRModelConfig(
+                model: "legacy-ocr",
+                apiKey: "legacy-key",
+                baseURL: "https://legacy.example.com/v1",
+                enabled: false,
+                onlineProfiles: [
+                    OnlineOCRModelProfile(
+                        id: "xiaomi",
+                        label: "Xiaomi OCR",
+                        model: "mimo-vl-ocr",
+                        baseURL: "http://localhost:\(ocrClient.port ?? 0)/v1",
+                        apiKey: "sk-online-ocr"
+                    ),
+                ],
+                selectedOnlineProfileID: "xiaomi"
+            )
+            _ = try await harness.controller.saveConfig(config)
+
+            let request = OCRModelTestRequest(
+                ocrModel: config.ocrModel,
+                imageBase64: Data("image".utf8).base64EncodedString(),
+                mimeType: "image/png",
+                prompt: "提取图片文字"
+            )
+            let response = await harness.service.handle(
+                Self.makeAdminRequest(
+                    method: "POST",
+                    path: "/admin/ocr-test",
+                    body: String(data: try JSONEncoder().encode(request), encoding: .utf8) ?? "{}",
+                    adminToken: harness.config.adminToken,
+                ),
+                kind: .admin
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            let result = try Helpers.readJSON(OCRModelTestResult.self, from: body)
+            XCTAssertTrue(result.text.contains("[OCR识别结果]"))
+            XCTAssertEqual(result.modelLabel, "Xiaomi OCR")
+            XCTAssertFalse(result.cacheHit)
+
+            let snapshot = await ocrProbe.snapshot()
+            XCTAssertEqual(snapshot.chatHits, 1)
+            XCTAssertEqual(snapshot.lastAuthorization, "Bearer sk-online-ocr")
+            XCTAssertTrue(snapshot.requestBodies.first?.contains("mimo-vl-ocr") == true)
+            XCTAssertTrue(snapshot.requestBodies.first?.contains("提取图片文字") == true)
+        }
+    }
+
     func testChatCompletionsTextOnlyAccountAppliesOCRAndCachesImageResult() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }

@@ -6,10 +6,11 @@ APP_BUILD_SCRIPT="$ROOT_DIR/Scripts/build-macos-app.sh"
 DIST_DIR="$ROOT_DIR/Dist/local-only"
 STAGING_DIR="$(mktemp -d)"
 FORCE_REFRESH=0
+ARCH_SELECTION="all"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: package-local-release.sh [--force-refresh]
+Usage: package-local-release.sh [--force-refresh] [--host-only] [--arch host|arm64|x86_64|all]
 EOF
 }
 
@@ -17,6 +18,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --force-refresh)
       FORCE_REFRESH=1
+      ;;
+    --host-only)
+      ARCH_SELECTION="host"
+      ;;
+    --arch)
+      if [[ $# -lt 2 ]]; then
+        echo "--arch requires one of: host, arm64, x86_64, all" >&2
+        usage
+        exit 1
+      fi
+      ARCH_SELECTION="$2"
+      shift
       ;;
     --help|-h)
       usage
@@ -51,6 +64,18 @@ normalize_target_arch() {
   esac
 }
 
+normalize_arch_selection() {
+  case "$1" in
+    all|host|arm64|x86_64)
+      echo "$1"
+      ;;
+    *)
+      echo "Unsupported --arch value: $1 (expected: host, arm64, x86_64, or all)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 cleanup() {
   rm -rf "$STAGING_DIR"
 }
@@ -58,17 +83,32 @@ cleanup() {
 trap cleanup EXIT
 
 HOST_ARCH="$(normalize_target_arch "$(uname -m)")"
+ARCH_SELECTION="$(normalize_arch_selection "$ARCH_SELECTION")"
 OTHER_ARCH="arm64"
 if [[ "$HOST_ARCH" == "arm64" ]]; then
   OTHER_ARCH="x86_64"
 fi
+
+TARGET_ARCHES=()
+case "$ARCH_SELECTION" in
+  all)
+    TARGET_ARCHES=("$HOST_ARCH" "$OTHER_ARCH")
+    ;;
+  host)
+    TARGET_ARCHES=("$HOST_ARCH")
+    ;;
+  arm64|x86_64)
+    TARGET_ARCHES=("$ARCH_SELECTION")
+    ;;
+esac
 
 mkdir -p "$DIST_DIR"
 
 VERSION=""
 ARM64_ZIP_PATH=""
 X86_64_ZIP_PATH=""
-for TARGET_ARCH in "$HOST_ARCH" "$OTHER_ARCH"; do
+APPCAST_PATH="$DIST_DIR/appcast.json"
+for TARGET_ARCH in "${TARGET_ARCHES[@]}"; do
   OUTPUT_DIR="$DIST_DIR"
   if [[ "$TARGET_ARCH" != "$HOST_ARCH" ]]; then
     OUTPUT_DIR="$STAGING_DIR/$TARGET_ARCH"
@@ -96,12 +136,17 @@ for TARGET_ARCH in "$HOST_ARCH" "$OTHER_ARCH"; do
   echo "Packaged local-only zip ($TARGET_ARCH): $ZIP_PATH"
 done
 
+if [[ "$ARCH_SELECTION" != "all" ]]; then
+  rm -f "$APPCAST_PATH"
+  echo "Skipped appcast generation for single-architecture local package (--arch $ARCH_SELECTION)."
+  exit 0
+fi
+
 if [[ -z "$ARM64_ZIP_PATH" || -z "$X86_64_ZIP_PATH" ]]; then
   echo "Unable to create appcast.json because one or more macOS zips are missing." >&2
   exit 1
 fi
 
-APPCAST_PATH="$DIST_DIR/appcast.json"
 RELEASE_TAG="${CODEX_PROXY_RELEASE_TAG:-$VERSION}"
 RELEASE_BASE_URL="${CODEX_PROXY_RELEASE_BASE_URL:-https://github.com/shiguanghuxian/aI-coding-proxy/releases/download/$RELEASE_TAG}"
 RELEASE_PAGE_URL="${CODEX_PROXY_RELEASE_PAGE_URL:-https://github.com/shiguanghuxian/aI-coding-proxy/releases/tag/$RELEASE_TAG}"

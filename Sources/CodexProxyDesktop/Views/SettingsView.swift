@@ -613,26 +613,13 @@ private struct SettingsOCRPanel: View {
         SectionCard(
             title: self.model.text(SettingsTab.ocr.panelTitleKey),
             subtitle: self.model.text(SettingsTab.ocr.subtitleKey),
-            accessory: Button(self.model.text(.actionOpenOCRCacheLogs)) {
-                self.model.openOCRCacheLogsWindow()
+            accessory: Button(self.model.text(.actionOpenOCRModelManager)) {
+                self.model.openOCRModelManagerWindow()
             }
             .buttonStyle(AppActionButtonStyle(kind: .secondary))
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 OCRSettingsPanel(model: self.model)
-
-                SettingsInsetPanel(
-                    title: self.model.text(.ocrCacheLogsWindowTitle),
-                    subtitle: self.model.text(.ocrCacheLogsWindowSubtitle)
-                ) {
-                    HStack {
-                        Button(self.model.text(.actionOpenOCRCacheLogs)) {
-                            self.model.openOCRCacheLogsWindow()
-                        }
-                        .buttonStyle(AppActionButtonStyle(kind: .secondary))
-                        Spacer(minLength: 0)
-                    }
-                }
 
                 HStack {
                     Button(self.model.text(.actionSaveOCRSettings), action: self.saveSettings)

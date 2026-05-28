@@ -70,6 +70,12 @@ Create a smaller local-only zip release archive without `Contents/Resources/Remo
 ./Scripts/package-local-release.sh
 ```
 
+For faster local testing, build only the current Mac architecture and skip the appcast:
+
+```bash
+./Scripts/package-local-release.sh --host-only
+```
+
 Refresh only the macOS `mihomo` caches while keeping the local-only flow free of Linux SDK preparation:
 
 ```bash
@@ -100,7 +106,9 @@ Direct `build-macos-app.sh` output is still written to `Dist/`:
 - `Dist/local-only/AICodingProxy-macos-arm64-<version>-local.zip`
 - `Dist/local-only/AICodingProxy-macos-x86_64-<version>-local.zip`
 
-`package-local-release.sh` skips Static Linux SDK preparation and only refreshes macOS `mihomo` caches when you explicitly pass `--force-refresh`.
+`package-local-release.sh` skips Static Linux SDK preparation and only refreshes macOS `mihomo` caches when you explicitly pass `--force-refresh`. It supports `--arch host|arm64|x86_64|all`; the default `all` preserves the two-architecture release output and appcast, while `--host-only` is the quick single-architecture path for local verification.
+
+Local packaging also reuses script build caches under `.build/codex-proxy-build-cache/` by default. Set `CODEX_PROXY_BUILD_CACHE_DIR` to move that cache, `CODEX_PROXY_REBUILD_MLX_OCR_HELPER=1` to rebuild the cached Local MLX OCR helper, or `CODEX_PROXY_REBUILD_APP_ICON=1` to force AppIcon rendering. `--force-refresh` remains reserved for external downloaded/bundled assets such as `mihomo`.
 
 When built directly with `Scripts/build-macos-app.sh`, the unsuffixed `Dist/AI Coding Proxy.app`, `Dist/codex-proxyd-macos`, and `Dist/mihomo-macos` remain the host-native outputs for the current machine.
 
