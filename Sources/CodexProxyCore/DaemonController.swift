@@ -562,6 +562,8 @@ private struct OpenAIAdapterAttemptContext: Sendable {
 }
 
 public final class DaemonController: @unchecked Sendable {
+    @TaskLocal private static var currentCodexProjectRouteTraceContext: CodexProjectRouteTraceContext?
+
     private static let apiKeyFailureCooldownThreshold: Int64 = 3
     private static let apiKeyFailureCooldownSeconds: Int64 = 3_600
     private static let accountModelDiscoveryCacheTTLSeconds: Int64 = 300
@@ -586,6 +588,7 @@ public final class DaemonController: @unchecked Sendable {
     private let localOCRModelManager: LocalOCRModelManager
     private let localMLXOCRRuntime: LocalMLXOCRRuntimeService
     private let adminEventHub: AdminEventHub
+    private let codexDesktopSessionProjectResolver: CodexDesktopSessionProjectResolver
 
     public convenience init(
         dataDirectory: URL = Paths.defaultDataDirectory(),
@@ -599,7 +602,8 @@ public final class DaemonController: @unchecked Sendable {
             publicBaseURLProvider: publicBaseURLProvider,
             adminBaseURLProvider: adminBaseURLProvider,
             secretStore: nil,
-            managedProxyRuntimeOverride: nil
+            managedProxyRuntimeOverride: nil,
+            codexDesktopSessionProjectResolver: nil
         )
     }
 
@@ -609,7 +613,8 @@ public final class DaemonController: @unchecked Sendable {
         publicBaseURLProvider: @escaping @Sendable () async throws -> String,
         adminBaseURLProvider: @escaping @Sendable () async throws -> String,
         secretStore: SecretStore?,
-        managedProxyRuntimeOverride: (any ManagedProxyRuntimeControlling)?
+        managedProxyRuntimeOverride: (any ManagedProxyRuntimeControlling)?,
+        codexDesktopSessionProjectResolver: CodexDesktopSessionProjectResolver? = nil
     ) throws {
         self.dataDirectory = dataDirectory
         self.secretStore = secretStore ?? SecretStore(dataDirectory: dataDirectory)
@@ -634,6 +639,7 @@ public final class DaemonController: @unchecked Sendable {
             localMLXRuntime: self.localMLXOCRRuntime
         )
         self.adminEventHub = AdminEventHub()
+        self.codexDesktopSessionProjectResolver = codexDesktopSessionProjectResolver ?? CodexDesktopSessionProjectResolver()
         self.managedProxyRuntime = manageManagedProxyRuntime
             ? (managedProxyRuntimeOverride ?? ManagedProxyRuntime(dataDirectory: dataDirectory, secretStore: self.secretStore))
             : nil
@@ -1450,6 +1456,10 @@ public final class DaemonController: @unchecked Sendable {
                 adding: await self.discoveredModels(for: candidate, config: config)
             )
         }
+        merged = Self.mergeDiscoveredModels(
+            merged,
+            adding: self.visibleCodexProjectRouteModels(for: proxyKey, config: config)
+        )
 
         if merged.isEmpty {
             return self.defaultPublicRouteModels(for: proxyKey.dataSource)
@@ -1651,66 +1661,89 @@ public final class DaemonController: @unchecked Sendable {
     ) async throws -> ProxyHTTPResponse {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
         let reasoningEffort = self.reasoningEffort(fromChatCompletionsBody: body)
+        let config = try await self.loadConfigForNetworkRequests()
         let dynamicallySupportedModels = Set(
             try await self.discoveredPublicRouteModels(
                 proxyKey: proxyKey,
                 selectedAccountKey: selectedAccountKey
             )
-        )
+        ).union(self.visibleCodexProjectRouteModels(for: proxyKey, config: config))
         let allowCustomModelPassthrough = self.isProxyTestConsoleRequest(headers: headers)
         let request = try ProxyTranscoder.convertChatCompletionsRequest(
             object,
             allowCustomModelPassthrough: allowCustomModelPassthrough,
             additionalSupportedModels: dynamicallySupportedModels
         )
+        var normalizedRequest = request.request
+        var requestedModel = request.model
+        var effectiveProxyKey = proxyKey
+        var effectiveAPIKeyValue = apiKeyValue
+        var projectRouteTraceContext: CodexProjectRouteTraceContext?
+        if let routeApplication = try self.codexProjectRouteApplication(
+            requestedModel: requestedModel,
+            requestPayload: object,
+            headers: headers,
+            client: .codex,
+            config: config,
+            authenticatedProxyKey: proxyKey
+        ) {
+            normalizedRequest["model"] = routeApplication.rule.targetModel
+            requestedModel = routeApplication.rule.targetModel
+            effectiveProxyKey = routeApplication.proxyKey
+            effectiveAPIKeyValue = routeApplication.apiKeyValue
+            projectRouteTraceContext = routeApplication.traceContext
+        }
         let preserveRequestedCustomModel = (
             allowCustomModelPassthrough
             || ProxyTranscoder.isSupportedClientModel(
-                request.model,
+                requestedModel,
                 additionalSupportedModels: dynamicallySupportedModels
             )
-        ) && !ProxyTranscoder.isSupportedClientModel(request.model)
+        ) && !ProxyTranscoder.isSupportedClientModel(requestedModel)
         let promptCacheContext = PromptCacheSupport.context(
             headers: headers,
             requestPayload: object,
-            normalizedRequest: request.request,
-            requestedModel: request.model,
-            proxyKey: proxyKey
+            normalizedRequest: normalizedRequest,
+            requestedModel: requestedModel,
+            proxyKey: effectiveProxyKey
         )
         let clientSource = self.requestLogClientSource(
             headers: headers,
             promptCacheContext: promptCacheContext,
             isGeminiPublicRoute: false
         )
-        if proxyKey.dataSource == .anthropic {
-            return try await self.forwardToAnthropicProvider(
+        return try await self.withCodexProjectRouteTraceContext(projectRouteTraceContext) {
+            if effectiveProxyKey.dataSource == .anthropic {
+                return try await self.forwardToAnthropicProvider(
+                    endpoint: "/v1/chat/completions",
+                    proxyKey: effectiveProxyKey,
+                    apiKeyValue: effectiveAPIKeyValue,
+                    clientSource: clientSource,
+                    promptCacheContext: promptCacheContext,
+                    selectedAccountKey: selectedAccountKey,
+                    requestedModel: requestedModel,
+                    reasoningEffort: reasoningEffort,
+                    downstreamStream: request.downstreamStream,
+                    normalizedRequest: normalizedRequest,
+                    responseMode: .chatCompletions,
+                    config: config
+                )
+            }
+            return try await self.forwardToCodex(
                 endpoint: "/v1/chat/completions",
-                proxyKey: proxyKey,
-                apiKeyValue: apiKeyValue,
+                proxyKey: effectiveProxyKey,
+                apiKeyValue: effectiveAPIKeyValue,
                 clientSource: clientSource,
                 promptCacheContext: promptCacheContext,
                 selectedAccountKey: selectedAccountKey,
-                requestedModel: request.model,
+                requestedModel: requestedModel,
                 reasoningEffort: reasoningEffort,
                 downstreamStream: request.downstreamStream,
-                normalizedRequest: request.request,
-                responseMode: .chatCompletions
+                codexRequest: normalizedRequest,
+                responseMode: .chatCompletions,
+                explicitProxyTestCustomModel: preserveRequestedCustomModel
             )
         }
-        return try await self.forwardToCodex(
-            endpoint: "/v1/chat/completions",
-            proxyKey: proxyKey,
-            apiKeyValue: apiKeyValue,
-            clientSource: clientSource,
-            promptCacheContext: promptCacheContext,
-            selectedAccountKey: selectedAccountKey,
-            requestedModel: request.model,
-            reasoningEffort: reasoningEffort,
-            downstreamStream: request.downstreamStream,
-            codexRequest: request.request,
-            responseMode: .chatCompletions,
-            explicitProxyTestCustomModel: preserveRequestedCustomModel
-        )
     }
 
     public func proxyResponses(
@@ -1722,19 +1755,37 @@ public final class DaemonController: @unchecked Sendable {
     ) async throws -> ProxyHTTPResponse {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
         let reasoningEffort = self.reasoningEffort(fromResponsesBody: body)
+        let config = try await self.loadConfigForNetworkRequests()
         let dynamicallySupportedModels = Set(
             try await self.discoveredPublicRouteModels(
                 proxyKey: proxyKey,
                 selectedAccountKey: selectedAccountKey
             )
-        )
+        ).union(self.visibleCodexProjectRouteModels(for: proxyKey, config: config))
         let allowCustomModelPassthrough = self.isProxyTestConsoleRequest(headers: headers)
-        let request = try ProxyTranscoder.normalizeResponsesRequest(
+        var request = try ProxyTranscoder.normalizeResponsesRequest(
             object,
             allowCustomModelPassthrough: allowCustomModelPassthrough,
             additionalSupportedModels: dynamicallySupportedModels
         )
-        let model = request["model"] as? String ?? ProxyTranscoder.defaultModel
+        var model = request["model"] as? String ?? ProxyTranscoder.defaultModel
+        var effectiveProxyKey = proxyKey
+        var effectiveAPIKeyValue = apiKeyValue
+        var projectRouteTraceContext: CodexProjectRouteTraceContext?
+        if let routeApplication = try self.codexProjectRouteApplication(
+            requestedModel: model,
+            requestPayload: object,
+            headers: headers,
+            client: .codex,
+            config: config,
+            authenticatedProxyKey: proxyKey
+        ) {
+            request["model"] = routeApplication.rule.targetModel
+            model = routeApplication.rule.targetModel
+            effectiveProxyKey = routeApplication.proxyKey
+            effectiveAPIKeyValue = routeApplication.apiKeyValue
+            projectRouteTraceContext = routeApplication.traceContext
+        }
         let preserveRequestedCustomModel = (
             allowCustomModelPassthrough
             || ProxyTranscoder.isSupportedClientModel(
@@ -1748,42 +1799,45 @@ public final class DaemonController: @unchecked Sendable {
             requestPayload: object,
             normalizedRequest: request,
             requestedModel: model,
-            proxyKey: proxyKey
+            proxyKey: effectiveProxyKey
         )
         let clientSource = self.requestLogClientSource(
             headers: headers,
             promptCacheContext: promptCacheContext,
             isGeminiPublicRoute: false
         )
-        if proxyKey.dataSource == .anthropic {
-            return try await self.forwardToAnthropicProvider(
+        return try await self.withCodexProjectRouteTraceContext(projectRouteTraceContext) {
+            if effectiveProxyKey.dataSource == .anthropic {
+                return try await self.forwardToAnthropicProvider(
+                    endpoint: "/v1/responses",
+                    proxyKey: effectiveProxyKey,
+                    apiKeyValue: effectiveAPIKeyValue,
+                    clientSource: clientSource,
+                    promptCacheContext: promptCacheContext,
+                    selectedAccountKey: selectedAccountKey,
+                    requestedModel: model,
+                    reasoningEffort: reasoningEffort,
+                    downstreamStream: downstreamStream,
+                    normalizedRequest: request,
+                    responseMode: .responses,
+                    config: config
+                )
+            }
+            return try await self.forwardToCodex(
                 endpoint: "/v1/responses",
-                proxyKey: proxyKey,
-                apiKeyValue: apiKeyValue,
+                proxyKey: effectiveProxyKey,
+                apiKeyValue: effectiveAPIKeyValue,
                 clientSource: clientSource,
                 promptCacheContext: promptCacheContext,
                 selectedAccountKey: selectedAccountKey,
                 requestedModel: model,
                 reasoningEffort: reasoningEffort,
                 downstreamStream: downstreamStream,
-                normalizedRequest: request,
-                responseMode: .responses
+                codexRequest: request,
+                responseMode: .responses,
+                explicitProxyTestCustomModel: preserveRequestedCustomModel
             )
         }
-        return try await self.forwardToCodex(
-            endpoint: "/v1/responses",
-            proxyKey: proxyKey,
-            apiKeyValue: apiKeyValue,
-            clientSource: clientSource,
-            promptCacheContext: promptCacheContext,
-            selectedAccountKey: selectedAccountKey,
-            requestedModel: model,
-            reasoningEffort: reasoningEffort,
-            downstreamStream: downstreamStream,
-            codexRequest: request,
-            responseMode: .responses,
-            explicitProxyTestCustomModel: preserveRequestedCustomModel
-        )
     }
 
     public func proxyImages(
@@ -3318,35 +3372,82 @@ public final class DaemonController: @unchecked Sendable {
     ) async throws -> ProxyHTTPResponse {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
         let request = try AnthropicTranscoder.normalizeMessagesRequest(object)
+        let config = try await self.loadConfigForNetworkRequests()
+        var rawAnthropicRequest = object
+        var normalizedRequest = request.request
+        var requestedModel = request.responseModel
+        var effectiveProxyKey = proxyKey
+        var effectiveAPIKeyValue = apiKeyValue
+        var projectRouteTraceContext: CodexProjectRouteTraceContext?
+        if let routeApplication = try self.projectRouteApplication(
+            requestedModel: requestedModel,
+            client: .claudeCode,
+            config: config,
+            authenticatedProxyKey: proxyKey
+        ) {
+            rawAnthropicRequest["model"] = routeApplication.rule.targetModel
+            normalizedRequest["model"] = routeApplication.rule.targetModel
+            requestedModel = routeApplication.rule.targetModel
+            effectiveProxyKey = routeApplication.proxyKey
+            effectiveAPIKeyValue = routeApplication.apiKeyValue
+            projectRouteTraceContext = routeApplication.traceContext
+        }
         let promptCacheContext = PromptCacheSupport.context(
             headers: headers,
-            requestPayload: object,
-            normalizedRequest: request.request,
-            requestedModel: request.responseModel,
-            proxyKey: proxyKey,
-            sourceAnthropicPayload: object
+            requestPayload: rawAnthropicRequest,
+            normalizedRequest: normalizedRequest,
+            requestedModel: requestedModel,
+            proxyKey: effectiveProxyKey,
+            sourceAnthropicPayload: rawAnthropicRequest
         )
         let clientSource = self.requestLogClientSource(
             headers: headers,
             promptCacheContext: promptCacheContext,
             isGeminiPublicRoute: false
         )
-        if proxyKey.dataSource == .anthropic {
-            var response = try await self.forwardToAnthropicProvider(
+        return try await self.withCodexProjectRouteTraceContext(projectRouteTraceContext) {
+            if effectiveProxyKey.dataSource == .anthropic {
+                var response = try await self.forwardToAnthropicProvider(
+                    endpoint: "/v1/messages",
+                    proxyKey: effectiveProxyKey,
+                    apiKeyValue: effectiveAPIKeyValue,
+                    clientSource: clientSource,
+                    promptCacheContext: promptCacheContext,
+                    selectedAccountKey: selectedAccountKey,
+                    requestedModel: requestedModel,
+                    downstreamStream: request.downstreamStream,
+                    normalizedRequest: normalizedRequest,
+                    responseMode: .anthropicMessages,
+                    sourceAnthropicModel: requestedModel,
+                    rawAnthropicRequest: rawAnthropicRequest,
+                    anthropicVersion: anthropicVersion,
+                    anthropicBeta: anthropicBeta,
+                    config: config
+                )
+                response.headers.merge(
+                    self.anthropicResponseHeaders(
+                        version: anthropicVersion,
+                        beta: anthropicBeta,
+                        contentType: request.downstreamStream
+                            ? "text/event-stream; charset=utf-8"
+                            : "application/json; charset=utf-8"
+                    ),
+                    uniquingKeysWith: { _, new in new }
+                )
+                return response
+            }
+            var response = try await self.forwardToCodex(
                 endpoint: "/v1/messages",
-                proxyKey: proxyKey,
-                apiKeyValue: apiKeyValue,
+                proxyKey: effectiveProxyKey,
+                apiKeyValue: effectiveAPIKeyValue,
                 clientSource: clientSource,
                 promptCacheContext: promptCacheContext,
                 selectedAccountKey: selectedAccountKey,
-                requestedModel: request.responseModel,
+                requestedModel: requestedModel,
                 downstreamStream: request.downstreamStream,
-                normalizedRequest: request.request,
+                codexRequest: normalizedRequest,
                 responseMode: .anthropicMessages,
-                sourceAnthropicModel: request.responseModel,
-                rawAnthropicRequest: object,
-                anthropicVersion: anthropicVersion,
-                anthropicBeta: anthropicBeta
+                sourceAnthropicModel: requestedModel
             )
             response.headers.merge(
                 self.anthropicResponseHeaders(
@@ -3360,30 +3461,6 @@ public final class DaemonController: @unchecked Sendable {
             )
             return response
         }
-        var response = try await self.forwardToCodex(
-            endpoint: "/v1/messages",
-            proxyKey: proxyKey,
-            apiKeyValue: apiKeyValue,
-            clientSource: clientSource,
-            promptCacheContext: promptCacheContext,
-            selectedAccountKey: selectedAccountKey,
-            requestedModel: request.responseModel,
-            downstreamStream: request.downstreamStream,
-            codexRequest: request.request,
-            responseMode: .anthropicMessages,
-            sourceAnthropicModel: request.responseModel
-        )
-        response.headers.merge(
-            self.anthropicResponseHeaders(
-                version: anthropicVersion,
-                beta: anthropicBeta,
-                contentType: request.downstreamStream
-                    ? "text/event-stream; charset=utf-8"
-                    : "application/json; charset=utf-8"
-            ),
-            uniquingKeysWith: { _, new in new }
-        )
-        return response
     }
 
     public func geminiModelsResponse() async throws -> Data {
@@ -4163,39 +4240,60 @@ public final class DaemonController: @unchecked Sendable {
     ) async throws -> ProxyHTTPResponse {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
         let request = try AnthropicTranscoder.normalizeCountTokensRequest(object)
+        let config = try await self.loadConfigForNetworkRequests()
+        var rawAnthropicRequest = object
+        var normalizedRequest = request.request
+        var requestedModel = request.responseModel
+        var effectiveProxyKey = proxyKey
+        var effectiveAPIKeyValue = apiKeyValue
+        var projectRouteTraceContext: CodexProjectRouteTraceContext?
+        if let routeApplication = try self.projectRouteApplication(
+            requestedModel: requestedModel,
+            client: .claudeCode,
+            config: config,
+            authenticatedProxyKey: proxyKey
+        ) {
+            rawAnthropicRequest["model"] = routeApplication.rule.targetModel
+            normalizedRequest["model"] = routeApplication.rule.targetModel
+            requestedModel = routeApplication.rule.targetModel
+            effectiveProxyKey = routeApplication.proxyKey
+            effectiveAPIKeyValue = routeApplication.apiKeyValue
+            projectRouteTraceContext = routeApplication.traceContext
+        }
         let promptCacheContext = PromptCacheSupport.context(
             headers: headers,
-            requestPayload: object,
-            normalizedRequest: request.request,
-            requestedModel: request.responseModel,
-            proxyKey: proxyKey,
-            sourceAnthropicPayload: object
+            requestPayload: rawAnthropicRequest,
+            normalizedRequest: normalizedRequest,
+            requestedModel: requestedModel,
+            proxyKey: effectiveProxyKey,
+            sourceAnthropicPayload: rawAnthropicRequest
         )
         let clientSource = self.requestLogClientSource(
             headers: headers,
             promptCacheContext: promptCacheContext,
             isGeminiPublicRoute: false
         )
-        if proxyKey.dataSource == .anthropic {
-            return try await self.countAnthropicTokensViaAnthropicProvider(
-                proxyKey: proxyKey,
-                apiKeyValue: apiKeyValue,
-                clientSource: clientSource,
-                promptCacheContext: promptCacheContext,
-                selectedAccountKey: selectedAccountKey,
-                request: request.request,
-                requestedModel: request.responseModel,
-                rawAnthropicRequest: object,
-                anthropicVersion: anthropicVersion,
-                anthropicBeta: anthropicBeta
-            )
-        }
-        let config = try await self.loadConfigForNetworkRequests()
+        return try await self.withCodexProjectRouteTraceContext(projectRouteTraceContext) {
+            if effectiveProxyKey.dataSource == .anthropic {
+                return try await self.countAnthropicTokensViaAnthropicProvider(
+                    proxyKey: effectiveProxyKey,
+                    apiKeyValue: effectiveAPIKeyValue,
+                    clientSource: clientSource,
+                    promptCacheContext: promptCacheContext,
+                    selectedAccountKey: selectedAccountKey,
+                    request: normalizedRequest,
+                    requestedModel: requestedModel,
+                    rawAnthropicRequest: rawAnthropicRequest,
+                    anthropicVersion: anthropicVersion,
+                    anthropicBeta: anthropicBeta,
+                    config: config
+                )
+            }
         let candidates = await self.prioritizedCandidates(
             try await self.loadCandidates(
                 selectedAccountKey: selectedAccountKey,
-                dataSource: proxyKey.dataSource,
-                allowedAccountKeys: proxyKey.allowedAccountKeys,
+                dataSource: effectiveProxyKey.dataSource,
+                allowedAccountKeys: effectiveProxyKey.allowedAccountKeys,
                 allowedProviderFamilies: [.openAI, .anthropic]
             ),
             using: promptCacheContext
@@ -4203,8 +4301,8 @@ public final class DaemonController: @unchecked Sendable {
         guard !candidates.isEmpty else {
             throw ProxyError.message(
                 self.noAvailableAccountsMessage(
-                    for: proxyKey.dataSource,
-                    allowedAccountKeys: proxyKey.allowedAccountKeys
+                    for: effectiveProxyKey.dataSource,
+                    allowedAccountKeys: effectiveProxyKey.allowedAccountKeys
                 )
             )
         }
@@ -4217,14 +4315,14 @@ public final class DaemonController: @unchecked Sendable {
 
                 if candidate.record.providerFamily == .anthropic {
                     return try await self.countAnthropicTokensViaAnthropicProvider(
-                        proxyKey: proxyKey,
-                        apiKeyValue: apiKeyValue,
+                        proxyKey: effectiveProxyKey,
+                        apiKeyValue: effectiveAPIKeyValue,
                         clientSource: clientSource,
                         promptCacheContext: promptCacheContext,
                         selectedAccountKey: candidate.record.accountKey,
-                        request: request.request,
-                        requestedModel: request.responseModel,
-                        rawAnthropicRequest: object,
+                        request: normalizedRequest,
+                        requestedModel: requestedModel,
+                        rawAnthropicRequest: rawAnthropicRequest,
                         anthropicVersion: anthropicVersion,
                         anthropicBeta: anthropicBeta,
                         config: config
@@ -4232,9 +4330,9 @@ public final class DaemonController: @unchecked Sendable {
                 }
 
                 let (resolvedRequest, modelResolution) = self.resolvedCodexRequest(
-                    request.request,
-                    requestedModel: request.responseModel,
-                    sourceAnthropicModel: request.responseModel,
+                    normalizedRequest,
+                    requestedModel: requestedModel,
+                    sourceAnthropicModel: requestedModel,
                     record: candidate.record,
                     config: config,
                     auth: candidate.auth
@@ -4248,28 +4346,42 @@ public final class DaemonController: @unchecked Sendable {
                 let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let resolvedUpstreamModel = modelResolution.usesAccountModelRouting
-                    ? (effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel)
+                    ? (effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel)
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
-                    for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : request.responseModel
+                    for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel
                 )
-                var upstreamRequestBody = adapterUsesChatCompletions
-                    ? self.upstreamChatCompletionsRequest(
+                var upstreamDiagnosticMetadata: [String: String] = [:]
+                var upstreamRequestBody: [String: Any]
+                if adapterUsesChatCompletions {
+                    let builtRequest = self.upstreamChatCompletionsRequestWithDiagnostics(
                         from: compatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
                         stream: false,
                         auth: candidate.auth
                     )
-                    : self.compatibleCodexRequest(
+                    upstreamRequestBody = builtRequest.body
+                    upstreamDiagnosticMetadata = builtRequest.metadata
+                } else {
+                    upstreamRequestBody = self.compatibleCodexRequest(
                         compatibleRequest,
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
-                )
+                    )
+                }
                 if adapterUsesChatCompletions {
                     upstreamRequestBody = self.applyAccountReasoningEffortMapping(
                         to: upstreamRequestBody,
                         candidate: candidate,
                         rawReasoningEffort: nil
                     )
+                    let preparedRequest = self.preparedChatCompletionsRequestForReasoningHistory(
+                        upstreamRequestBody,
+                        candidate: candidate,
+                        promptCacheContext: promptCacheContext,
+                        forceToolHistoryProtection: rawAnthropicRequest["thinking"] != nil
+                    )
+                    upstreamRequestBody = preparedRequest.body
+                    upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
                 }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
@@ -4286,13 +4398,20 @@ public final class DaemonController: @unchecked Sendable {
                     {
                         upstream.headers["session_id"] = sessionID
                     }
-                    let response = try await HTTPClientFactory.request(
-                        config: requestConfig,
-                        url: upstream.url,
-                        method: .POST,
-                        headers: upstream.headers,
-                        body: serialized
-                    )
+                    let response = adapterUsesChatCompletions
+                        ? try await self.chatCompletionsAPIKeyRequest(
+                            config: requestConfig,
+                            url: upstream.url,
+                            headers: upstream.headers,
+                            body: serialized
+                        )
+                        : try await HTTPClientFactory.request(
+                            config: requestConfig,
+                            url: upstream.url,
+                            method: .POST,
+                            headers: upstream.headers,
+                            body: serialized
+                        )
                     return (response, upstream.url)
                 }
 
@@ -4305,17 +4424,17 @@ public final class DaemonController: @unchecked Sendable {
                         ProxyRequestTrace(
                             endpoint: "/v1/messages/count_tokens",
                             upstreamURL: upstreamURL,
-                            apiKeyHash: proxyKey.apiKeyHash,
+                            apiKeyHash: effectiveProxyKey.apiKeyHash,
                             accountKey: candidate.record.accountKey,
                             accountLabel: candidate.record.label,
                             clientSource: clientSource,
-                            model: request.responseModel,
+                            model: requestedModel,
                             actualModel: actualModel,
                             success: false,
                             latencyMS: latency,
                             failureCategory: category,
                             lastError: Helpers.truncate(text),
-                            apiKeyValue: apiKeyValue
+                            apiKeyValue: effectiveAPIKeyValue
                         )
                     )
                     await self.setLastError("\(candidate.record.label): \(Helpers.truncate(text))")
@@ -4342,7 +4461,13 @@ public final class DaemonController: @unchecked Sendable {
                     let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any] ?? [:]
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
-                        requestedModel: request.responseModel
+                        requestedModel: requestedModel,
+                        input: compatibleRequest["input"]
+                    )
+                    self.chatCompletionsReasoningCache.record(
+                        completedResponse: completed,
+                        accountKey: candidate.record.accountKey,
+                        sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
                     )
                 } else {
                     guard let resolvedCompleted = self.completedResponse(from: response.body) else {
@@ -4355,21 +4480,21 @@ public final class DaemonController: @unchecked Sendable {
                 let payload = try JSONSerialization.data(withJSONObject: AnthropicTranscoder.countTokensResponse(from: usage))
                 let latency = Helpers.nowMilliseconds() - startMS
                 try self.recordTrace(
-                    ProxyRequestTrace(
-                        endpoint: "/v1/messages/count_tokens",
-                        upstreamURL: upstreamURL,
-                        apiKeyHash: proxyKey.apiKeyHash,
-                        accountKey: candidate.record.accountKey,
-                        accountLabel: candidate.record.label,
-                        clientSource: clientSource,
-                        model: request.responseModel,
-                        actualModel: actualModel,
-                        success: true,
-                        latencyMS: latency,
-                        usage: usage,
-                        apiKeyValue: apiKeyValue
+                        ProxyRequestTrace(
+                            endpoint: "/v1/messages/count_tokens",
+                            upstreamURL: upstreamURL,
+                            apiKeyHash: effectiveProxyKey.apiKeyHash,
+                            accountKey: candidate.record.accountKey,
+                            accountLabel: candidate.record.label,
+                            clientSource: clientSource,
+                            model: requestedModel,
+                            actualModel: actualModel,
+                            success: true,
+                            latencyMS: latency,
+                            usage: usage,
+                            apiKeyValue: effectiveAPIKeyValue
+                        )
                     )
-                )
                 try self.noteCandidateAttemptSuccess(candidate)
                 await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
                 return ProxyHTTPResponse(
@@ -4402,6 +4527,7 @@ public final class DaemonController: @unchecked Sendable {
         }
 
         throw ProxyError.message(errors.isEmpty ? "没有可用账号完成请求" : errors.joined(separator: " | "))
+        }
     }
 
     private func handleOAuthBrowserCallback(
@@ -5091,26 +5217,44 @@ public final class DaemonController: @unchecked Sendable {
         let adapters = self.openAIUpstreamAdapters(for: candidate.auth)
 
         for adapter in adapters {
-            var upstreamRequestBody = self.openAIUpstreamRequestBody(
-                from: upstreamCompatibleRequest,
-                requestedModel: requestedModel,
-                auth: candidate.auth,
-                adapter: adapter,
-                stream: downstreamStream,
-                preserveCustomModel: explicitProxyTestCustomModel,
-                useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
-            )
+            var upstreamDiagnosticMetadata: [String: String] = [:]
+            var upstreamRequestBody: [String: Any]
+            if adapter == .chatCompletions {
+                let builtRequest = self.openAIUpstreamRequestBodyWithDiagnostics(
+                    from: upstreamCompatibleRequest,
+                    requestedModel: requestedModel,
+                    auth: candidate.auth,
+                    adapter: adapter,
+                    stream: downstreamStream,
+                    preserveCustomModel: explicitProxyTestCustomModel,
+                    useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
+                )
+                upstreamRequestBody = builtRequest.body
+                upstreamDiagnosticMetadata = builtRequest.metadata
+            } else {
+                upstreamRequestBody = self.openAIUpstreamRequestBody(
+                    from: upstreamCompatibleRequest,
+                    requestedModel: requestedModel,
+                    auth: candidate.auth,
+                    adapter: adapter,
+                    stream: downstreamStream,
+                    preserveCustomModel: explicitProxyTestCustomModel,
+                    useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
+                )
+            }
             if adapter == .chatCompletions {
                 upstreamRequestBody = self.applyAccountReasoningEffortMapping(
                     to: upstreamRequestBody,
                     candidate: candidate,
                     rawReasoningEffort: reasoningEffort
                 )
-                upstreamRequestBody = self.chatCompletionsReasoningCache.apply(
-                    to: upstreamRequestBody,
-                    accountKey: candidate.record.accountKey,
-                    sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
+                let preparedRequest = self.preparedChatCompletionsRequestForReasoningHistory(
+                    upstreamRequestBody,
+                    candidate: candidate,
+                    promptCacheContext: promptCacheContext
                 )
+                upstreamRequestBody = preparedRequest.body
+                upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
             }
             let actualModel = self.loggedActualModel(from: upstreamRequestBody)
             let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
@@ -5136,16 +5280,24 @@ public final class DaemonController: @unchecked Sendable {
                         requestedModel: requestedModel,
                         actualModel: actualModel,
                         body: serialized,
-                        bodyObject: upstreamRequestBody
+                        bodyObject: upstreamRequestBody,
+                        metadata: upstreamDiagnosticMetadata
                     )
                     return (
-                        try await HTTPClientFactory.stream(
-                            config: requestConfig,
-                            url: upstream.url,
-                            method: .POST,
-                            headers: upstream.headers,
-                            body: serialized
-                        ),
+                        adapter == .chatCompletions
+                            ? try await self.chatCompletionsAPIKeyStream(
+                                config: requestConfig,
+                                url: upstream.url,
+                                headers: upstream.headers,
+                                body: serialized
+                            )
+                            : try await HTTPClientFactory.stream(
+                                config: requestConfig,
+                                url: upstream.url,
+                                method: .POST,
+                                headers: upstream.headers,
+                                body: serialized
+                            ),
                         upstream.url,
                         diagnosticRequestBodyID
                     )
@@ -5240,16 +5392,24 @@ public final class DaemonController: @unchecked Sendable {
                     requestedModel: requestedModel,
                     actualModel: actualModel,
                     body: serialized,
-                    bodyObject: upstreamRequestBody
+                    bodyObject: upstreamRequestBody,
+                    metadata: upstreamDiagnosticMetadata
                 )
                 return (
-                    try await HTTPClientFactory.request(
-                        config: requestConfig,
-                        url: upstream.url,
-                        method: .POST,
-                        headers: upstream.headers,
-                        body: serialized
-                    ),
+                    adapter == .chatCompletions
+                        ? try await self.chatCompletionsAPIKeyRequest(
+                            config: requestConfig,
+                            url: upstream.url,
+                            headers: upstream.headers,
+                            body: serialized
+                        )
+                        : try await HTTPClientFactory.request(
+                            config: requestConfig,
+                            url: upstream.url,
+                            method: .POST,
+                            headers: upstream.headers,
+                            body: serialized
+                        ),
                     upstream.url,
                     diagnosticRequestBodyID
                 )
@@ -5483,24 +5643,37 @@ public final class DaemonController: @unchecked Sendable {
                     : candidate.auth.providerPreset.resolvedUpstreamModel(
                     for: effectiveRequestedModel?.isEmpty == false ? effectiveRequestedModel! : requestedModel
                 )
-                var upstreamRequestBody = adapterUsesChatCompletions
-                    ? self.upstreamChatCompletionsRequest(
+                var upstreamDiagnosticMetadata: [String: String] = [:]
+                var upstreamRequestBody: [String: Any]
+                if adapterUsesChatCompletions {
+                    let builtRequest = self.upstreamChatCompletionsRequestWithDiagnostics(
                         from: upstreamCompatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
                         stream: downstreamStream,
                         auth: candidate.auth
                     )
-                    : self.compatibleCodexRequest(
+                    upstreamRequestBody = builtRequest.body
+                    upstreamDiagnosticMetadata = builtRequest.metadata
+                } else {
+                    upstreamRequestBody = self.compatibleCodexRequest(
                         upstreamCompatibleRequest,
                         for: candidate.auth,
                         preserveResolvedModel: modelResolution.usesAccountModelRouting
-                )
+                    )
+                }
                 if adapterUsesChatCompletions {
                     upstreamRequestBody = self.applyAccountReasoningEffortMapping(
                         to: upstreamRequestBody,
                         candidate: candidate,
                         rawReasoningEffort: reasoningEffort
                     )
+                    let preparedRequest = self.preparedChatCompletionsRequestForReasoningHistory(
+                        upstreamRequestBody,
+                        candidate: candidate,
+                        promptCacheContext: promptCacheContext
+                    )
+                    upstreamRequestBody = preparedRequest.body
+                    upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
                 }
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
@@ -5523,16 +5696,24 @@ public final class DaemonController: @unchecked Sendable {
                             requestedModel: requestedModel,
                             actualModel: actualModel,
                             body: serialized,
-                            bodyObject: upstreamRequestBody
+                            bodyObject: upstreamRequestBody,
+                            metadata: upstreamDiagnosticMetadata
                         )
                         return (
-                            try await HTTPClientFactory.stream(
-                                config: requestConfig,
-                                url: upstream.url,
-                                method: .POST,
-                                headers: upstream.headers,
-                                body: serialized
-                            ),
+                            adapterUsesChatCompletions
+                                ? try await self.chatCompletionsAPIKeyStream(
+                                    config: requestConfig,
+                                    url: upstream.url,
+                                    headers: upstream.headers,
+                                    body: serialized
+                                )
+                                : try await HTTPClientFactory.stream(
+                                    config: requestConfig,
+                                    url: upstream.url,
+                                    method: .POST,
+                                    headers: upstream.headers,
+                                    body: serialized
+                                ),
                             upstream.url,
                             diagnosticRequestBodyID
                         )
@@ -5586,7 +5767,9 @@ public final class DaemonController: @unchecked Sendable {
                         ? self.openAIChatToSyntheticResponseStream(
                             upstreamBody: response.body,
                             requestedModel: requestedModel,
-                            inputData: streamInputData
+                            inputData: streamInputData,
+                            reasoningCacheAccountKey: candidate.record.accountKey,
+                            reasoningCacheSessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
                         )
                         : response.body
                     await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
@@ -5625,16 +5808,24 @@ public final class DaemonController: @unchecked Sendable {
                         requestedModel: requestedModel,
                         actualModel: actualModel,
                         body: serialized,
-                        bodyObject: upstreamRequestBody
+                        bodyObject: upstreamRequestBody,
+                        metadata: upstreamDiagnosticMetadata
                     )
                     return (
-                        try await HTTPClientFactory.request(
-                            config: requestConfig,
-                            url: upstream.url,
-                            method: .POST,
-                            headers: upstream.headers,
-                            body: serialized
-                        ),
+                        adapterUsesChatCompletions
+                            ? try await self.chatCompletionsAPIKeyRequest(
+                                config: requestConfig,
+                                url: upstream.url,
+                                headers: upstream.headers,
+                                body: serialized
+                            )
+                            : try await HTTPClientFactory.request(
+                                config: requestConfig,
+                                url: upstream.url,
+                                method: .POST,
+                                headers: upstream.headers,
+                                body: serialized
+                            ),
                         upstream.url,
                         diagnosticRequestBodyID
                     )
@@ -5690,6 +5881,11 @@ public final class DaemonController: @unchecked Sendable {
                         fromChatCompletion: object,
                         requestedModel: requestedModel,
                         input: upstreamCompatibleRequest["input"]
+                    )
+                    self.chatCompletionsReasoningCache.record(
+                        completedResponse: completed,
+                        accountKey: candidate.record.accountKey,
+                        sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
                     )
                 } else {
                     let events = ProxyTranscoder.decodeSSE(response.body)
@@ -5925,6 +6121,111 @@ public final class DaemonController: @unchecked Sendable {
             ?? context.upstreamPromptCacheKey
     }
 
+    private struct PreparedChatCompletionsRequest {
+        var body: [String: Any]
+        var metadata: [String: String]
+    }
+
+    private func prepareChatCompletionsRequestForReasoningHistory(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        promptCacheContext: PromptCacheContext,
+        forceToolHistoryProtection: Bool = false
+    ) -> [String: Any] {
+        self.preparedChatCompletionsRequestForReasoningHistory(
+            request,
+            candidate: candidate,
+            promptCacheContext: promptCacheContext,
+            forceToolHistoryProtection: forceToolHistoryProtection
+        ).body
+    }
+
+    private func preparedChatCompletionsRequestForReasoningHistory(
+        _ request: [String: Any],
+        candidate: ProxyCandidate,
+        promptCacheContext: PromptCacheContext,
+        forceToolHistoryProtection: Bool = false
+    ) -> PreparedChatCompletionsRequest {
+        let baseURL = candidate.auth.upstreamBaseURL
+            ?? candidate.record.upstreamBaseURL
+            ?? candidate.auth.providerPreset.defaultBaseURL
+        let preparedResult = ChatCompletionsCompatibility.prepareRequestWithReport(
+            request,
+            configuredProfile: candidate.auth.chatCompatibilityProfile,
+            baseURL: baseURL,
+            providerPreset: candidate.auth.providerPreset,
+            reasoningCache: self.chatCompletionsReasoningCache,
+            accountKey: candidate.record.accountKey,
+            sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext),
+            now: Helpers.now()
+        )
+        var prepared = preparedResult.request
+        var metadata = preparedResult.report.metadata
+        let effectiveProfile = ChatCompletionsCompatibility.resolvedProfile(
+            configured: candidate.auth.chatCompatibilityProfile,
+            baseURL: baseURL,
+            providerPreset: candidate.auth.providerPreset,
+            model: (prepared["model"] as? String) ?? (request["model"] as? String)
+        )
+        guard effectiveProfile == .generic,
+              forceToolHistoryProtection || self.requiresChatCompletionsThinkingToolHistoryProtection(
+                prepared,
+                auth: candidate.auth
+              )
+        else {
+            return PreparedChatCompletionsRequest(body: prepared, metadata: metadata)
+        }
+        prepared = ChatCompletionsReasoningCache.removingToolCallHistoryMissingReasoningContent(from: prepared)
+        metadata["chat_tool_history_protection"] = "removed_missing_reasoning"
+        metadata.merge(self.chatCompletionsFinalRequestMetadata(prepared)) { _, new in new }
+        return PreparedChatCompletionsRequest(body: prepared, metadata: metadata)
+    }
+
+    private func chatCompletionsFinalRequestMetadata(_ request: [String: Any]) -> [String: String] {
+        let messages = request["messages"] as? [[String: Any]] ?? []
+        let assistantToolCallCount = messages.reduce(0) { count, message in
+            let role = ((message["role"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard role == "assistant" else { return count }
+            return count + ((message["tool_calls"] as? [[String: Any]]) ?? []).count
+        }
+        let reasoningContentCount = messages.reduce(0) { count, message in
+            guard let text = message["reasoning_content"] as? String,
+                  text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            else {
+                return count
+            }
+            return count + 1
+        }
+        return [
+            "assistant_tool_call_count": "\(assistantToolCallCount)",
+            "reasoning_content_count": "\(reasoningContentCount)",
+            "final_messages_count": "\(messages.count)",
+            "final_messages_prefix_sha256": DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: request),
+        ]
+    }
+
+    private func requiresChatCompletionsThinkingToolHistoryProtection(
+        _ request: [String: Any],
+        auth: ExtractedAuth
+    ) -> Bool {
+        guard self.usesOpenAIChatCompletionsAdapter(auth) else {
+            return false
+        }
+        if request["reasoning_effort"] != nil || request["thinking"] != nil {
+            return true
+        }
+        let model = ((request["model"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return self.isDeepSeekThinkingModel(model)
+    }
+
+    private func isDeepSeekThinkingModel(_ model: String) -> Bool {
+        let lower = model.lowercased()
+        return lower.contains("deepseek-reasoner")
+            || lower.contains("deepseek-r1")
+            || lower.contains("deepseek_reasoner")
+            || (lower.contains("deepseek") && lower.contains("reasoner"))
+    }
+
     private func requestByApplyingOCRIfNeeded(
         _ request: [String: Any],
         candidate: ProxyCandidate,
@@ -6013,7 +6314,8 @@ public final class DaemonController: @unchecked Sendable {
         requestedModel: String,
         actualModel: String?,
         body: Data,
-        bodyObject: [String: Any]
+        bodyObject: [String: Any],
+        metadata: [String: String] = [:]
     ) -> Int64? {
         let captureConfig = config.diagnosticRequestBodyCapture
         guard captureConfig.enabled else {
@@ -6030,6 +6332,7 @@ public final class DaemonController: @unchecked Sendable {
                     actualModel: actualModel,
                     body: body,
                     bodyObject: bodyObject,
+                    metadata: metadata,
                     config: captureConfig
                 )
             )
@@ -6045,7 +6348,9 @@ public final class DaemonController: @unchecked Sendable {
         _ trace: ProxyRequestTrace,
         diagnosticRequestBodyID: Int64? = nil
     ) throws -> Int64 {
-        let requestLogID = try self.store.recordTrace(trace)
+        let requestLogID = try self.store.recordTrace(
+            trace.applyingProjectRoute(Self.currentCodexProjectRouteTraceContext)
+        )
         if let diagnosticRequestBodyID {
             try? self.store.linkDiagnosticRequestBody(id: diagnosticRequestBodyID, requestLogID: requestLogID)
         }
@@ -6269,12 +6574,16 @@ public final class DaemonController: @unchecked Sendable {
         {
             message = AnthropicAuthService.reauthorizationRequiredMessage
         } else if candidate.record.authMode.isManualAPIKey {
+            let chatHumanized = self.usesOpenAIChatCompletionsAdapter(candidate.auth)
+                || self.usesPresetChatCompletionsAdapter(candidate.auth)
+                ? ChatCompletionsCompatibility.humanizedUpstreamErrorMessage(summary)
+                : summary
             let humanized = OpenAICompatibleUpstream.humanizedUpstreamErrorMessage(
-                summary,
+                chatHumanized,
                 providerPreset: candidate.auth.providerPreset,
                 apiKey: candidate.auth.accessToken
             )
-            message = humanized == summary ? summary : humanized
+            message = humanized == chatHumanized ? chatHumanized : humanized
         } else {
             message = summary
         }
@@ -6763,6 +7072,144 @@ public final class DaemonController: @unchecked Sendable {
         var usesAccountModelRouting: Bool
     }
 
+    private struct ProjectRouteApplication {
+        var rule: CodexProjectRouteRule
+        var proxyKey: AuthenticatedProxyKeyContext
+        var apiKeyValue: String
+        var traceContext: CodexProjectRouteTraceContext
+    }
+
+    private func projectRouteApplication(
+        requestedModel: String,
+        client: ProjectRouteClient,
+        config: AppConfig,
+        authenticatedProxyKey: AuthenticatedProxyKeyContext
+    ) throws -> ProjectRouteApplication? {
+        guard let rule = config.projectRoute(for: requestedModel, client: client) else {
+            return nil
+        }
+        return try self.projectRouteApplication(
+            rule: rule,
+            client: client,
+            authenticatedProxyKey: authenticatedProxyKey,
+            config: config
+        )
+    }
+
+    private func codexProjectRouteApplication(
+        requestedModel: String,
+        requestPayload: [String: Any],
+        headers: [String: String],
+        client: ProjectRouteClient,
+        config: AppConfig,
+        authenticatedProxyKey: AuthenticatedProxyKeyContext
+    ) throws -> ProjectRouteApplication? {
+        if let modelRoute = try self.projectRouteApplication(
+            requestedModel: requestedModel,
+            client: client,
+            config: config,
+            authenticatedProxyKey: authenticatedProxyKey
+        ) {
+            return modelRoute
+        }
+        guard client == .codex,
+              let sessionID = PromptCacheSupport.sessionIdentifier(headers: headers, requestPayload: requestPayload),
+              let project = self.codexDesktopSessionProjectResolver.project(forSessionID: sessionID),
+              let rule = config.codexProjectRoute(forProjectPath: project.cwd)
+        else {
+            return nil
+        }
+        return try self.projectRouteApplication(
+            rule: rule,
+            client: client,
+            authenticatedProxyKey: authenticatedProxyKey,
+            config: config
+        )
+    }
+
+    private func projectRouteApplication(
+        rule: CodexProjectRouteRule,
+        client: ProjectRouteClient,
+        authenticatedProxyKey _: AuthenticatedProxyKeyContext,
+        config: AppConfig
+    ) throws -> ProjectRouteApplication {
+        guard let configuredProxyKey = config.enabledProxyAPIKeys.first(where: { $0.id == rule.proxyAPIKeyID }) else {
+            throw ProxyError.message("项目路由 `\(rule.label.isEmpty ? rule.routeModel : rule.label)` 绑定的本地 API Key 不存在或已禁用。")
+        }
+        guard let dataSource = self.projectRouteDataSource(client: client, proxyKey: configuredProxyKey) else {
+            throw ProxyError.message("项目路由 `\(rule.label.isEmpty ? rule.routeModel : rule.label)` 绑定的本地 API Key `\(configuredProxyKey.label)` 数据源不支持当前客户端。")
+        }
+
+        let proxyKey = AuthenticatedProxyKeyContext(
+            apiKeyHash: Helpers.sha256(configuredProxyKey.key),
+            proxyKeyID: configuredProxyKey.id,
+            dataSource: dataSource,
+            allowedAccountKeys: ProxyAPIKeyRecord.normalizedAllowedAccountKeys(configuredProxyKey.allowedAccountKeys)
+        )
+        return ProjectRouteApplication(
+            rule: rule,
+            proxyKey: proxyKey,
+            apiKeyValue: configuredProxyKey.key,
+            traceContext: CodexProjectRouteTraceContext(
+                projectRouteID: rule.id,
+                projectRouteLabel: rule.label,
+                effectiveProxyAPIKeyID: configuredProxyKey.id
+            )
+        )
+    }
+
+    private func visibleCodexProjectRouteModels(
+        for _: AuthenticatedProxyKeyContext,
+        config: AppConfig
+    ) -> [String] {
+        self.visibleProjectRouteModels(config: config, client: .codex)
+    }
+
+    private func visibleProjectRouteModels(
+        config: AppConfig,
+        client: ProjectRouteClient
+    ) -> [String] {
+        config.enabledCodexProjectRoutes.compactMap { rule in
+            guard rule.client == client else { return nil }
+            guard let configuredProxyKey = config.enabledProxyAPIKeys.first(where: { $0.id == rule.proxyAPIKeyID }) else {
+                return nil
+            }
+            guard self.projectRouteDataSource(client: client, proxyKey: configuredProxyKey) != nil else {
+                return nil
+            }
+            return rule.routeModel
+        }
+    }
+
+    private func projectRouteDataSource(
+        client: ProjectRouteClient,
+        proxyKey: ProxyAPIKeyRecord
+    ) -> ProxyDataSource? {
+        let expected: ProxyDataSource
+        switch client {
+        case .codex:
+            expected = .openAI
+        case .claudeCode:
+            expected = .anthropic
+        }
+        if proxyKey.dataSource == .all {
+            return expected
+        }
+        return proxyKey.dataSource == expected ? expected : nil
+    }
+
+    private func withCodexProjectRouteTraceContext<T>(
+        _ context: CodexProjectRouteTraceContext?,
+        operation: () async throws -> T
+    ) async throws -> T {
+        guard let context else {
+            return try await operation()
+        }
+        return try await Self.$currentCodexProjectRouteTraceContext.withValue(context) {
+            try await operation()
+        }
+    }
+
     private func resolvedCodexRequest(
         _ request: [String: Any],
         requestedModel: String,
@@ -6957,6 +7404,26 @@ public final class DaemonController: @unchecked Sendable {
         preserveCustomModel: Bool = false,
         useResolvedModelAsFinalUpstreamModel: Bool = false
     ) -> [String: Any] {
+        self.openAIUpstreamRequestBodyWithDiagnostics(
+            from: compatibleRequest,
+            requestedModel: requestedModel,
+            auth: auth,
+            adapter: adapter,
+            stream: stream,
+            preserveCustomModel: preserveCustomModel,
+            useResolvedModelAsFinalUpstreamModel: useResolvedModelAsFinalUpstreamModel
+        ).body
+    }
+
+    private func openAIUpstreamRequestBodyWithDiagnostics(
+        from compatibleRequest: [String: Any],
+        requestedModel: String,
+        auth: ExtractedAuth,
+        adapter: OpenAIUpstreamAdapter,
+        stream: Bool,
+        preserveCustomModel: Bool = false,
+        useResolvedModelAsFinalUpstreamModel: Bool = false
+    ) -> PreparedChatCompletionsRequest {
         let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedRequestedModel = effectiveRequestedModel?.isEmpty == false
@@ -6975,16 +7442,23 @@ public final class DaemonController: @unchecked Sendable {
         }
         switch adapter {
         case .responses:
-            return self.compatibleCodexRequest(
-                compatibleRequest,
-                for: auth,
-                preserveResolvedModel: useResolvedModelAsFinalUpstreamModel
+            return PreparedChatCompletionsRequest(
+                body: self.compatibleCodexRequest(
+                    compatibleRequest,
+                    for: auth,
+                    preserveResolvedModel: useResolvedModelAsFinalUpstreamModel
+                ),
+                metadata: [:]
             )
         case .chatCompletions:
-            return ProxyTranscoder.upstreamChatCompletionsRequest(
+            let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
                 from: compatibleRequest,
                 upstreamModel: resolvedUpstreamModel,
                 stream: stream
+            )
+            return PreparedChatCompletionsRequest(
+                body: built.request,
+                metadata: built.diagnostics.metadata
             )
         }
     }
@@ -6995,10 +7469,28 @@ public final class DaemonController: @unchecked Sendable {
         stream: Bool,
         auth: ExtractedAuth
     ) -> [String: Any] {
-        ProxyTranscoder.upstreamChatCompletionsRequest(
+        self.upstreamChatCompletionsRequestWithDiagnostics(
+            from: compatibleRequest,
+            upstreamModel: upstreamModel,
+            stream: stream,
+            auth: auth
+        ).body
+    }
+
+    private func upstreamChatCompletionsRequestWithDiagnostics(
+        from compatibleRequest: [String: Any],
+        upstreamModel: String,
+        stream: Bool,
+        auth: ExtractedAuth
+    ) -> PreparedChatCompletionsRequest {
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
             from: compatibleRequest,
             upstreamModel: upstreamModel,
             stream: stream
+        )
+        return PreparedChatCompletionsRequest(
+            body: built.request,
+            metadata: built.diagnostics.metadata
         )
     }
 
@@ -7127,6 +7619,112 @@ public final class DaemonController: @unchecked Sendable {
             data.append(chunk)
         }
         return data
+    }
+
+    private func chatCompletionsAPIKeyRequest(
+        config: AppConfig,
+        url: String,
+        headers: [String: String],
+        body: Data
+    ) async throws -> SimpleHTTPResponse {
+        var attempt = 0
+        var lastError: Error?
+        while attempt <= 2 {
+            do {
+                let response = try await HTTPClientFactory.request(
+                    config: config,
+                    url: url,
+                    method: .POST,
+                    headers: headers,
+                    body: body
+                )
+                guard self.shouldShortRetryChatCompletions(statusCode: response.statusCode),
+                      attempt < 2
+                else {
+                    return response
+                }
+                try await self.sleepBeforeChatCompletionsRetry(
+                    attempt: attempt,
+                    headers: response.headers
+                )
+                attempt += 1
+            } catch {
+                lastError = error
+                guard attempt < 2 else { break }
+                try await self.sleepBeforeChatCompletionsRetry(attempt: attempt, headers: [:])
+                attempt += 1
+            }
+        }
+        throw lastError ?? ProxyError.message("Chat Completions upstream retry exhausted.")
+    }
+
+    private func chatCompletionsAPIKeyStream(
+        config: AppConfig,
+        url: String,
+        headers: [String: String],
+        body: Data
+    ) async throws -> StreamingHTTPResponse {
+        var attempt = 0
+        var lastError: Error?
+        while attempt <= 2 {
+            do {
+                let response = try await HTTPClientFactory.stream(
+                    config: config,
+                    url: url,
+                    method: .POST,
+                    headers: headers,
+                    body: body
+                )
+                guard self.shouldShortRetryChatCompletions(statusCode: response.statusCode),
+                      attempt < 2
+                else {
+                    return response
+                }
+                let failureBody = try await self.collectBody(from: response.body)
+                try await self.sleepBeforeChatCompletionsRetry(
+                    attempt: attempt,
+                    headers: response.headers
+                )
+                attempt += 1
+                if attempt > 2 {
+                    return StreamingHTTPResponse(
+                        statusCode: response.statusCode,
+                        headers: response.headers,
+                        body: self.singleDataStream(failureBody)
+                    )
+                }
+            } catch {
+                lastError = error
+                guard attempt < 2 else { break }
+                try await self.sleepBeforeChatCompletionsRetry(attempt: attempt, headers: [:])
+                attempt += 1
+            }
+        }
+        throw lastError ?? ProxyError.message("Chat Completions upstream stream retry exhausted.")
+    }
+
+    private func shouldShortRetryChatCompletions(statusCode: Int) -> Bool {
+        [429, 500, 502, 503, 504].contains(statusCode)
+    }
+
+    private func sleepBeforeChatCompletionsRetry(
+        attempt: Int,
+        headers: [String: String]
+    ) async throws {
+        let retryAfterSeconds = headers["retry-after"]
+            .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let exponential = min(2.0, 0.3 * pow(2.0, Double(max(0, attempt))))
+        let seconds = min(2.0, retryAfterSeconds ?? exponential)
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
+    private func singleDataStream(_ data: Data) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            if data.isEmpty == false {
+                continuation.yield(data)
+            }
+            continuation.finish()
+        }
     }
 
     private func bodyData(from body: ProxyHTTPResponse.Body) async throws -> Data {

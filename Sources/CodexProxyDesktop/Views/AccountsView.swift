@@ -1498,6 +1498,12 @@ struct AccountPoolDetailSidebar: View {
                                         value: providerPreset
                                     )
                                 }
+                                if account.upstreamAdapter == .chatCompletions {
+                                    AccountMetaRow(
+                                        label: self.model.text(.labelChatCompatibilityProfile),
+                                        value: self.model.chatCompatibilityProfileText(account.chatCompatibilityProfile)
+                                    )
+                                }
                                 AccountMetaRow(
                                     label: self.model.text(.labelOutboundNode),
                                     value: self.model.accountManagedProxyNodeStatusText(account)
@@ -3099,6 +3105,12 @@ private struct AccountCard: View {
                     AccountMetaRow(
                         label: self.model.text(.labelProviderPreset),
                         value: providerPreset
+                    )
+                }
+                if self.account.upstreamAdapter == .chatCompletions {
+                    AccountMetaRow(
+                        label: self.model.text(.labelChatCompatibilityProfile),
+                        value: self.model.chatCompatibilityProfileText(self.account.chatCompatibilityProfile)
                     )
                 }
                 AccountMetaRow(

@@ -585,6 +585,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 authMode: metadata.authMode,
                 providerPreset: metadata.providerPreset,
                 upstreamAdapter: metadata.upstreamAdapter,
+                chatCompatibilityProfile: metadata.chatCompatibilityProfile,
                 upstreamBaseURL: metadata.upstreamBaseURL,
                 managedProxyNodeName: row.optionalText("managed_proxy_node_name"),
                 modelRouting: modelRouting,
@@ -732,6 +733,7 @@ public final class SQLiteStore: @unchecked Sendable {
             authMode: AccountAuthMode,
             providerPreset: OpenAICompatibleProviderPreset,
             upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+            chatCompatibilityProfile: ChatCompletionsCompatibilityProfile,
             upstreamBaseURL: String?
         )?
         if let authJSON {
@@ -1726,6 +1728,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 model TEXT NOT NULL,
                 actual_model TEXT,
                 reasoning_effort TEXT,
+                project_route_id TEXT,
+                project_route_label TEXT,
+                effective_proxy_api_key_id TEXT,
                 success INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -1753,8 +1758,18 @@ public final class SQLiteStore: @unchecked Sendable {
         if try !self.columnExists("reasoning_effort", in: "request_logs", on: db) {
             try self.execute("ALTER TABLE request_logs ADD COLUMN reasoning_effort TEXT;", on: db)
         }
+        if try !self.columnExists("project_route_id", in: "request_logs", on: db) {
+            try self.execute("ALTER TABLE request_logs ADD COLUMN project_route_id TEXT;", on: db)
+        }
+        if try !self.columnExists("project_route_label", in: "request_logs", on: db) {
+            try self.execute("ALTER TABLE request_logs ADD COLUMN project_route_label TEXT;", on: db)
+        }
+        if try !self.columnExists("effective_proxy_api_key_id", in: "request_logs", on: db) {
+            try self.execute("ALTER TABLE request_logs ADD COLUMN effective_proxy_api_key_id TEXT;", on: db)
+        }
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);", on: db)
+        try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_project_route_id ON request_logs(project_route_id);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_hash ON request_logs(api_key_hash);", on: db)
         try self.execute(
             """
@@ -1774,11 +1789,15 @@ public final class SQLiteStore: @unchecked Sendable {
                 relative_path TEXT,
                 expires_at INTEGER NOT NULL,
                 status TEXT NOT NULL,
-                error_summary TEXT
+                error_summary TEXT,
+                metadata_json TEXT
             );
             """,
             on: db
         )
+        if try !self.columnExists("metadata_json", in: "diagnostic_request_bodies", on: db) {
+            try self.execute("ALTER TABLE diagnostic_request_bodies ADD COLUMN metadata_json TEXT;", on: db)
+        }
         try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_request_log_id ON diagnostic_request_bodies(request_log_id);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_created_at ON diagnostic_request_bodies(created_at DESC);", on: db)
         try self.execute("CREATE INDEX IF NOT EXISTS idx_diagnostic_request_bodies_expires_at ON diagnostic_request_bodies(expires_at);", on: db)
@@ -2019,6 +2038,7 @@ public final class SQLiteStore: @unchecked Sendable {
         authMode: AccountAuthMode,
         providerPreset: OpenAICompatibleProviderPreset,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile,
         upstreamBaseURL: String?
     ) {
         let metadata = AuthService.extractAuthMetadata(from: authJSON)
@@ -2033,6 +2053,7 @@ public final class SQLiteStore: @unchecked Sendable {
             authMode,
             providerPreset,
             metadata.upstreamAdapter,
+            metadata.chatCompatibilityProfile,
             metadata.upstreamBaseURL ?? fallbackUpstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
@@ -2116,9 +2137,10 @@ public final class SQLiteStore: @unchecked Sendable {
             """
             INSERT INTO request_logs (
                 created_at, endpoint, upstream_url, client_source, api_key_hash, api_key_cipher, account_key, account_label, model, actual_model,
-                reasoning_effort, success, latency_ms, input_tokens, output_tokens, total_tokens, cache_hit_tokens,
+                reasoning_effort, project_route_id, project_route_label, effective_proxy_api_key_id,
+                success, latency_ms, input_tokens, output_tokens, total_tokens, cache_hit_tokens,
                 failure_category, last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             bindings: [
                 .int(trace.timestamp),
@@ -2132,6 +2154,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 .text(trace.model),
                 .text(trace.actualModel),
                 .text(trace.reasoningEffort),
+                .text(trace.projectRouteID),
+                .text(trace.projectRouteLabel),
+                .text(trace.effectiveProxyAPIKeyID),
                 .int(trace.success ? 1 : 0),
                 .int(trace.latencyMS),
                 .int(trace.usage.inputTokens),
@@ -2149,6 +2174,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let bodySHA256 = DiagnosticRequestBodySupport.bodySHA256(input.body)
         let prefixSHA256 = DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: input.bodyObject)
         let expiresAt = input.createdAt + Int64(max(1, input.config.retentionDays)) * 24 * 60 * 60
+        let metadataJSON = self.diagnosticRequestBodyMetadataJSON(from: input.metadata)
         var status: DiagnosticRequestBodyCaptureStatus = .captured
         var relativePath: String?
         var errorSummary: String?
@@ -2179,8 +2205,9 @@ public final class SQLiteStore: @unchecked Sendable {
             """
             INSERT INTO diagnostic_request_bodies (
                 request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model,
-                actual_model, body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                actual_model, body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             bindings: [
                 .int(nil),
@@ -2198,6 +2225,7 @@ public final class SQLiteStore: @unchecked Sendable {
                 .int(expiresAt),
                 .text(status.rawValue),
                 .text(errorSummary),
+                .text(metadataJSON),
             ]
         )
 
@@ -2216,7 +2244,8 @@ public final class SQLiteStore: @unchecked Sendable {
             byteCount: input.body.count,
             expiresAt: expiresAt,
             status: status,
-            errorSummary: errorSummary
+            errorSummary: errorSummary,
+            metadata: input.metadata
         )
     }
 
@@ -2266,7 +2295,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let rows = try self.query(
             """
             SELECT id, request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model, actual_model,
-                   body_sha256, prefix_sha256, byte_count, expires_at, status, error_summary
+                   body_sha256, prefix_sha256, byte_count, expires_at, status, error_summary, metadata_json
             FROM diagnostic_request_bodies\(whereSQL)
             ORDER BY created_at DESC
             LIMIT \(normalizedLimit);
@@ -2280,7 +2309,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let row = try self.querySingle(
             """
             SELECT id, request_log_id, created_at, endpoint, upstream_url, account_key, account_label, model, actual_model,
-                   body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary
+                   body_sha256, prefix_sha256, byte_count, relative_path, expires_at, status, error_summary, metadata_json
             FROM diagnostic_request_bodies
             WHERE id = ?;
             """,
@@ -2366,8 +2395,31 @@ public final class SQLiteStore: @unchecked Sendable {
             byteCount: Int(row.int("byte_count")),
             expiresAt: row.int("expires_at"),
             status: DiagnosticRequestBodyCaptureStatus(rawValue: row.text("status")) ?? .failed,
-            errorSummary: row.optionalText("error_summary")
+            errorSummary: row.optionalText("error_summary"),
+            metadata: self.diagnosticRequestBodyMetadata(from: row.optionalText("metadata_json"))
         )
+    }
+
+    private func diagnosticRequestBodyMetadataJSON(from metadata: [String: String]) -> String? {
+        let normalized = DiagnosticRequestBodyEntry(metadata: metadata).metadata
+        guard normalized.isEmpty == false,
+              let data = try? Helpers.encodeJSON(normalized),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        return text
+    }
+
+    private func diagnosticRequestBodyMetadata(from text: String?) -> [String: String] {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              text.isEmpty == false,
+              let data = text.data(using: .utf8),
+              let decoded = try? Helpers.readJSON([String: String].self, from: data)
+        else {
+            return [:]
+        }
+        return DiagnosticRequestBodyEntry(metadata: decoded).metadata
     }
 
     private func diagnosticRequestBodyClearConditions(
@@ -2443,6 +2495,7 @@ public final class SQLiteStore: @unchecked Sendable {
         let rows = try self.query(
             """
             SELECT id, created_at, endpoint, upstream_url, client_source, api_key_cipher, account_key, account_label, model, actual_model, reasoning_effort,
+                   project_route_id, project_route_label, effective_proxy_api_key_id,
                    success, latency_ms, input_tokens, output_tokens, total_tokens, cache_hit_tokens,
                    failure_category, last_error,
                    EXISTS(SELECT 1 FROM diagnostic_request_bodies WHERE request_log_id = request_logs.id AND status = 'captured') AS has_diagnostic_request_body
@@ -2469,6 +2522,9 @@ public final class SQLiteStore: @unchecked Sendable {
                 model: row.text("model"),
                 actualModel: row.optionalText("actual_model"),
                 reasoningEffort: row.optionalText("reasoning_effort"),
+                projectRouteID: row.optionalText("project_route_id"),
+                projectRouteLabel: row.optionalText("project_route_label"),
+                effectiveProxyAPIKeyID: row.optionalText("effective_proxy_api_key_id"),
                 apiKey: decryptedAPIKey,
                 accountKey: row.text("account_key"),
                 accountLabel: row.text("account_label"),

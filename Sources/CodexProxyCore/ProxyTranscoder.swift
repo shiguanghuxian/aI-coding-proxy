@@ -1,6 +1,39 @@
 import Foundation
 
 public enum ProxyTranscoder {
+    public struct ChatCompletionsRequestBuildDiagnostics: Sendable, Equatable {
+        public var encryptedContentReasoningCount: Int
+        public var directReasoningContentCount: Int
+        public var summaryReasoningContentCount: Int
+        public var contentReasoningCount: Int
+        public var assistantItemReasoningContentCount: Int
+
+        public init(
+            encryptedContentReasoningCount: Int = 0,
+            directReasoningContentCount: Int = 0,
+            summaryReasoningContentCount: Int = 0,
+            contentReasoningCount: Int = 0,
+            assistantItemReasoningContentCount: Int = 0
+        ) {
+            self.encryptedContentReasoningCount = max(0, encryptedContentReasoningCount)
+            self.directReasoningContentCount = max(0, directReasoningContentCount)
+            self.summaryReasoningContentCount = max(0, summaryReasoningContentCount)
+            self.contentReasoningCount = max(0, contentReasoningCount)
+            self.assistantItemReasoningContentCount = max(0, assistantItemReasoningContentCount)
+        }
+
+        public var metadata: [String: String] {
+            [
+                "used_encrypted_content": self.encryptedContentReasoningCount > 0 ? "true" : "false",
+                "reasoning_source_encrypted_content_count": "\(self.encryptedContentReasoningCount)",
+                "reasoning_source_direct_count": "\(self.directReasoningContentCount)",
+                "reasoning_source_summary_count": "\(self.summaryReasoningContentCount)",
+                "reasoning_source_content_count": "\(self.contentReasoningCount)",
+                "assistant_item_reasoning_content_count": "\(self.assistantItemReasoningContentCount)",
+            ]
+        }
+    }
+
     public static let supportedModels = [
         "gpt-5.5",
         "gpt-5.4",
@@ -166,9 +199,22 @@ public enum ProxyTranscoder {
         upstreamModel: String,
         stream: Bool
     ) -> [String: Any] {
+        self.upstreamChatCompletionsRequestWithDiagnostics(
+            from: normalizedRequest,
+            upstreamModel: upstreamModel,
+            stream: stream
+        ).request
+    }
+
+    public static func upstreamChatCompletionsRequestWithDiagnostics(
+        from normalizedRequest: [String: Any],
+        upstreamModel: String,
+        stream: Bool
+    ) -> (request: [String: Any], diagnostics: ChatCompletionsRequestBuildDiagnostics) {
         var messages: [[String: Any]] = []
         var lastAssistantMessageIndex: Int?
         var pendingReasoningContent: String?
+        var diagnostics = ChatCompletionsRequestBuildDiagnostics()
         let instructions = (normalizedRequest["instructions"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !instructions.isEmpty {
@@ -178,16 +224,26 @@ public enum ProxyTranscoder {
             ])
         }
 
-        for item in self.sanitizedTrailingToolHistory(
+        for item in self.sanitizedChatCompletionToolHistory(
             normalizedRequest["input"] as? [[String: Any]] ?? []
         ) {
             let type = item["type"] as? String ?? ""
             switch type {
             case "reasoning":
-                if let reasoningContent = self.reasoningContent(fromOutputItem: item) {
+                if let extracted = self.reasoningContentWithSource(fromOutputItem: item) {
+                    switch extracted.source {
+                    case .encryptedContent:
+                        diagnostics.encryptedContentReasoningCount += 1
+                    case .direct:
+                        diagnostics.directReasoningContentCount += 1
+                    case .summary:
+                        diagnostics.summaryReasoningContentCount += 1
+                    case .content:
+                        diagnostics.contentReasoningCount += 1
+                    }
                     pendingReasoningContent = self.joinReasoningContent(
                         pendingReasoningContent,
-                        reasoningContent
+                        extracted.content
                     )
                 }
             case "message":
@@ -204,6 +260,9 @@ public enum ProxyTranscoder {
                     if let reasoningContent = self.trimmedString(item["reasoning_content"])
                         ?? pendingReasoningContent
                     {
+                        if self.trimmedString(item["reasoning_content"]) != nil {
+                            diagnostics.assistantItemReasoningContentCount += 1
+                        }
                         message["reasoning_content"] = reasoningContent
                         pendingReasoningContent = nil
                     }
@@ -233,6 +292,9 @@ public enum ProxyTranscoder {
                 ]
                 let reasoningContent = self.trimmedString(item["reasoning_content"])
                     ?? pendingReasoningContent
+                if self.trimmedString(item["reasoning_content"]) != nil {
+                    diagnostics.assistantItemReasoningContentCount += 1
+                }
                 if let assistantIndex = lastAssistantMessageIndex,
                    ((messages[assistantIndex]["role"] as? String) ?? "") == "assistant"
                 {
@@ -292,7 +354,171 @@ public enum ProxyTranscoder {
         if let thinking = normalizedRequest["thinking"] {
             request["thinking"] = thinking
         }
-        return request
+        return (request, diagnostics)
+    }
+
+    private struct PendingChatToolCallGroup {
+        var reasoningItems: [[String: Any]]
+        var calls: [[String: Any]] = []
+        var outputs: [[String: Any]] = []
+        var deferredItems: [[String: Any]] = []
+        var callIDs: Set<String> = []
+        var outputIDs: Set<String> = []
+        var hasStartedOutputs = false
+    }
+
+    private static func sanitizedChatCompletionToolHistory(_ input: [[String: Any]]) -> [[String: Any]] {
+        guard input.isEmpty == false else {
+            return input
+        }
+
+        var result: [[String: Any]] = []
+        var pendingReasoningItems: [[String: Any]] = []
+        var pendingGroup: PendingChatToolCallGroup?
+        var emittedCallIDs: Set<String> = []
+        var emittedOutputIDs: Set<String> = []
+
+        func flushPendingReasoning() {
+            guard pendingReasoningItems.isEmpty == false else { return }
+            result.append(contentsOf: pendingReasoningItems)
+            pendingReasoningItems.removeAll()
+        }
+
+        func emitPendingGroupIfComplete() {
+            guard let group = pendingGroup,
+                  group.callIDs.isEmpty == false,
+                  group.callIDs == group.outputIDs
+            else {
+                return
+            }
+            let outputsByCallID = Dictionary(
+                uniqueKeysWithValues: group.outputs.compactMap { output -> (String, [String: Any])? in
+                    let callID = (output["call_id"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    guard callID.isEmpty == false else { return nil }
+                    return (callID, output)
+                }
+            )
+            let orderedOutputs = group.calls.compactMap { call -> [String: Any]? in
+                let callID = (call["call_id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return outputsByCallID[callID]
+            }
+            result.append(contentsOf: group.reasoningItems)
+            result.append(contentsOf: group.calls)
+            result.append(contentsOf: orderedOutputs)
+            result.append(contentsOf: group.deferredItems)
+            emittedCallIDs.formUnion(group.callIDs)
+            emittedOutputIDs.formUnion(group.outputIDs)
+            pendingGroup = nil
+        }
+
+        func dropPendingGroup() {
+            pendingGroup = nil
+        }
+
+        func hasFutureOutput(for callIDs: Set<String>, after itemIndex: Int) -> Bool {
+            guard callIDs.isEmpty == false else { return false }
+            var scan = itemIndex + 1
+            while scan < input.count {
+                let item = input[scan]
+                let type = (item["type"] as? String ?? "").lowercased()
+                if type == "function_call_output",
+                   let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   callIDs.contains(callID)
+                {
+                    return true
+                }
+                if self.isChatCompletionSystemMessage(item) {
+                    scan += 1
+                    continue
+                }
+                if type != "function_call_output" {
+                    return false
+                }
+                scan += 1
+            }
+            return false
+        }
+
+        for (itemIndex, item) in input.enumerated() {
+            let type = (item["type"] as? String ?? "").lowercased()
+            if self.isChatCompletionSystemMessage(item) {
+                if let group = pendingGroup {
+                    if hasFutureOutput(for: group.callIDs.subtracting(group.outputIDs), after: itemIndex) {
+                        pendingGroup?.deferredItems.append(item)
+                    } else {
+                        dropPendingGroup()
+                        flushPendingReasoning()
+                        result.append(item)
+                    }
+                } else {
+                    flushPendingReasoning()
+                    result.append(item)
+                }
+                continue
+            }
+
+            switch type {
+            case "reasoning":
+                if pendingGroup != nil {
+                    pendingGroup?.reasoningItems.append(item)
+                } else {
+                    pendingReasoningItems.append(item)
+                }
+
+            case "function_call":
+                let callID = (item["call_id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard callID.isEmpty == false else { continue }
+                if emittedCallIDs.contains(callID) {
+                    pendingReasoningItems.removeAll()
+                    continue
+                }
+                if pendingGroup?.hasStartedOutputs == true {
+                    dropPendingGroup()
+                }
+                if pendingGroup == nil {
+                    pendingGroup = PendingChatToolCallGroup(reasoningItems: pendingReasoningItems)
+                    pendingReasoningItems.removeAll()
+                }
+                guard pendingGroup?.callIDs.contains(callID) == false else { continue }
+                pendingGroup?.calls.append(item)
+                pendingGroup?.callIDs.insert(callID)
+
+            case "function_call_output":
+                let callID = (item["call_id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard callID.isEmpty == false else { continue }
+                guard emittedOutputIDs.contains(callID) == false else { continue }
+                guard pendingGroup?.callIDs.contains(callID) == true else { continue }
+                guard pendingGroup?.outputIDs.contains(callID) == false else { continue }
+                pendingGroup?.outputs.append(item)
+                pendingGroup?.outputIDs.insert(callID)
+                pendingGroup?.hasStartedOutputs = true
+                emitPendingGroupIfComplete()
+
+            case "message":
+                dropPendingGroup()
+                flushPendingReasoning()
+                result.append(item)
+
+            default:
+                dropPendingGroup()
+                flushPendingReasoning()
+            }
+        }
+
+        flushPendingReasoning()
+        return result
+    }
+
+    private static func isChatCompletionSystemMessage(_ item: [String: Any]) -> Bool {
+        guard ((item["type"] as? String) ?? "").lowercased() == "message" else {
+            return false
+        }
+        let role = ((item["role"] as? String) ?? "").lowercased()
+        return role == "system" || role == "developer"
     }
 
     static func sanitizedTrailingToolHistory(_ input: [[String: Any]]) -> [[String: Any]] {
@@ -1239,6 +1465,7 @@ public enum ProxyTranscoder {
         [
             "id": id ?? "reason_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))",
             "type": "reasoning",
+            "encrypted_content": text,
             "content": [[
                 "type": "output_text",
                 "text": text,
@@ -1250,11 +1477,25 @@ public enum ProxyTranscoder {
         ]
     }
 
+    private enum ReasoningContentSource {
+        case encryptedContent
+        case direct
+        case summary
+        case content
+    }
+
     private static func reasoningContent(fromOutputItem item: [String: Any]) -> String? {
-        var parts: [String] = []
-        if let direct = self.trimmedString(item["reasoning_content"]) {
-            parts.append(direct)
+        self.reasoningContentWithSource(fromOutputItem: item)?.content
+    }
+
+    private static func reasoningContentWithSource(fromOutputItem item: [String: Any]) -> (content: String, source: ReasoningContentSource)? {
+        if let encrypted = self.trimmedString(item["encrypted_content"]) {
+            return (encrypted, .encryptedContent)
         }
+        if let direct = self.trimmedString(item["reasoning_content"]) {
+            return (direct, .direct)
+        }
+        var parts: [String] = []
         if let summary = item["summary"] as? [[String: Any]] {
             parts.append(contentsOf: summary.compactMap { block in
                 let type = (block["type"] as? String)?.lowercased() ?? ""
@@ -1262,6 +1503,12 @@ public enum ProxyTranscoder {
                 return self.trimmedString(block["text"])
             })
         }
+        let summaryJoined = self.uniqueJoinedReasoningParts(parts)
+        if summaryJoined.isEmpty == false {
+            return (summaryJoined, .summary)
+        }
+
+        parts.removeAll()
         if let content = item["content"] as? [[String: Any]] {
             parts.append(contentsOf: content.compactMap { block in
                 let type = (block["type"] as? String)?.lowercased() ?? ""
@@ -1271,14 +1518,17 @@ public enum ProxyTranscoder {
                 return self.trimmedString(block["text"])
             })
         }
+        let contentJoined = self.uniqueJoinedReasoningParts(parts)
+        return contentJoined.isEmpty ? nil : (contentJoined, .content)
+    }
 
+    private static func uniqueJoinedReasoningParts(_ parts: [String]) -> String {
         var uniqueParts: [String] = []
         for part in parts {
             guard uniqueParts.contains(part) == false else { continue }
             uniqueParts.append(part)
         }
-        let joined = uniqueParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return joined.isEmpty ? nil : joined
+        return uniqueParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func joinReasoningContent(_ lhs: String?, _ rhs: String?) -> String? {

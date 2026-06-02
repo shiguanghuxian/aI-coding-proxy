@@ -64,11 +64,7 @@ enum PromptCacheSupport {
     ) -> PromptCacheContext {
         let explicitPromptCacheKey = self.trimmedString(requestPayload["prompt_cache_key"])
         let metadataUserID = self.extractMetadataUserID(from: requestPayload)
-        let sessionIdentifier =
-            self.trimmedHeader("session_id", in: headers)
-            ?? self.trimmedHeader("conversation_id", in: headers)
-            ?? self.parsedMetadataSessionID(metadataUserID)
-            ?? self.trimmedHeader("x-claude-code-session-id", in: headers)
+        let sessionIdentifier = self.sessionIdentifier(headers: headers, requestPayload: requestPayload)
 
         let explicitSeed = explicitPromptCacheKey ?? sessionIdentifier
         let generatedSeed = explicitSeed ?? self.generatedSeed(
@@ -102,6 +98,14 @@ enum PromptCacheSupport {
             upstreamSessionID: upstreamSessionID,
             allowManualAPIKeyStickyBinding: allowManualAPIKeyStickyBinding
         )
+    }
+
+    static func sessionIdentifier(headers: [String: String], requestPayload: [String: Any]) -> String? {
+        let metadataUserID = self.extractMetadataUserID(from: requestPayload)
+        return self.trimmedHeader("session_id", in: headers)
+            ?? self.trimmedHeader("conversation_id", in: headers)
+            ?? self.parsedMetadataSessionID(metadataUserID)
+            ?? self.trimmedHeader("x-claude-code-session-id", in: headers)
     }
 
     static func applyCodexPromptCache(

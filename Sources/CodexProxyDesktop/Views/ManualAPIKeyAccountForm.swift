@@ -83,6 +83,7 @@ struct ManualAPIKeyAccountForm: View {
                             .fixedSize(horizontal: false, vertical: true)
 
                         if self.draft.upstreamAdapter == .chatCompletions {
+                            self.chatCompatibilityProfilePicker(palette: palette)
                             self.reasoningCacheIsolationNotice(palette: palette)
                         }
                     }
@@ -131,6 +132,31 @@ struct ManualAPIKeyAccountForm: View {
                 }
                 .toggleStyle(.switch)
             }
+        }
+    }
+
+    private func chatCompatibilityProfilePicker(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: self.compact ? 6 : 8) {
+            Text(self.model.text(.labelChatCompatibilityProfile))
+                .font(.system(size: self.compact ? 10 : 11, weight: .semibold))
+                .foregroundStyle(palette.textPrimary)
+            Picker(
+                self.model.text(.labelChatCompatibilityProfile),
+                selection: self.$draft.chatCompatibilityProfile
+            ) {
+                ForEach(ChatCompletionsCompatibilityProfile.allCases, id: \.self) { profile in
+                    Text(self.model.chatCompatibilityProfileText(profile)).tag(profile)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .dashboardFieldChrome(compact: self.compact)
+
+            Text(self.model.text(.helperManualAccountChatCompatibilityProfile))
+                .font(.system(size: self.compact ? 10 : 11, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+                .lineLimit(self.compact ? 3 : 5)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

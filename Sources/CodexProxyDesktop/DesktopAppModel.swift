@@ -45,6 +45,7 @@ final class DesktopAppModel: ObservableObject {
     typealias ProxyTestImageFileWriter = (Data, URL) throws -> Void
     typealias ProxyTestImageFilenameTokenProvider = () -> String
     typealias ClientConfigManagerWindowFactory = (DesktopAppModel) -> ClientConfigManagerWindowControlling
+    typealias CodexProjectRoutesWindowFactory = (DesktopAppModel) -> CodexProjectRoutesWindowControlling
     typealias OCRCacheLogsWindowFactory = (DesktopAppModel) -> OCRCacheLogsWindowControlling
     typealias OCRModelManagerWindowFactory = (DesktopAppModel) -> OCRModelManagerWindowControlling
     typealias OCRModelTestImageSelectionHandler = @MainActor () throws -> OCRModelTestImageSelection?
@@ -167,6 +168,7 @@ final class DesktopAppModel: ObservableObject {
         var providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible
         var baseURL = OpenAICompatibleProviderPreset.genericOpenAICompatible.defaultBaseURL
         var upstreamAdapter: ManualAPIKeyUpstreamAdapter = .responses
+        var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto
         var apiKey = ""
         var enabled = true
         var automaticCooldownDisabled = false
@@ -505,6 +507,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var isManagedProxyManagerPresented = false
     @Published var isClientConfigManagerPresented = false
     @Published var clientConfigManagerState = ClientConfigManagerState()
+    @Published var codexProjectRouteDraft: CodexProjectRouteDraft?
     @Published var isRequestLogsPresented = false
     @Published var requestLogsDraftFilterState = RequestLogFilterState()
     @Published var requestLogsAppliedFilterState = RequestLogFilterState()
@@ -531,6 +534,7 @@ final class DesktopAppModel: ObservableObject {
     @Published var ocrRecognitionLogSummary = OCRRecognitionLogSummary()
     @Published var ocrRecognitionLogOlderThanSeconds: Int64 = 604_800
     @Published var ocrRecognitionLogIsClearing = false
+    @Published var isCodexProjectRoutesPresented = false
     @Published var isOCRCacheLogsPresented = false
     @Published var isOCRModelManagerPresented = false
     @Published var isOCRRecognitionResultPresented = false
@@ -584,6 +588,7 @@ final class DesktopAppModel: ObservableObject {
     var appUpdateCurrentAppURLProvider: () -> URL?
     let appUpdateTerminateHandler: () -> Void
     let clientConfigManagerWindowFactory: ClientConfigManagerWindowFactory
+    let codexProjectRoutesWindowFactory: CodexProjectRoutesWindowFactory
     let ocrCacheLogsWindowFactory: OCRCacheLogsWindowFactory
     let ocrModelManagerWindowFactory: OCRModelManagerWindowFactory
     private let remoteAdminWindowFactory: RemoteAdminWindowFactory
@@ -600,6 +605,7 @@ final class DesktopAppModel: ObservableObject {
     var proxyTestWindowController: ProxyTestWindowController?
     var managedProxyWindowController: ManagedProxyWindowController?
     var clientConfigManagerWindowController: ClientConfigManagerWindowControlling?
+    var codexProjectRoutesWindowController: CodexProjectRoutesWindowControlling?
     var ocrCacheLogsWindowController: OCRCacheLogsWindowControlling?
     var ocrModelManagerWindowController: OCRModelManagerWindowControlling?
     var clientConfigManagerRefreshGeneration = 0
@@ -648,6 +654,7 @@ final class DesktopAppModel: ObservableObject {
         appUpdateCurrentAppURLProvider: @escaping () -> URL? = { Bundle.main.bundleURL },
         appUpdateTerminateHandler: @escaping () -> Void = { NSApp.terminate(nil) },
         clientConfigManagerWindowFactory: @escaping ClientConfigManagerWindowFactory = { ClientConfigManagerWindowController(model: $0) },
+        codexProjectRoutesWindowFactory: @escaping CodexProjectRoutesWindowFactory = { CodexProjectRoutesWindowController(model: $0) },
         ocrCacheLogsWindowFactory: @escaping OCRCacheLogsWindowFactory = { OCRCacheLogsWindowController(model: $0) },
         ocrModelManagerWindowFactory: @escaping OCRModelManagerWindowFactory = { OCRModelManagerWindowController(model: $0) },
         remoteAdminWindowFactory: @escaping RemoteAdminWindowFactory = {
@@ -698,6 +705,7 @@ final class DesktopAppModel: ObservableObject {
         self.appUpdateCurrentAppURLProvider = appUpdateCurrentAppURLProvider
         self.appUpdateTerminateHandler = appUpdateTerminateHandler
         self.clientConfigManagerWindowFactory = clientConfigManagerWindowFactory
+        self.codexProjectRoutesWindowFactory = codexProjectRoutesWindowFactory
         self.ocrCacheLogsWindowFactory = ocrCacheLogsWindowFactory
         self.ocrModelManagerWindowFactory = ocrModelManagerWindowFactory
         self.remoteAdminWindowFactory = remoteAdminWindowFactory
@@ -1783,6 +1791,7 @@ final class DesktopAppModel: ObservableObject {
                 providerPreset: details.providerPreset,
                 baseURL: details.baseURL,
                 upstreamAdapter: details.upstreamAdapter ?? .responses,
+                chatCompatibilityProfile: details.chatCompatibilityProfile,
                 apiKey: details.apiKey,
                 enabled: details.enabled,
                 automaticCooldownDisabled: details.automaticCooldownDisabled,
@@ -2263,6 +2272,21 @@ final class DesktopAppModel: ObservableObject {
         }
     }
 
+    func chatCompatibilityProfileText(_ profile: ChatCompletionsCompatibilityProfile) -> String {
+        switch profile {
+        case .auto:
+            return self.text(.optionChatCompatibilityAuto)
+        case .generic:
+            return self.text(.optionChatCompatibilityGeneric)
+        case .deepSeekV4Thinking:
+            return self.text(.optionChatCompatibilityDeepSeekV4Thinking)
+        case .deepSeekLegacyReasoner:
+            return self.text(.optionChatCompatibilityDeepSeekLegacyReasoner)
+        case .mimoStrict:
+            return self.text(.optionChatCompatibilityMiMoStrict)
+        }
+    }
+
     func manualAPIKeyBaseURLPlaceholder(for preset: OpenAICompatibleProviderPreset) -> String {
         switch preset {
         case .genericOpenAICompatible:
@@ -2288,6 +2312,7 @@ final class DesktopAppModel: ObservableObject {
         updated.providerPreset = providerPreset
         if providerPreset != .genericOpenAICompatible {
             updated.upstreamAdapter = .responses
+            updated.chatCompatibilityProfile = .auto
         }
 
         let currentBaseURL = updated.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2313,6 +2338,9 @@ final class DesktopAppModel: ObservableObject {
         }
 
         updated.upstreamAdapter = upstreamAdapter
+        if upstreamAdapter != .chatCompletions {
+            updated.chatCompatibilityProfile = .auto
+        }
         return updated
     }
 
@@ -3776,6 +3804,7 @@ final class DesktopAppModel: ObservableObject {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode?,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile,
         apiKey: String,
         supportsVision: Bool
     )? {
@@ -3832,6 +3861,7 @@ final class DesktopAppModel: ObservableObject {
             normalizedBaseURL,
             baseURLMode,
             upstreamAdapter,
+            draft.upstreamAdapter == .chatCompletions ? draft.chatCompatibilityProfile : .auto,
             trimmedAPIKey,
             draft.supportsVision
         )
@@ -3853,6 +3883,7 @@ final class DesktopAppModel: ObservableObject {
                     baseURL: payload.baseURL,
                     baseURLMode: payload.baseURLMode,
                     upstreamAdapter: payload.upstreamAdapter,
+                    chatCompatibilityProfile: payload.chatCompatibilityProfile,
                     apiKey: payload.apiKey,
                     enabled: draft.enabled,
                     automaticCooldownDisabled: draft.automaticCooldownDisabled,
@@ -3869,6 +3900,7 @@ final class DesktopAppModel: ObservableObject {
                 baseURL: payload.baseURL,
                 baseURLMode: payload.baseURLMode,
                 upstreamAdapter: payload.upstreamAdapter,
+                chatCompatibilityProfile: payload.chatCompatibilityProfile,
                 apiKey: payload.apiKey,
                 enabled: draft.enabled,
                 automaticCooldownDisabled: draft.automaticCooldownDisabled,
@@ -4715,6 +4747,7 @@ final class DesktopAppModel: ObservableObject {
         self.proxyTestWindowController?.refreshWindow()
         self.managedProxyWindowController?.refreshWindow()
         self.clientConfigManagerWindowController?.refreshWindow()
+        self.codexProjectRoutesWindowController?.refreshWindow()
         self.ocrCacheLogsWindowController?.refreshWindow()
         self.ocrModelManagerWindowController?.refreshWindow()
         self.requestLogsWindowController?.refreshWindow()

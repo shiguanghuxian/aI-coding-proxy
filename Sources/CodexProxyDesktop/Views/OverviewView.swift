@@ -567,21 +567,24 @@ private struct OverviewTrafficCard: View {
                                         model: self.model,
                                         title: self.model.text(.labelDailyTrend),
                                         subtitle: self.model.overviewSelectedRecentWeekOption.rangeText,
-                                        points: self.model.overviewSelectedDailyTrendPoints
+                                        points: self.model.overviewSelectedDailyTrendPoints,
+                                        bucketUnit: .day
                                     )
 
                                     OverviewTrafficTrendPanel(
                                         model: self.model,
                                         title: self.model.text(.labelWeeklyTrend),
                                         subtitle: self.model.overviewRecentFourWeeksRangeText,
-                                        points: self.model.overviewWeeklyTrendPoints
+                                        points: self.model.overviewWeeklyTrendPoints,
+                                        bucketUnit: .week
                                     )
 
                                     OverviewTrafficTrendPanel(
                                         model: self.model,
                                         title: self.model.text(.labelMonthlyTrend),
                                         subtitle: self.model.text(.labelRecentTwelveMonths),
-                                        points: self.model.overviewMonthlyTrendPoints
+                                        points: self.model.overviewMonthlyTrendPoints,
+                                        bucketUnit: .month
                                     )
                                 }
                             } else {
@@ -729,23 +732,27 @@ private struct OverviewTrafficTrendPanel: View {
     let title: String
     let subtitle: String
     let points: [OverviewTrafficTrendPoint]
+    let bucketUnit: OverviewTrafficTrendBucketUnit
 
     @State private var hoveredBucketStart: Int64?
     @State private var hiddenSeries: Set<OverviewTrafficTrendSeriesKind> = []
+    @State private var chartStyle: OverviewTrafficTrendChartStyle = .line
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(self.title.uppercased())
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.8)
-                    .foregroundStyle(palette.textMuted)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    self.titleBlock(palette: palette)
+                    Spacer(minLength: 12)
+                    self.chartStylePicker
+                }
 
-                Text(self.subtitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(palette.textSecondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    self.titleBlock(palette: palette)
+                    self.chartStylePicker
+                }
             }
 
             OverviewTrafficTrendLegend(
@@ -902,6 +909,43 @@ private struct OverviewTrafficTrendPanel: View {
         }
     }
 
+    private func titleBlock(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(self.title.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(palette.textMuted)
+
+            Text(self.subtitle)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(palette.textSecondary)
+        }
+    }
+
+    private var chartStylePicker: some View {
+        Picker(self.model.text(.labelTrafficChartType), selection: self.$chartStyle.animation(.easeInOut(duration: 0.18))) {
+            ForEach(OverviewTrafficTrendChartStyle.allCases) { style in
+                Label(self.chartStyleTitle(style), systemImage: style.symbolName)
+                    .tag(style)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 292)
+        .help(self.model.text(.labelTrafficChartType))
+    }
+
+    private func chartStyleTitle(_ style: OverviewTrafficTrendChartStyle) -> String {
+        switch style {
+        case .line:
+            return self.model.text(.optionLineChart)
+        case .bar:
+            return self.model.text(.optionBarChart)
+        case .mixed:
+            return self.model.text(.optionMixedChart)
+        }
+    }
+
     private var hoveredPoint: OverviewTrafficTrendPoint? {
         guard let hoveredBucketStart else { return nil }
         return self.points.first(where: { $0.bucketStart == hoveredBucketStart })
@@ -912,20 +956,42 @@ private struct OverviewTrafficTrendPanel: View {
         for series: OverviewTrafficTrendSeriesKind,
         palette: AppearancePalette
     ) -> some ChartContent {
-        ForEach(self.points) { point in
-            self.lineMark(
-                for: series,
-                point: point,
-                color: self.seriesColor(series, palette: palette)
-            )
+        switch self.chartStyle {
+        case .line:
+            self.lineSeriesMarks(for: series, palette: palette)
+        case .bar:
+            self.barSeriesMarks(for: series, palette: palette)
+        case .mixed:
+            if series == .total {
+                self.lineSeriesMarks(for: series, palette: palette)
+            } else {
+                self.barSeriesMarks(for: series, palette: palette)
+            }
         }
+    }
 
+    @ChartContentBuilder
+    private func lineSeriesMarks(
+        for series: OverviewTrafficTrendSeriesKind,
+        palette: AppearancePalette
+    ) -> some ChartContent {
+        let color = self.seriesColor(series, palette: palette)
+        ForEach(self.points) { point in
+            self.lineMark(for: series, point: point, color: color)
+        }
         if let hoveredPoint {
-            self.highlightMark(
-                for: series,
-                point: hoveredPoint,
-                color: self.seriesColor(series, palette: palette)
-            )
+            self.highlightMark(for: series, point: hoveredPoint, color: color)
+        }
+    }
+
+    @ChartContentBuilder
+    private func barSeriesMarks(
+        for series: OverviewTrafficTrendSeriesKind,
+        palette: AppearancePalette
+    ) -> some ChartContent {
+        let color = self.seriesColor(series, palette: palette)
+        ForEach(self.points) { point in
+            self.barMark(for: series, point: point, color: color)
         }
     }
 
@@ -944,6 +1010,24 @@ private struct OverviewTrafficTrendPanel: View {
             .interpolationMethod(.catmullRom)
             .lineStyle(StrokeStyle(lineWidth: series == .total ? 2.8 : (series == .cacheHit || series == .cacheMiss ? 2.2 : 2.4), lineCap: .round, lineJoin: .round))
             .foregroundStyle(color)
+        }
+    }
+
+    @ChartContentBuilder
+    private func barMark(
+        for series: OverviewTrafficTrendSeriesKind,
+        point: OverviewTrafficTrendPoint,
+        color: Color
+    ) -> some ChartContent {
+        if let value = self.value(for: series, point: point) {
+            BarMark(
+                x: .value("Bucket", point.date, unit: self.bucketUnit.calendarComponent),
+                y: .value("Tokens", value),
+                width: .ratio(self.chartStyle == .mixed ? 0.58 : 0.72)
+            )
+            .position(by: .value("Metric", self.seriesLabel(series)))
+            .foregroundStyle(color.opacity(self.chartStyle == .mixed ? 0.82 : 0.9))
+            .cornerRadius(4)
         }
     }
 
@@ -1040,6 +1124,42 @@ private struct OverviewTrafficTrendPanel: View {
             return Int64(doubleValue.rounded())
         }
         return nil
+    }
+}
+
+private enum OverviewTrafficTrendBucketUnit {
+    case day
+    case week
+    case month
+
+    var calendarComponent: Calendar.Component {
+        switch self {
+        case .day:
+            return .day
+        case .week:
+            return .weekOfYear
+        case .month:
+            return .month
+        }
+    }
+}
+
+private enum OverviewTrafficTrendChartStyle: String, CaseIterable, Identifiable {
+    case line
+    case bar
+    case mixed
+
+    var id: String { self.rawValue }
+
+    var symbolName: String {
+        switch self {
+        case .line:
+            return "chart.xyaxis.line"
+        case .bar:
+            return "chart.bar.xaxis"
+        case .mixed:
+            return "chart.line.uptrend.xyaxis"
+        }
     }
 }
 

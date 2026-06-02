@@ -11,6 +11,10 @@ struct ChatCompletionsReasoningCacheEntry: Codable, Sendable, Equatable {
     var touchedAt: Int64
 }
 
+struct ChatCompletionsReasoningCacheApplyReport: Sendable, Equatable {
+    var restoredReasoningContentCount: Int = 0
+}
+
 final class ChatCompletionsReasoningCache: @unchecked Sendable {
     private let lock = NSLock()
     private let ttlSeconds: Int64
@@ -30,8 +34,23 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
         sessionKey: String?,
         now: Int64 = Helpers.now()
     ) -> [String: Any] {
+        self.applyWithReport(
+            to: request,
+            accountKey: accountKey,
+            sessionKey: sessionKey,
+            now: now
+        ).request
+    }
+
+    func applyWithReport(
+        to request: [String: Any],
+        accountKey: String,
+        sessionKey: String?,
+        now: Int64 = Helpers.now()
+    ) -> (request: [String: Any], report: ChatCompletionsReasoningCacheApplyReport) {
+        var report = ChatCompletionsReasoningCacheApplyReport()
         guard let cacheKey = self.cacheKey(accountKey: accountKey, sessionKey: sessionKey) else {
-            return request
+            return (request, report)
         }
 
         let entry = self.entry(
@@ -41,10 +60,10 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
             now: now
         )
         guard let entry, entry.expiresAt > now else {
-            return request
+            return (request, report)
         }
         guard var messages = request["messages"] as? [[String: Any]], messages.isEmpty == false else {
-            return request
+            return (request, report)
         }
 
         var changed = false
@@ -59,14 +78,94 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
                 continue
             }
             messages[index]["reasoning_content"] = reasoningContent
+            report.restoredReasoningContentCount += 1
             changed = true
+        }
+
+        guard changed else {
+            return (request, report)
+        }
+        var updated = request
+        updated["messages"] = messages
+        return (updated, report)
+    }
+
+    func prepareRequest(
+        _ request: [String: Any],
+        accountKey: String,
+        sessionKey: String?,
+        removeToolCallHistoryMissingReasoningContent: Bool,
+        now: Int64 = Helpers.now()
+    ) -> [String: Any] {
+        let restored = self.apply(
+            to: request,
+            accountKey: accountKey,
+            sessionKey: sessionKey,
+            now: now
+        )
+        guard removeToolCallHistoryMissingReasoningContent else {
+            return restored
+        }
+        return Self.removingToolCallHistoryMissingReasoningContent(from: restored)
+    }
+
+    static func removingToolCallHistoryMissingReasoningContent(from request: [String: Any]) -> [String: Any] {
+        guard let messages = request["messages"] as? [[String: Any]], messages.isEmpty == false else {
+            return request
+        }
+
+        var sanitized: [[String: Any]] = []
+        var removedToolCallIDs = Set<String>()
+        var index = 0
+        var changed = false
+
+        while index < messages.count {
+            let message = messages[index]
+            let role = ((message["role"] as? String) ?? "").lowercased()
+            let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+
+            if role == "assistant",
+               toolCalls.isEmpty == false,
+               Self.trimmedString(message["reasoning_content"]) == nil
+            {
+                let callIDs = Set(toolCalls.compactMap { Self.trimmedString($0["id"]) })
+                removedToolCallIDs.formUnion(callIDs)
+                changed = true
+                index += 1
+
+                while index < messages.count {
+                    let next = messages[index]
+                    let nextRole = ((next["role"] as? String) ?? "").lowercased()
+                    guard nextRole == "tool",
+                          let toolCallID = Self.trimmedString(next["tool_call_id"]),
+                          callIDs.contains(toolCallID)
+                    else {
+                        break
+                    }
+                    changed = true
+                    index += 1
+                }
+                continue
+            }
+
+            if role == "tool",
+               let toolCallID = Self.trimmedString(message["tool_call_id"]),
+               removedToolCallIDs.contains(toolCallID)
+            {
+                changed = true
+                index += 1
+                continue
+            }
+
+            sanitized.append(message)
+            index += 1
         }
 
         guard changed else {
             return request
         }
         var updated = request
-        updated["messages"] = messages
+        updated["messages"] = sanitized
         return updated
     }
 
@@ -233,6 +332,12 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
 
         if toolCalls.isEmpty == false,
            let reasoningContent = Self.uniqueToolCallReasoningContent(in: entry)
+        {
+            return reasoningContent
+        }
+
+        if toolCalls.isEmpty == false,
+           let reasoningContent = entry.latestToolCallReasoningContent
         {
             return reasoningContent
         }

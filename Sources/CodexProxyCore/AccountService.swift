@@ -92,7 +92,8 @@ public final class AccountService: @unchecked Sendable {
                 apiKey: input.apiKey,
                 providerPreset: input.providerPreset,
                 baseURLMode: input.baseURLMode,
-                upstreamAdapter: input.upstreamAdapter
+                upstreamAdapter: input.upstreamAdapter,
+                chatCompatibilityProfile: input.chatCompatibilityProfile
             )
         } catch {
             throw ProxyError.message("手动添加 API Key 账号失败：规范化根地址或密钥时出错，\(error.localizedDescription)")
@@ -154,6 +155,7 @@ public final class AccountService: @unchecked Sendable {
             ),
             baseURLMode: extracted.baseURLMode,
             upstreamAdapter: extracted.upstreamAdapter,
+            chatCompatibilityProfile: extracted.chatCompatibilityProfile,
             apiKey: extracted.accessToken,
             enabled: record.enabled,
             automaticCooldownDisabled: record.automaticCooldownDisabled,
@@ -184,7 +186,8 @@ public final class AccountService: @unchecked Sendable {
                 apiKey: input.apiKey,
                 providerPreset: input.providerPreset,
                 baseURLMode: input.baseURLMode,
-                upstreamAdapter: input.upstreamAdapter
+                upstreamAdapter: input.upstreamAdapter,
+                chatCompatibilityProfile: input.chatCompatibilityProfile
             )
         } catch {
             throw ProxyError.message("编辑 API Key 账号失败：规范化根地址或密钥时出错，\(error.localizedDescription)")
@@ -442,7 +445,8 @@ public final class AccountService: @unchecked Sendable {
         apiKey: String,
         providerPreset: OpenAICompatibleProviderPreset,
         baseURLMode: ManualAPIKeyBaseURLMode?,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto
     ) throws -> String {
         let effectiveBaseURLMode: ManualAPIKeyBaseURLMode? = providerPreset == .genericOpenAICompatible
             ? (baseURLMode ?? .exactAPIPrefix)
@@ -458,7 +462,8 @@ public final class AccountService: @unchecked Sendable {
             apiKey: apiKey,
             providerPreset: providerPreset,
             baseURLMode: effectiveBaseURLMode,
-            upstreamAdapter: effectiveUpstreamAdapter
+            upstreamAdapter: effectiveUpstreamAdapter,
+            chatCompatibilityProfile: effectiveUpstreamAdapter == .chatCompletions ? chatCompatibilityProfile : .auto
         )
         let extracted = try AuthService.extractAuth(from: authJSON, secretStore: self.secretStore)
         if let error = OpenAICompatibleUpstream.configurationError(

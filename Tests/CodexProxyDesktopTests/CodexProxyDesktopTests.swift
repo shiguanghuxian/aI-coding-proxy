@@ -1059,6 +1059,10 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(accountsSource.contains("accountCooldownPolicyActionTitle"))
         XCTAssertTrue(formSource.contains("self.draft.upstreamAdapter == .chatCompletions"))
         XCTAssertTrue(formSource.contains(".helperReasoningCacheAccountIsolation"))
+        XCTAssertTrue(formSource.contains("ChatCompletionsCompatibilityProfile.allCases"))
+        XCTAssertTrue(formSource.contains(".labelChatCompatibilityProfile"))
+        XCTAssertTrue(formSource.contains(".helperManualAccountChatCompatibilityProfile"))
+        XCTAssertTrue(accountsSource.contains("account.chatCompatibilityProfile"))
     }
 
     func testAccountReasoningEffortUIIsMenuOnlyAndLocalized() throws {
@@ -1144,6 +1148,40 @@ final class CodexProxyDesktopTests: XCTestCase {
         // Tooltip receives hiddenSeries
         XCTAssertTrue(overviewSource.contains("hiddenSeries: self.hiddenSeries"))
         XCTAssertTrue(overviewSource.contains("let hiddenSeries: Set<OverviewTrafficTrendSeriesKind>"))
+    }
+
+    func testTrafficTrendChartStyleSwitchSupportsLineBarAndMixedModes() throws {
+        let overviewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/OverviewView.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertTrue(overviewSource.contains("@State private var chartStyle: OverviewTrafficTrendChartStyle = .line"))
+        XCTAssertTrue(overviewSource.contains("Picker(self.model.text(.labelTrafficChartType)"))
+        XCTAssertTrue(overviewSource.contains("let bucketUnit: OverviewTrafficTrendBucketUnit"))
+        XCTAssertTrue(overviewSource.contains("bucketUnit: .day"))
+        XCTAssertTrue(overviewSource.contains("bucketUnit: .week"))
+        XCTAssertTrue(overviewSource.contains("bucketUnit: .month"))
+        XCTAssertTrue(overviewSource.contains("private enum OverviewTrafficTrendBucketUnit"))
+        XCTAssertTrue(overviewSource.contains("var calendarComponent: Calendar.Component"))
+        XCTAssertTrue(overviewSource.contains("private enum OverviewTrafficTrendChartStyle"))
+        XCTAssertTrue(overviewSource.contains("case line"))
+        XCTAssertTrue(overviewSource.contains("case bar"))
+        XCTAssertTrue(overviewSource.contains("case mixed"))
+        XCTAssertTrue(overviewSource.contains("LineMark("))
+        XCTAssertTrue(overviewSource.contains("BarMark("))
+        XCTAssertTrue(overviewSource.contains("unit: self.bucketUnit.calendarComponent"))
+        XCTAssertTrue(overviewSource.contains("case .mixed:"))
+        XCTAssertTrue(overviewSource.contains("if series == .total"))
+        XCTAssertTrue(overviewSource.contains(".optionLineChart"))
+        XCTAssertTrue(overviewSource.contains(".optionBarChart"))
+        XCTAssertTrue(overviewSource.contains(".optionMixedChart"))
+        XCTAssertTrue(preferencesSource.contains(".labelTrafficChartType: \"Chart Type\""))
+        XCTAssertTrue(preferencesSource.contains(".labelTrafficChartType: \"图表类型\""))
+        XCTAssertTrue(preferencesSource.contains(".optionLineChart: \"Line\""))
+        XCTAssertTrue(preferencesSource.contains(".optionLineChart: \"折线\""))
+        XCTAssertTrue(preferencesSource.contains(".optionBarChart: \"Bar\""))
+        XCTAssertTrue(preferencesSource.contains(".optionBarChart: \"柱状\""))
+        XCTAssertTrue(preferencesSource.contains(".optionMixedChart: \"Mixed\""))
+        XCTAssertTrue(preferencesSource.contains(".optionMixedChart: \"混合\""))
     }
 
     func testLabelCacheMissTokensHasEnglishAndChineseTranslations() throws {
@@ -1934,9 +1972,39 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("选择 Codex、Claude Code 或 Gemini"))
         XCTAssertTrue(source.contains("private func scrollableContent"))
         XCTAssertTrue(source.contains("private func fixedApplyButtonArea"))
-        XCTAssertTrue(source.contains("layoutPriority(2)"))
+        XCTAssertTrue(source.contains("let viewportWidth: CGFloat"))
+        XCTAssertTrue(source.contains("let viewportHeight: CGFloat"))
+        XCTAssertTrue(source.contains(".frame(width: layout.viewportWidth, height: layout.viewportHeight"))
+        XCTAssertTrue(source.contains("ZStack(alignment: .bottom)"))
+        XCTAssertTrue(source.contains("let sidebarApplyFooterReservedHeight: CGFloat"))
+        XCTAssertTrue(source.contains(".padding(.bottom, self.layout.sidebarApplyFooterReservedHeight)"))
+        XCTAssertTrue(source.contains("client-config-apply-footer"))
+        XCTAssertTrue(source.contains("client-config-apply-button"))
+        XCTAssertFalse(source.contains("layoutPriority(3)"))
         XCTAssertTrue(source.contains("let isTightHeight: Bool"))
         XCTAssertTrue(source.contains("let isCompactHeight: Bool"))
+        XCTAssertTrue(source.contains("let isNarrowWidth: Bool"))
+        XCTAssertTrue(source.contains("let isCompactWidth: Bool"))
+        XCTAssertTrue(source.contains("let usesCompactWorkspaceHeader: Bool"))
+        XCTAssertTrue(source.contains("let dense = narrowWidth || tightHeight"))
+        XCTAssertTrue(source.contains("self.sidebarWidth = narrowWidth ? 260 : (compactWidth ? 292 : 340)"))
+        XCTAssertTrue(source.contains("self.fileListWidth = narrowWidth ? 205 : (compactWidth ? 235 : 280)"))
+        XCTAssertTrue(source.contains("self.editorMinHeight = tightHeight ? 150 : (compactHeight ? 220 : 390)"))
+        XCTAssertTrue(source.contains("private func regularContent"))
+        XCTAssertTrue(source.contains("self.regularContent(layout: layout, renderState: renderState)"))
+        XCTAssertFalse(source.contains("private func stackedContent"))
+        XCTAssertFalse(source.contains("usesStackedLayout"))
+        XCTAssertFalse(source.contains("usesTopApplyButton"))
+        XCTAssertFalse(source.contains("private func topApplyButtonArea"))
+        XCTAssertTrue(source.contains("private var applyButton"))
+        XCTAssertTrue(source.contains("private func sidebarContent"))
+        XCTAssertTrue(source.contains("private func headerTitleBlock"))
+        XCTAssertTrue(source.contains("layout.usesCompactWorkspaceHeader"))
+        XCTAssertTrue(source.contains("ClientConfigHeaderActionButtonStyle"))
+        XCTAssertTrue(source.contains(".frame(minHeight: self.layout.isCompactWidth ? 24 : 26)"))
+        XCTAssertTrue(source.contains("只有点击左侧写入按钮"))
+        XCTAssertFalse(source.contains("点击上方写入按钮"))
+        XCTAssertFalse(source.contains("下方内容是只读预览"))
         XCTAssertTrue(source.contains("let editorMinHeight: CGFloat"))
         XCTAssertTrue(source.contains("let backupEditorMinHeight: CGFloat"))
         XCTAssertTrue(source.contains("layout.editorMinHeight"))
@@ -1965,6 +2033,153 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(source.contains("Files To Write"))
         XCTAssertTrue(source.contains("点击文件查看当前内容和写入后的预览。"))
         XCTAssertTrue(source.contains("Select a file to compare current and proposed content."))
+    }
+
+    @MainActor
+    func testClientConfigManagerApplyButtonStaysVisibleAtTightHeight() throws {
+        let model = DesktopAppModel()
+        model.preferences.languageMode = .zhHans
+        model.settings.proxyAPIKeys = [
+            ProxyAPIKeyRecord(
+                id: "primary",
+                label: "Primary",
+                key: "sk-local-primary",
+                dataSource: .all,
+                enabled: true,
+                createdAt: 1
+            ),
+        ]
+
+        let width: CGFloat = 980
+        let height: CGFloat = 520
+        let (window, hostingView) = Self.makeHostedView(
+            width: width,
+            height: height,
+            rootView: AnyView(
+                ClientConfigManagerView(model: model)
+                    .frame(width: width, height: height)
+            )
+        )
+        defer { window.orderOut(nil) }
+
+        Self.renderHostedView(hostingView)
+
+        let buttonFrame = try XCTUnwrap(
+            Self.hostedViewFrame(withAccessibilityIdentifier: "client-config-apply-button", in: hostingView)
+        )
+        let footerFrame = try XCTUnwrap(
+            Self.hostedViewFrame(withAccessibilityIdentifier: "client-config-apply-footer", in: hostingView)
+        )
+
+        XCTAssertGreaterThan(buttonFrame.width, 140)
+        XCTAssertGreaterThan(buttonFrame.height, 20)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minY, hostingView.bounds.minY - 1)
+        XCTAssertLessThanOrEqual(buttonFrame.maxY, hostingView.bounds.maxY + 1)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minY, footerFrame.minY - 1)
+        XCTAssertLessThanOrEqual(buttonFrame.maxY, footerFrame.maxY + 1)
+
+        for target in ClientConfigTarget.allCases {
+            model.clientConfigManagerTarget = target
+            hostingView.rootView = AnyView(
+                ClientConfigManagerView(model: model)
+                    .frame(width: width, height: height)
+            )
+            Self.renderHostedView(hostingView)
+
+            let renderedText = Self.hostedTextValues(in: hostingView).joined(separator: "\n")
+            XCTAssertTrue(renderedText.contains(model.clientConfigManagerApplyButtonTitle()))
+        }
+    }
+
+    func testClientConfigManagerDeclaresCodexProjectRouteUI() throws {
+        let managerSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/ClientConfigManagerView.swift")
+        let routeViewSource = try Self.repoFileText("Sources/CodexProxyDesktop/Views/CodexProjectRouteView.swift")
+        let supportSource = try Self.repoFileText("Sources/CodexProxyDesktop/ClientConfigProjectRouteSupport.swift")
+        let windowControllerSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProjectRoutesWindowController.swift")
+        let windowSupportSource = try Self.repoFileText("Sources/CodexProxyDesktop/CodexProjectRoutesWindowSupport.swift")
+        let modelSource = try Self.repoFileText("Sources/CodexProxyDesktop/DesktopAppModel.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+
+        XCTAssertFalse(managerSource.contains("CodexProjectRouteSidebarPanel(model: self.model)"))
+        XCTAssertFalse(managerSource.contains("项目级模型标签已移到独立窗口管理"))
+        XCTAssertTrue(managerSource.contains("action: self.model.openCodexProjectRoutesWindow"))
+        XCTAssertTrue(managerSource.contains(".actionOpenCodexProjectRoutes"))
+        XCTAssertTrue(routeViewSource.contains("struct CodexProjectRoutesView"))
+        XCTAssertTrue(routeViewSource.contains("CodexProjectRouteEditorSheet(model: self.model)"))
+        XCTAssertTrue(routeViewSource.contains("HSplitView"))
+        XCTAssertTrue(routeViewSource.contains("@State private var selectedRuleID"))
+        XCTAssertTrue(routeViewSource.contains("CodexProjectRouteDetailPanel"))
+        XCTAssertTrue(routeViewSource.contains("Current Project Config"))
+        XCTAssertTrue(routeViewSource.contains("Proposed Project Config"))
+        XCTAssertTrue(routeViewSource.contains("self.model.currentProjectRoutePreviewFile(for: self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("self.model.proposedProjectRoutePreviewFile(for: self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("项目路由"))
+        XCTAssertTrue(routeViewSource.contains("Client Type"))
+        XCTAssertTrue(routeViewSource.contains("Claude Settings Scope"))
+        XCTAssertTrue(routeViewSource.contains(".claude/settings.local.json"))
+        XCTAssertTrue(routeViewSource.contains(".claude/settings.json"))
+        XCTAssertTrue(routeViewSource.contains("ProjectRouteClient.claudeCode"))
+        XCTAssertTrue(preferencesSource.contains("Project Routes"))
+        XCTAssertTrue(routeViewSource.contains("写入项目"))
+        XCTAssertTrue(routeViewSource.contains(".actionClearCodexProjectConfig"))
+        XCTAssertTrue(routeViewSource.contains("Project Directory"))
+        XCTAssertTrue(routeViewSource.contains("Route Model Tag"))
+        XCTAssertTrue(routeViewSource.contains("Target Model"))
+        XCTAssertTrue(routeViewSource.contains("Codex CLI 通过项目 `.codex/config.toml` 的路由模型标签触发"))
+        XCTAssertTrue(routeViewSource.contains("Codex 桌面版按 Codex Desktop 会话工作目录匹配项目目录"))
+        XCTAssertTrue(routeViewSource.contains("Codex CLI 仍通过路由模型标签触发"))
+        XCTAssertTrue(routeViewSource.contains("Codex Desktop session working directory"))
+        XCTAssertTrue(routeViewSource.contains("does not depend on the desktop app reading this model tag"))
+        XCTAssertTrue(routeViewSource.contains("目标模型是代理最终发给上游账号的真实模型名"))
+        XCTAssertTrue(routeViewSource.contains("项目配置里只写“路由模型标签”"))
+        XCTAssertTrue(routeViewSource.contains("Codex 桌面版按会话工作目录触发"))
+        XCTAssertTrue(routeViewSource.contains("绑定本地 Key 切换账号池"))
+        XCTAssertTrue(routeViewSource.contains("把 model 改写成这里的目标模型"))
+        XCTAssertTrue(routeViewSource.contains("The target model is the real model name"))
+        XCTAssertTrue(routeViewSource.contains("Codex Desktop triggers by session working directory"))
+        XCTAssertTrue(routeViewSource.contains("switches to the bound local key account pool"))
+        XCTAssertTrue(routeViewSource.contains("ANTHROPIC_CUSTOM_MODEL_OPTION"))
+        XCTAssertTrue(routeViewSource.contains("claude-cp-route-*"))
+        XCTAssertTrue(routeViewSource.contains("claude-cp-route-project"))
+        XCTAssertTrue(routeViewSource.contains("命中后代理使用绑定本地 Key"))
+        XCTAssertTrue(routeViewSource.contains("Matched requests use the bound local key"))
+        XCTAssertTrue(routeViewSource.contains("重新启动一个新的非 resume 会话"))
+        XCTAssertTrue(routeViewSource.contains("project_route_id"))
+        XCTAssertTrue(routeViewSource.contains("它不固定要求 `claude-` 前缀"))
+        XCTAssertTrue(routeViewSource.contains("other Anthropic-compatible gateways should use the model name that provider actually supports"))
+        XCTAssertTrue(routeViewSource.contains("Bound Local Key"))
+        XCTAssertTrue(routeViewSource.contains("self.model.chooseCodexProjectRouteDirectory()"))
+        XCTAssertTrue(routeViewSource.contains("self.model.regenerateCodexProjectRouteModel()"))
+        XCTAssertTrue(routeViewSource.contains("self.model.applyCodexProjectRouteToProject(self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("self.model.clearCodexProjectRouteFromProject(self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("self.model.deleteCodexProjectRoute(self.rule)"))
+        XCTAssertTrue(supportSource.contains("saveCodexProjectRouteDraft()"))
+        XCTAssertTrue(supportSource.contains("writeProjectRouteConfiguration("))
+        XCTAssertTrue(supportSource.contains("项目路由已保存并写入项目配置"))
+        XCTAssertTrue(supportSource.contains("Project Route Saved And Written"))
+        XCTAssertTrue(supportSource.contains("selectedCodexProjectRouteRule(id:"))
+        XCTAssertTrue(supportSource.contains("currentProjectRoutePreviewFile(for rule:"))
+        XCTAssertTrue(supportSource.contains("proposedProjectRoutePreviewFile(for rule:"))
+        XCTAssertTrue(supportSource.contains("applyProjectRouteConfiguration(rule)"))
+        XCTAssertTrue(supportSource.contains("clearProjectRouteConfiguration(rule)"))
+        XCTAssertTrue(supportSource.contains("previewCurrentProjectRoute(rule)"))
+        XCTAssertTrue(supportSource.contains("projectRouteConfigMatches(content: file.content, rule: rule)"))
+        XCTAssertTrue(supportSource.contains("ANTHROPIC_CUSTOM_MODEL_OPTION"))
+        XCTAssertTrue(supportSource.contains("Claude Code 自定义模型选项"))
+        XCTAssertTrue(supportSource.contains("client: draft.client"))
+        XCTAssertTrue(supportSource.contains("命中后将使用绑定本地 Key"))
+        XCTAssertTrue(windowControllerSource.contains("CodexProjectRoutesWindowController"))
+        XCTAssertTrue(windowControllerSource.contains("CodexProjectRoutesView(model: model)"))
+        XCTAssertTrue(windowSupportSource.contains("openCodexProjectRoutesWindow()"))
+        XCTAssertTrue(windowSupportSource.contains("target: .claudeCode"))
+        XCTAssertTrue(windowSupportSource.contains("handleCodexProjectRoutesWindowDidClose()"))
+        XCTAssertTrue(modelSource.contains("typealias CodexProjectRoutesWindowFactory"))
+        XCTAssertTrue(modelSource.contains("isCodexProjectRoutesPresented"))
+        XCTAssertTrue(modelSource.contains("codexProjectRoutesWindowController?.refreshWindow()"))
+        XCTAssertTrue(preferencesSource.contains("case actionOpenCodexProjectRoutes"))
+        XCTAssertTrue(preferencesSource.contains("case actionClearCodexProjectConfig"))
+        XCTAssertTrue(preferencesSource.contains("Bind Codex and Claude Code model tags"))
+        XCTAssertTrue(preferencesSource.contains("项目路由"))
     }
 
     func testClientConfigManagerPerformanceOptimizationsAreStructuredForResize() throws {
@@ -4148,6 +4363,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(cleanupSource.contains("clearAllDiagnosticRequestBodies"))
         XCTAssertTrue(requestLogsSource.contains(".actionViewDiagnosticRequestBody"))
         XCTAssertTrue(requestLogsSource.contains("DiagnosticRequestBodyDetailSheet"))
+        XCTAssertTrue(requestLogsSource.contains(".labelDiagnosticMetadata"))
+        XCTAssertTrue(requestLogsSource.contains("detail.entry.metadata.sorted"))
         XCTAssertTrue(requestLogsSource.contains("copyDiagnosticRequestBody"))
         XCTAssertTrue(requestLogsSource.contains("saveDiagnosticRequestBody"))
         XCTAssertFalse(cleanupSource.contains("reasoning_content"))
@@ -4870,6 +5087,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.sectionDiagnosticLogging), "Diagnostic Logging")
         XCTAssertEqual(model.text(.sectionDiagnosticRequestBodies), "Request Body Diagnostics")
         XCTAssertEqual(model.text(.labelDiagnosticRequestBodyCapture), "Capture Request Bodies")
+        XCTAssertEqual(model.text(.labelDiagnosticMetadata), "Diagnostic Metadata")
         XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("sensitive prompts"))
         XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("image base64"))
 
@@ -4882,6 +5100,7 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.sectionDiagnosticLogging), "诊断日志")
         XCTAssertEqual(model.text(.sectionDiagnosticRequestBodies), "请求体诊断数据")
         XCTAssertEqual(model.text(.labelDiagnosticRequestBodyCapture), "保存请求体诊断")
+        XCTAssertEqual(model.text(.labelDiagnosticMetadata), "诊断元数据")
         XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("敏感提示词"))
         XCTAssertTrue(model.text(.helperDiagnosticRequestBodySensitiveData).contains("图片 base64"))
     }
@@ -8312,6 +8531,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelNaturalTokenUsage), "Natural Range Token Usage")
         XCTAssertEqual(model.text(.providerPresetGenericOpenAICompatible), "Generic OpenAI Compatible")
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "Aliyun / Qwen Coding Plan")
+        XCTAssertEqual(model.text(.labelChatCompatibilityProfile), "Chat Completions Compatibility")
+        XCTAssertEqual(model.text(.optionChatCompatibilityAuto), "Auto")
+        XCTAssertEqual(model.text(.optionChatCompatibilityGeneric), "Generic")
+        XCTAssertEqual(model.text(.optionChatCompatibilityDeepSeekV4Thinking), "DeepSeek V4 Thinking")
+        XCTAssertEqual(model.text(.optionChatCompatibilityDeepSeekLegacyReasoner), "DeepSeek Legacy Reasoner")
+        XCTAssertEqual(model.text(.optionChatCompatibilityMiMoStrict), "MiMo Strict")
         XCTAssertEqual(model.text(.proxyTestTitle), "Test Console")
         XCTAssertEqual(model.text(.optionImageGenerations), "Images")
         XCTAssertEqual(model.text(.optionImageEdits), "Image Edits")
@@ -8389,6 +8614,12 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(model.text(.labelNaturalTokenUsage), "自然时间范围 Token 用量")
         XCTAssertEqual(model.text(.providerPresetGenericOpenAICompatible), "通用 OpenAI 兼容")
         XCTAssertEqual(model.text(.providerPresetAliyunQwenCodingPlan), "阿里百炼 / Qwen Coding Plan")
+        XCTAssertEqual(model.text(.labelChatCompatibilityProfile), "Chat Completions 兼容策略")
+        XCTAssertEqual(model.text(.optionChatCompatibilityAuto), "自动")
+        XCTAssertEqual(model.text(.optionChatCompatibilityGeneric), "通用")
+        XCTAssertEqual(model.text(.optionChatCompatibilityDeepSeekV4Thinking), "DeepSeek V4 Thinking")
+        XCTAssertEqual(model.text(.optionChatCompatibilityDeepSeekLegacyReasoner), "DeepSeek Legacy Reasoner")
+        XCTAssertEqual(model.text(.optionChatCompatibilityMiMoStrict), "MiMo 严格模式")
         XCTAssertEqual(model.text(.proxyTestTitle), "测试控制台")
         XCTAssertEqual(model.text(.optionImageGenerations), "图片生成")
         XCTAssertEqual(model.text(.optionImageEdits), "图片编辑")
@@ -8473,6 +8704,10 @@ final class CodexProxyDesktopTests: XCTestCase {
         )
         XCTAssertEqual(model.text(.labelMonthlyTrend), "Monthly Trend")
         XCTAssertEqual(model.text(.labelRecentTwelveMonths), "Last 12 Months")
+        XCTAssertEqual(model.text(.labelTrafficChartType), "Chart Type")
+        XCTAssertEqual(model.text(.optionLineChart), "Line")
+        XCTAssertEqual(model.text(.optionBarChart), "Bar")
+        XCTAssertEqual(model.text(.optionMixedChart), "Mixed")
 
         model.preferences.languageMode = .zhHans
         XCTAssertEqual(
@@ -8481,6 +8716,10 @@ final class CodexProxyDesktopTests: XCTestCase {
         )
         XCTAssertEqual(model.text(.labelMonthlyTrend), "按月趋势")
         XCTAssertEqual(model.text(.labelRecentTwelveMonths), "最近 12 个月")
+        XCTAssertEqual(model.text(.labelTrafficChartType), "图表类型")
+        XCTAssertEqual(model.text(.optionLineChart), "折线")
+        XCTAssertEqual(model.text(.optionBarChart), "柱状")
+        XCTAssertEqual(model.text(.optionMixedChart), "混合")
     }
 
     @MainActor
@@ -13622,6 +13861,207 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertEqual(outcome, .appliedNow)
     }
 
+    func testDaemonBinaryFingerprintChangesWhenBinaryContentChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-proxy-daemon-fingerprint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let binaryURL = directory.appendingPathComponent("codex-proxyd")
+        try Data("daemon-v1".utf8).write(to: binaryURL)
+        let firstFingerprint = LocalDaemonController.daemonBinaryFingerprint(forPath: binaryURL.path)
+
+        try Data("daemon-v2-with-new-feature".utf8).write(to: binaryURL)
+        let secondFingerprint = LocalDaemonController.daemonBinaryFingerprint(forPath: binaryURL.path)
+
+        XCTAssertNotEqual(firstFingerprint, secondFingerprint)
+        XCTAssertEqual(firstFingerprint, Helpers.sha256(Data("daemon-v1".utf8)))
+        XCTAssertEqual(secondFingerprint, Helpers.sha256(Data("daemon-v2-with-new-feature".utf8)))
+    }
+
+    func testLaunchAgentPlistIncludesDaemonFingerprintAndChangesWhenFingerprintChanges() {
+        let dataDirectory = URL(fileURLWithPath: "/tmp/CodexProxy Test Data", isDirectory: true)
+        let firstPlist = LocalDaemonController.makeLaunchAgentPlist(
+            dataDirectory: dataDirectory,
+            serviceLabel: "io.shiguanghuxian.codex-proxy",
+            daemonBinaryPath: "/Applications/AI Coding Proxy.app/Contents/MacOS/codex-proxyd",
+            daemonBinaryFingerprint: "first-fingerprint",
+            stdoutPath: "/tmp/codex-proxy.out.log",
+            stderrPath: "/tmp/codex-proxy.err.log",
+            config: AppConfig(autoStart: true)
+        )
+        let repeatedFirstPlist = LocalDaemonController.makeLaunchAgentPlist(
+            dataDirectory: dataDirectory,
+            serviceLabel: "io.shiguanghuxian.codex-proxy",
+            daemonBinaryPath: "/Applications/AI Coding Proxy.app/Contents/MacOS/codex-proxyd",
+            daemonBinaryFingerprint: "first-fingerprint",
+            stdoutPath: "/tmp/codex-proxy.out.log",
+            stderrPath: "/tmp/codex-proxy.err.log",
+            config: AppConfig(autoStart: true)
+        )
+        let secondPlist = LocalDaemonController.makeLaunchAgentPlist(
+            dataDirectory: dataDirectory,
+            serviceLabel: "io.shiguanghuxian.codex-proxy",
+            daemonBinaryPath: "/Applications/AI Coding Proxy.app/Contents/MacOS/codex-proxyd",
+            daemonBinaryFingerprint: "second-fingerprint",
+            stdoutPath: "/tmp/codex-proxy.out.log",
+            stderrPath: "/tmp/codex-proxy.err.log",
+            config: AppConfig(autoStart: true)
+        )
+
+        XCTAssertEqual(firstPlist, repeatedFirstPlist)
+        XCTAssertNotEqual(firstPlist, secondPlist)
+        XCTAssertTrue(firstPlist.contains("CODEX_PROXY_DAEMON_BINARY_SHA256"))
+        XCTAssertTrue(firstPlist.contains("first-fingerprint"))
+        XCTAssertFalse(firstPlist.contains("CODEX_PROXY_DAEMON_RELEASE_VERSION"))
+    }
+
+    func testTransientBootstrapInputOutputErrorRecognitionIsNarrow() {
+        XCTAssertTrue(
+            LocalDaemonController.isTransientBootstrapInputOutputError(
+                """
+                Bootstrap failed: 5: Input/output error
+                Try re-running the command as root for richer errors.
+                """
+            )
+        )
+        XCTAssertFalse(
+            LocalDaemonController.isTransientBootstrapInputOutputError(
+                "Bootout failed: 5: Input/output error"
+            )
+        )
+        XCTAssertFalse(
+            LocalDaemonController.isTransientBootstrapInputOutputError(
+                "Bootstrap failed: 37: Operation already in progress"
+            )
+        )
+        XCTAssertFalse(
+            LocalDaemonController.isTransientBootstrapInputOutputError(
+                "Bootstrap failed: 5: Permission denied"
+            )
+        )
+    }
+
+    @MainActor
+    func testLoadAllSuppressesRecoveredTransientBootstrapFailure() async {
+        let transientBootstrapFailure = """
+        Bootstrap failed: 5: Input/output error
+        Try re-running the command as root for richer errors.
+        """
+        let launchctlProbe = LaunchctlOperationProbe(bootstrapFailureMessages: [transientBootstrapFailure])
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            getStatusHandler: { Self.makeProxyStatus(running: true) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            getSettingsHandler: { AppConfig(autoStart: true) },
+            getManagedProxySnapshotHandler: { ManagedProxySnapshot() },
+            proxyAPIKeyUsageHandler: { _ in ProxyAPIKeyUsageReport(from: 0, to: 0) }
+        )
+        let daemon = LocalDaemonController(
+            installLaunchAgentHandler: { _ in true },
+            launchctlHandler: { arguments, ignoreFailure in
+                try await launchctlProbe.run(arguments: arguments, ignoreFailure: ignoreFailure)
+            },
+            healthCheckHandler: { _ in true },
+            sleepHandler: { _ in },
+            statusHandler: { Self.makeLocalServiceStatus(running: true, launchctlState: "running") }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+
+        await model.loadAll()
+
+        let launchctlCalls = await launchctlProbe.recordedCalls()
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertEqual(launchctlCalls.map { $0.arguments.first }, ["bootout", "bootstrap", "kickstart"])
+        XCTAssertEqual(launchctlCalls.first?.ignoreFailure, true)
+        XCTAssertEqual(Array(launchctlCalls.last?.arguments.prefix(2) ?? []), ["kickstart", "-k"])
+    }
+
+    @MainActor
+    func testPrepareForLaunchSuppressesTransientBootstrapFailureWhenLaunchctlReportsRunning() async {
+        let transientBootstrapFailure = """
+        Bootstrap failed: 5: Input/output error
+        Try re-running the command as root for richer errors.
+        """
+        let launchctlProbe = LaunchctlOperationProbe(bootstrapFailureMessages: [transientBootstrapFailure])
+        let daemon = LocalDaemonController(
+            installLaunchAgentHandler: { _ in true },
+            launchctlHandler: { arguments, ignoreFailure in
+                try await launchctlProbe.run(arguments: arguments, ignoreFailure: ignoreFailure)
+            },
+            healthCheckHandler: { _ in false },
+            sleepHandler: { _ in },
+            statusHandler: { Self.makeLocalServiceStatus(running: true, launchctlState: "running") }
+        )
+
+        do {
+            try await daemon.prepareForLaunch(config: AppConfig(autoStart: true))
+        } catch {
+            XCTFail("Expected launchctl running state to recover transient bootstrap failure, got \(error).")
+        }
+
+        let launchctlCalls = await launchctlProbe.recordedCalls()
+        XCTAssertEqual(launchctlCalls.map { $0.arguments.first }, ["bootout", "bootstrap", "kickstart"])
+        XCTAssertEqual(Array(launchctlCalls.last?.arguments.prefix(2) ?? []), ["kickstart", "-k"])
+    }
+
+    @MainActor
+    func testPrepareForLaunchRethrowsTransientBootstrapFailureWhenServiceDoesNotRecover() async {
+        let transientBootstrapFailure = """
+        Bootstrap failed: 5: Input/output error
+        Try re-running the command as root for richer errors.
+        """
+        let launchctlProbe = LaunchctlOperationProbe(
+            bootstrapFailureMessages: [transientBootstrapFailure, transientBootstrapFailure]
+        )
+        let daemon = LocalDaemonController(
+            installLaunchAgentHandler: { _ in true },
+            launchctlHandler: { arguments, ignoreFailure in
+                try await launchctlProbe.run(arguments: arguments, ignoreFailure: ignoreFailure)
+            },
+            healthCheckHandler: { _ in false },
+            sleepHandler: { _ in },
+            statusHandler: { Self.makeLocalServiceStatus(running: false, launchctlState: "not_registered") }
+        )
+
+        do {
+            try await daemon.prepareForLaunch(config: AppConfig(autoStart: true))
+            XCTFail("Expected the unrecovered transient bootstrap failure to be rethrown.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, transientBootstrapFailure)
+        }
+
+        let launchctlCalls = await launchctlProbe.recordedCalls()
+        XCTAssertEqual(launchctlCalls.map { $0.arguments.first }, ["bootstrap", "bootstrap"])
+    }
+
+    @MainActor
+    func testLoadAllPreparesLaunchConfigurationWithoutPreservingRunningService() async {
+        let probe = DaemonOperationProbe(running: true)
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            getStatusHandler: { await probe.proxyStatus() },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            getSettingsHandler: { AppConfig(autoStart: true) },
+            getManagedProxySnapshotHandler: { ManagedProxySnapshot() },
+            proxyAPIKeyUsageHandler: { _ in ProxyAPIKeyUsageReport(from: 0, to: 0) }
+        )
+        let daemon = LocalDaemonController(
+            applyLaunchConfigurationHandler: { _, preserveRunningService in
+                await probe.recordApply(preserveRunningService: preserveRunningService)
+                return .appliedNow
+            },
+            statusHandler: { await probe.localStatus() }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+
+        await model.loadAll()
+
+        let preserveFlags = await probe.applyPreserveFlags()
+        XCTAssertEqual(preserveFlags, [false])
+        XCTAssertTrue(model.banners.isEmpty)
+    }
+
     @MainActor
     func testSaveSettingsPublishesRestartRequiredWarningWithoutStoppingRunningService() async {
         let probe = DaemonOperationProbe(running: true)
@@ -18376,6 +18816,37 @@ private final class ProxyPublicAPIClientMockURLProtocol: URLProtocol, @unchecked
     }
 
     override func stopLoading() {}
+}
+
+private struct LaunchctlCall: Equatable {
+    let arguments: [String]
+    let ignoreFailure: Bool
+}
+
+private actor LaunchctlOperationProbe {
+    private var calls: [LaunchctlCall] = []
+    private var bootstrapFailureMessages: [String]
+
+    init(bootstrapFailureMessages: [String] = []) {
+        self.bootstrapFailureMessages = bootstrapFailureMessages
+    }
+
+    func run(arguments: [String], ignoreFailure: Bool) throws -> String {
+        self.calls.append(LaunchctlCall(arguments: arguments, ignoreFailure: ignoreFailure))
+        guard arguments.first == "bootstrap", self.bootstrapFailureMessages.isEmpty == false else {
+            return ""
+        }
+
+        let message = self.bootstrapFailureMessages.removeFirst()
+        if ignoreFailure {
+            return message
+        }
+        throw ProxyError.message(message)
+    }
+
+    func recordedCalls() -> [LaunchctlCall] {
+        self.calls
+    }
 }
 
 private actor DaemonOperationProbe {

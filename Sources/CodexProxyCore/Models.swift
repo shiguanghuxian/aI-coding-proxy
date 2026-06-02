@@ -353,6 +353,199 @@ public struct ProxyAPIKeyRecord: Codable, Sendable, Equatable, Identifiable, Has
     }
 }
 
+public enum ProjectRouteClient: String, Codable, Sendable, Equatable, CaseIterable, Hashable {
+    case codex
+    case claudeCode = "claude_code"
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value = ProjectRouteClient(rawValue: raw) {
+            self = value
+            return
+        }
+        switch raw.lowercased() {
+        case "claudecode", "claude_code":
+            self = .claudeCode
+        default:
+            self = .codex
+        }
+    }
+}
+
+public enum ClaudeProjectSettingsScope: String, Codable, Sendable, Equatable, CaseIterable, Hashable {
+    case shared
+    case local
+}
+
+public struct CodexProjectRouteRule: Codable, Sendable, Equatable, Identifiable, Hashable {
+    public var id: String
+    public var client: ProjectRouteClient
+    public var claudeSettingsScope: ClaudeProjectSettingsScope
+    public var label: String
+    public var projectPath: String
+    public var routeModel: String
+    public var targetModel: String
+    public var proxyAPIKeyID: String
+    public var enabled: Bool
+    public var createdAt: Int64
+
+    public init(
+        id: String = UUID().uuidString,
+        client: ProjectRouteClient = .codex,
+        claudeSettingsScope: ClaudeProjectSettingsScope = .local,
+        label: String = "",
+        projectPath: String = "",
+        routeModel: String = "",
+        targetModel: String = "",
+        proxyAPIKeyID: String = "",
+        enabled: Bool = true,
+        createdAt: Int64 = Helpers.now()
+    ) {
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = normalizedID.isEmpty ? UUID().uuidString : normalizedID
+        self.client = client
+        self.claudeSettingsScope = claudeSettingsScope
+        self.label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.projectPath = Self.normalizedProjectPath(projectPath)
+        self.routeModel = routeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.targetModel = targetModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.proxyAPIKeyID = proxyAPIKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.enabled = enabled
+        self.createdAt = createdAt
+    }
+
+    public var isComplete: Bool {
+        self.projectPath.isEmpty == false
+            && self.routeModel.isEmpty == false
+            && self.targetModel.isEmpty == false
+            && self.proxyAPIKeyID.isEmpty == false
+    }
+
+    public static func normalizedProjectPath(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return "" }
+        return (trimmed as NSString).expandingTildeInPath
+    }
+
+    public static func normalizedRules(_ rules: [CodexProjectRouteRule]) -> [CodexProjectRouteRule] {
+        var order: [String] = []
+        var deduped: [String: CodexProjectRouteRule] = [:]
+
+        for rawRule in rules {
+            let rule = CodexProjectRouteRule(
+                id: rawRule.id,
+                client: rawRule.client,
+                claudeSettingsScope: rawRule.claudeSettingsScope,
+                label: rawRule.label,
+                projectPath: rawRule.projectPath,
+                routeModel: rawRule.routeModel,
+                targetModel: rawRule.targetModel,
+                proxyAPIKeyID: rawRule.proxyAPIKeyID,
+                enabled: rawRule.enabled,
+                createdAt: rawRule.createdAt
+            )
+            guard rule.isComplete else { continue }
+            let dedupeKey = "\(rule.client.rawValue):\(rule.routeModel)"
+            if deduped[dedupeKey] == nil {
+                order.append(dedupeKey)
+            }
+            deduped[dedupeKey] = rule
+        }
+
+        return order.compactMap { deduped[$0] }
+    }
+
+    public static func generatedRouteModel(
+        label: String = "",
+        projectPath: String = "",
+        client: ProjectRouteClient = .codex
+    ) -> String {
+        let source = label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? URL(fileURLWithPath: Self.normalizedProjectPath(projectPath)).lastPathComponent
+            : label
+        let allowedSlugScalars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789")
+        let slug = source
+            .lowercased()
+            .unicodeScalars
+            .map { allowedSlugScalars.contains($0) ? Character($0) : "-" }
+            .reduce(into: "") { partial, character in
+                if character == "-", partial.last == "-" { return }
+                partial.append(character)
+            }
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let suffix = Helpers.randomToken(length: 6).lowercased()
+        let prefix = client == .claudeCode ? "claude-cp-route" : "cp-route"
+        return "\(prefix)-\(slug.isEmpty ? "project" : slug)-\(suffix)"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case client
+        case claudeSettingsScope
+        case claudeSettingsScopeSnake = "claude_settings_scope"
+        case label
+        case projectPath
+        case projectPathSnake = "project_path"
+        case routeModel
+        case routeModelSnake = "route_model"
+        case targetModel
+        case targetModelSnake = "target_model"
+        case proxyAPIKeyID
+        case proxyAPIKeyIDAlt = "proxyApiKeyId"
+        case proxyAPIKeyIDSnake = "proxy_api_key_id"
+        case enabled
+        case createdAt
+        case createdAtUnix
+        case createdAtSnake = "created_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            client: try container.decodeIfPresent(ProjectRouteClient.self, forKey: .client)
+                ?? .codex,
+            claudeSettingsScope: try container.decodeIfPresent(ClaudeProjectSettingsScope.self, forKey: .claudeSettingsScope)
+                ?? container.decodeIfPresent(ClaudeProjectSettingsScope.self, forKey: .claudeSettingsScopeSnake)
+                ?? .local,
+            label: try container.decodeIfPresent(String.self, forKey: .label) ?? "",
+            projectPath: try container.decodeIfPresent(String.self, forKey: .projectPath)
+                ?? container.decodeIfPresent(String.self, forKey: .projectPathSnake)
+                ?? "",
+            routeModel: try container.decodeIfPresent(String.self, forKey: .routeModel)
+                ?? container.decodeIfPresent(String.self, forKey: .routeModelSnake)
+                ?? "",
+            targetModel: try container.decodeIfPresent(String.self, forKey: .targetModel)
+                ?? container.decodeIfPresent(String.self, forKey: .targetModelSnake)
+                ?? "",
+            proxyAPIKeyID: try container.decodeIfPresent(String.self, forKey: .proxyAPIKeyID)
+                ?? container.decodeIfPresent(String.self, forKey: .proxyAPIKeyIDAlt)
+                ?? container.decodeIfPresent(String.self, forKey: .proxyAPIKeyIDSnake)
+                ?? "",
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            createdAt: try container.decodeIfPresent(Int64.self, forKey: .createdAt)
+                ?? container.decodeIfPresent(Int64.self, forKey: .createdAtUnix)
+                ?? container.decodeIfPresent(Int64.self, forKey: .createdAtSnake)
+                ?? Helpers.now()
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.client, forKey: .client)
+        try container.encode(self.claudeSettingsScope, forKey: .claudeSettingsScope)
+        try container.encode(self.label, forKey: .label)
+        try container.encode(self.projectPath, forKey: .projectPath)
+        try container.encode(self.routeModel, forKey: .routeModel)
+        try container.encode(self.targetModel, forKey: .targetModel)
+        try container.encode(self.proxyAPIKeyID, forKey: .proxyAPIKeyIDAlt)
+        try container.encode(self.enabled, forKey: .enabled)
+        try container.encode(self.createdAt, forKey: .createdAt)
+    }
+}
+
 public struct GeminiOAuthConfig: Codable, Sendable, Equatable {
     public var clientID: String
     public var clientSecret: String
@@ -1297,6 +1490,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
     public var proxyAPIKey: String
     public var proxyAPIKeys: [ProxyAPIKeyRecord]
     public var primaryProxyAPIKeyID: String?
+    public var codexProjectRoutes: [CodexProjectRouteRule]
     public var adminToken: String
     public var statsRetentionDays: Int
     public var remoteHosts: [RemoteHostConfig]
@@ -1320,6 +1514,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         proxyAPIKey: String = "",
         proxyAPIKeys: [ProxyAPIKeyRecord] = [],
         primaryProxyAPIKeyID: String? = nil,
+        codexProjectRoutes: [CodexProjectRouteRule] = [],
         adminToken: String = "",
         statsRetentionDays: Int = 90,
         remoteHosts: [RemoteHostConfig] = [],
@@ -1342,6 +1537,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.proxyAPIKey = proxyAPIKey
         self.proxyAPIKeys = proxyAPIKeys
         self.primaryProxyAPIKeyID = primaryProxyAPIKeyID
+        self.codexProjectRoutes = codexProjectRoutes
         self.adminToken = adminToken
         self.statsRetentionDays = statsRetentionDays
         self.remoteHosts = remoteHosts
@@ -1366,6 +1562,8 @@ public struct AppConfig: Codable, Sendable, Equatable {
         case proxyAPIKey = "proxyApiKey"
         case proxyAPIKeys = "proxyApiKeys"
         case primaryProxyAPIKeyID = "primaryProxyApiKeyId"
+        case codexProjectRoutes
+        case codexProjectRoutesSnake = "codex_project_routes"
         case adminToken
         case statsRetentionDays
         case remoteHosts
@@ -1399,6 +1597,9 @@ public struct AppConfig: Codable, Sendable, Equatable {
             proxyAPIKey: try container.decodeIfPresent(String.self, forKey: .proxyAPIKey) ?? "",
             proxyAPIKeys: try container.decodeIfPresent([ProxyAPIKeyRecord].self, forKey: .proxyAPIKeys) ?? [],
             primaryProxyAPIKeyID: try container.decodeIfPresent(String.self, forKey: .primaryProxyAPIKeyID),
+            codexProjectRoutes: try container.decodeIfPresent([CodexProjectRouteRule].self, forKey: .codexProjectRoutes)
+                ?? container.decodeIfPresent([CodexProjectRouteRule].self, forKey: .codexProjectRoutesSnake)
+                ?? [],
             adminToken: try container.decodeIfPresent(String.self, forKey: .adminToken) ?? "",
             statsRetentionDays: try container.decodeIfPresent(Int.self, forKey: .statsRetentionDays) ?? 90,
             remoteHosts: try container.decodeIfPresent([RemoteHostConfig].self, forKey: .remoteHosts) ?? [],
@@ -1438,6 +1639,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
         try container.encode(self.proxyAPIKey, forKey: .proxyAPIKey)
         try container.encode(self.proxyAPIKeys, forKey: .proxyAPIKeys)
         try container.encodeIfPresent(self.primaryProxyAPIKeyID, forKey: .primaryProxyAPIKeyID)
+        try container.encode(self.codexProjectRoutes, forKey: .codexProjectRoutes)
         try container.encode(self.adminToken, forKey: .adminToken)
         try container.encode(self.statsRetentionDays, forKey: .statsRetentionDays)
         try container.encode(self.remoteHosts, forKey: .remoteHosts)
@@ -1475,6 +1677,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
             proxyAPIKey: normalizedPrimaryKey,
             proxyAPIKeys: normalizedProxyKeys,
             primaryProxyAPIKeyID: normalizedPrimaryKeyID,
+            codexProjectRoutes: Self.normalizedCodexProjectRoutes(self.codexProjectRoutes),
             adminToken: self.adminToken,
             statsRetentionDays: self.statsRetentionDays,
             remoteHosts: self.remoteHosts,
@@ -1510,6 +1713,38 @@ public struct AppConfig: Codable, Sendable, Equatable {
         self.normalizedModelRoutingConfig().proxyAPIKeys.filter(\.enabled)
     }
 
+    public var enabledCodexProjectRoutes: [CodexProjectRouteRule] {
+        self.normalizedModelRoutingConfig().codexProjectRoutes.filter { $0.enabled && $0.isComplete }
+    }
+
+    public func codexProjectRoute(for routeModel: String) -> CodexProjectRouteRule? {
+        self.projectRoute(for: routeModel, client: .codex)
+    }
+
+    public func projectRoute(for routeModel: String, client: ProjectRouteClient) -> CodexProjectRouteRule? {
+        let normalizedRouteModel = routeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedRouteModel.isEmpty == false else { return nil }
+        return self.enabledCodexProjectRoutes.first { $0.client == client && $0.routeModel == normalizedRouteModel }
+    }
+
+    public func codexProjectRoute(forProjectPath projectPath: String) -> CodexProjectRouteRule? {
+        let normalizedProjectPath = CodexProjectRouteRule.normalizedProjectPath(projectPath)
+        guard normalizedProjectPath.isEmpty == false else { return nil }
+        var bestRule: CodexProjectRouteRule?
+        var bestPathLength = -1
+        for rule in self.enabledCodexProjectRoutes where rule.client == .codex {
+            guard Self.projectPath(normalizedProjectPath, isInside: rule.projectPath) else {
+                continue
+            }
+            let pathLength = rule.projectPath.count
+            if pathLength > bestPathLength {
+                bestRule = rule
+                bestPathLength = pathLength
+            }
+        }
+        return bestRule
+    }
+
     public static func generatedProxyAPIKey() -> String {
         "sk-local-" + Helpers.randomToken(length: 36)
     }
@@ -1517,6 +1752,16 @@ public struct AppConfig: Codable, Sendable, Equatable {
     private static func normalizedAnthropicTargetModel(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? Self.defaultAnthropicTargetModel : trimmed
+    }
+
+    private static func projectPath(_ candidate: String, isInside projectPath: String) -> Bool {
+        let normalizedProjectPath = CodexProjectRouteRule.normalizedProjectPath(projectPath)
+        guard normalizedProjectPath.isEmpty == false else { return false }
+        if candidate == normalizedProjectPath {
+            return true
+        }
+        let prefix = normalizedProjectPath.hasSuffix("/") ? normalizedProjectPath : normalizedProjectPath + "/"
+        return candidate.hasPrefix(prefix)
     }
 
     private static func normalizedAnthropicModelMappings(
@@ -1580,6 +1825,12 @@ public struct AppConfig: Codable, Sendable, Equatable {
         }
 
         return normalized
+    }
+
+    private static func normalizedCodexProjectRoutes(
+        _ routes: [CodexProjectRouteRule]
+    ) -> [CodexProjectRouteRule] {
+        CodexProjectRouteRule.normalizedRules(routes)
     }
 
     private static func normalizedPrimaryProxyAPIKeyID(
@@ -1837,6 +2088,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
     public var authMode: AccountAuthMode
     public var providerPreset: OpenAICompatibleProviderPreset
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+    public var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     public var upstreamBaseURL: String?
     public var managedProxyNodeName: String?
     public var modelRouting: AccountModelRoutingConfig?
@@ -1868,6 +2120,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         authMode: AccountAuthMode = .chatGPT,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto,
         upstreamBaseURL: String? = nil,
         managedProxyNodeName: String? = nil,
         modelRouting: AccountModelRoutingConfig? = nil,
@@ -1898,6 +2151,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         self.authMode = authMode
         self.providerPreset = providerPreset
         self.upstreamAdapter = upstreamAdapter
+        self.chatCompatibilityProfile = chatCompatibilityProfile
         self.upstreamBaseURL = upstreamBaseURL
         self.managedProxyNodeName = Self.normalizedManagedProxyNodeName(managedProxyNodeName)
         self.modelRouting = Self.normalizedModelRouting(modelRouting)
@@ -1933,6 +2187,8 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         case providerPresetSnake = "provider_preset"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
+        case chatCompatibilityProfile
+        case chatCompatibilityProfileSnake = "chat_compatibility_profile"
         case upstreamBaseURL
         case upstreamBaseUrl
         case managedProxyNodeName
@@ -1977,6 +2233,9 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
                 ?? .genericOpenAICompatible,
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
+            chatCompatibilityProfile: try container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfile)
+                ?? container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfileSnake)
+                ?? .auto,
             upstreamBaseURL: try container.decodeIfPresent(String.self, forKey: .upstreamBaseURL)
                 ?? container.decodeIfPresent(String.self, forKey: .upstreamBaseUrl),
             managedProxyNodeName: try container.decodeIfPresent(String.self, forKey: .managedProxyNodeName)
@@ -2020,6 +2279,7 @@ public struct AccountSummary: Codable, Sendable, Identifiable, Equatable {
         try container.encode(self.authMode, forKey: .authMode)
         try container.encode(self.providerPreset, forKey: .providerPreset)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
+        try container.encode(self.chatCompatibilityProfile, forKey: .chatCompatibilityProfile)
         try container.encodeIfPresent(self.upstreamBaseURL, forKey: .upstreamBaseURL)
         try container.encodeIfPresent(self.managedProxyNodeName, forKey: .managedProxyNodeName)
         try container.encodeIfPresent(self.modelRouting, forKey: .modelRouting)
@@ -3345,6 +3605,9 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
     public var model: String
     public var actualModel: String?
     public var reasoningEffort: String?
+    public var projectRouteID: String?
+    public var projectRouteLabel: String?
+    public var effectiveProxyAPIKeyID: String?
     public var apiKey: String
     public var accountKey: String
     public var accountLabel: String
@@ -3367,6 +3630,9 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         model: String,
         actualModel: String? = nil,
         reasoningEffort: String? = nil,
+        projectRouteID: String? = nil,
+        projectRouteLabel: String? = nil,
+        effectiveProxyAPIKeyID: String? = nil,
         apiKey: String,
         accountKey: String,
         accountLabel: String,
@@ -3388,6 +3654,9 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         self.model = model
         self.actualModel = actualModel
         self.reasoningEffort = reasoningEffort
+        self.projectRouteID = Self.cleanedOptional(projectRouteID)
+        self.projectRouteLabel = Self.cleanedOptional(projectRouteLabel)
+        self.effectiveProxyAPIKeyID = Self.cleanedOptional(effectiveProxyAPIKeyID)
         self.apiKey = apiKey
         self.accountKey = accountKey
         self.accountLabel = accountLabel
@@ -3416,6 +3685,14 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         case actual_model = "actual_model"
         case reasoningEffort
         case reasoning_effort = "reasoning_effort"
+        case projectRouteID
+        case projectRouteIDAlt = "projectRouteId"
+        case project_route_id
+        case projectRouteLabel
+        case projectRouteLabelSnake = "project_route_label"
+        case effectiveProxyAPIKeyID
+        case effectiveProxyAPIKeyIDAlt = "effectiveProxyApiKeyId"
+        case effective_proxy_api_key_id
         case apiKey
         case apiKeyValue
         case accountKey
@@ -3452,6 +3729,14 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
                 ?? container.decodeIfPresent(String.self, forKey: .actual_model),
             reasoningEffort: try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
                 ?? container.decodeIfPresent(String.self, forKey: .reasoning_effort),
+            projectRouteID: try container.decodeIfPresent(String.self, forKey: .projectRouteID)
+                ?? container.decodeIfPresent(String.self, forKey: .projectRouteIDAlt)
+                ?? container.decodeIfPresent(String.self, forKey: .project_route_id),
+            projectRouteLabel: try container.decodeIfPresent(String.self, forKey: .projectRouteLabel)
+                ?? container.decodeIfPresent(String.self, forKey: .projectRouteLabelSnake),
+            effectiveProxyAPIKeyID: try container.decodeIfPresent(String.self, forKey: .effectiveProxyAPIKeyID)
+                ?? container.decodeIfPresent(String.self, forKey: .effectiveProxyAPIKeyIDAlt)
+                ?? container.decodeIfPresent(String.self, forKey: .effective_proxy_api_key_id),
             apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey)
                 ?? container.decodeIfPresent(String.self, forKey: .apiKeyValue)
                 ?? "",
@@ -3482,6 +3767,9 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         try container.encode(self.model, forKey: .model)
         try container.encodeIfPresent(self.actualModel, forKey: .actualModel)
         try container.encodeIfPresent(self.reasoningEffort, forKey: .reasoningEffort)
+        try container.encodeIfPresent(self.projectRouteID, forKey: .projectRouteIDAlt)
+        try container.encodeIfPresent(self.projectRouteLabel, forKey: .projectRouteLabel)
+        try container.encodeIfPresent(self.effectiveProxyAPIKeyID, forKey: .effectiveProxyAPIKeyIDAlt)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.accountKey, forKey: .accountKey)
         try container.encode(self.accountLabel, forKey: .accountLabel)
@@ -3494,6 +3782,11 @@ public struct RequestLogEntry: Codable, Sendable, Equatable, Identifiable {
         try container.encode(self.failureCategory, forKey: .failureCategory)
         try container.encodeIfPresent(self.errorSummary, forKey: .errorSummary)
         try container.encode(self.hasDiagnosticRequestBody, forKey: .hasDiagnosticRequestBody)
+    }
+
+    private static func cleanedOptional(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -3911,6 +4204,7 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
     public var expiresAt: Int64
     public var status: DiagnosticRequestBodyCaptureStatus
     public var errorSummary: String?
+    public var metadata: [String: String]
 
     public init(
         id: Int64 = 0,
@@ -3927,7 +4221,8 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
         byteCount: Int = 0,
         expiresAt: Int64 = Helpers.now(),
         status: DiagnosticRequestBodyCaptureStatus = .captured,
-        errorSummary: String? = nil
+        errorSummary: String? = nil,
+        metadata: [String: String] = [:]
     ) {
         self.id = id
         self.requestLogID = requestLogID
@@ -3947,6 +4242,12 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
         self.status = status
         let normalizedError = errorSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.errorSummary = normalizedError.isEmpty ? nil : normalizedError
+        self.metadata = metadata.reduce(into: [:]) { partial, item in
+            let key = item.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = item.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard key.isEmpty == false, value.isEmpty == false else { return }
+            partial[key] = value
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -3969,6 +4270,7 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
         case expiresAt
         case status
         case errorSummary
+        case metadata
     }
 
     public init(from decoder: Decoder) throws {
@@ -3994,7 +4296,8 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
             byteCount: try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0,
             expiresAt: try container.decodeIfPresent(Int64.self, forKey: .expiresAt) ?? Helpers.now(),
             status: try container.decodeIfPresent(DiagnosticRequestBodyCaptureStatus.self, forKey: .status) ?? .captured,
-            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary)
+            errorSummary: try container.decodeIfPresent(String.self, forKey: .errorSummary),
+            metadata: try container.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
         )
     }
 
@@ -4015,6 +4318,9 @@ public struct DiagnosticRequestBodyEntry: Codable, Sendable, Equatable, Identifi
         try container.encode(self.expiresAt, forKey: .expiresAt)
         try container.encode(self.status, forKey: .status)
         try container.encodeIfPresent(self.errorSummary, forKey: .errorSummary)
+        if self.metadata.isEmpty == false {
+            try container.encode(self.metadata, forKey: .metadata)
+        }
     }
 }
 
@@ -4640,12 +4946,45 @@ public enum ManualAPIKeyUpstreamAdapter: String, Codable, Sendable, Equatable, H
     case chatCompletions = "chat_completions"
 }
 
+public enum ChatCompletionsCompatibilityProfile: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
+    case auto
+    case generic
+    case deepSeekV4Thinking = "deep_seek_v4_thinking"
+    case deepSeekLegacyReasoner = "deep_seek_legacy_reasoner"
+    case mimoStrict = "mimo_strict"
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case Self.auto.rawValue:
+            self = .auto
+        case Self.generic.rawValue:
+            self = .generic
+        case Self.deepSeekV4Thinking.rawValue, "deepSeekV4Thinking":
+            self = .deepSeekV4Thinking
+        case Self.deepSeekLegacyReasoner.rawValue, "deepSeekLegacyReasoner":
+            self = .deepSeekLegacyReasoner
+        case Self.mimoStrict.rawValue, "mimoStrict":
+            self = .mimoStrict
+        default:
+            self = .auto
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(self.rawValue)
+    }
+}
+
 public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
     public var label: String?
     public var providerPreset: OpenAICompatibleProviderPreset
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+    public var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -4657,6 +4996,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto,
         apiKey: String,
         enabled: Bool = true,
         automaticCooldownDisabled: Bool = false,
@@ -4667,6 +5007,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
+        self.chatCompatibilityProfile = chatCompatibilityProfile
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -4684,6 +5025,8 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
+        case chatCompatibilityProfile
+        case chatCompatibilityProfileSnake = "chat_compatibility_profile"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -4706,6 +5049,9 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
+            chatCompatibilityProfile: try container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfile)
+                ?? container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfileSnake)
+                ?? .auto,
             apiKey: try container.decode(String.self, forKey: .apiKey),
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -4724,6 +5070,7 @@ public struct ManualAPIKeyAccountInput: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
+        try container.encode(self.chatCompatibilityProfile, forKey: .chatCompatibilityProfile)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -4737,6 +5084,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+    public var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -4748,6 +5096,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto,
         apiKey: String,
         enabled: Bool = true,
         automaticCooldownDisabled: Bool = false,
@@ -4758,6 +5107,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
+        self.chatCompatibilityProfile = chatCompatibilityProfile
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -4775,6 +5125,8 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
+        case chatCompatibilityProfile
+        case chatCompatibilityProfileSnake = "chat_compatibility_profile"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -4797,6 +5149,9 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
+            chatCompatibilityProfile: try container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfile)
+                ?? container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfileSnake)
+                ?? .auto,
             apiKey: try container.decode(String.self, forKey: .apiKey),
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -4815,6 +5170,7 @@ public struct UpdateManualAPIKeyAccountRequest: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
+        try container.encode(self.chatCompatibilityProfile, forKey: .chatCompatibilityProfile)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -4828,6 +5184,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
     public var baseURL: String
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+    public var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     public var apiKey: String
     public var enabled: Bool
     public var automaticCooldownDisabled: Bool
@@ -4839,6 +5196,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         baseURL: String,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto,
         apiKey: String,
         enabled: Bool,
         automaticCooldownDisabled: Bool = false,
@@ -4849,6 +5207,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
+        self.chatCompatibilityProfile = chatCompatibilityProfile
         self.apiKey = apiKey
         self.enabled = enabled
         self.automaticCooldownDisabled = automaticCooldownDisabled
@@ -4866,6 +5225,8 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         case upstreamBaseURLModeSnake = "upstream_base_url_mode"
         case upstreamAdapter
         case upstreamAdapterSnake = "upstream_adapter"
+        case chatCompatibilityProfile
+        case chatCompatibilityProfileSnake = "chat_compatibility_profile"
         case apiKey
         case enabled
         case automaticCooldownDisabled
@@ -4888,6 +5249,9 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
                 ?? container.decodeIfPresent(ManualAPIKeyBaseURLMode.self, forKey: .upstreamBaseURLModeSnake),
             upstreamAdapter: try container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapter)
                 ?? container.decodeIfPresent(ManualAPIKeyUpstreamAdapter.self, forKey: .upstreamAdapterSnake),
+            chatCompatibilityProfile: try container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfile)
+                ?? container.decodeIfPresent(ChatCompletionsCompatibilityProfile.self, forKey: .chatCompatibilityProfileSnake)
+                ?? .auto,
             apiKey: try container.decodeIfPresent(String.self, forKey: .apiKey) ?? "",
             enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
             automaticCooldownDisabled: try container.decodeIfPresent(Bool.self, forKey: .automaticCooldownDisabled)
@@ -4906,6 +5270,7 @@ public struct ManualAPIKeyAccountDetails: Codable, Sendable, Equatable {
         try container.encode(self.baseURL, forKey: .baseURL)
         try container.encodeIfPresent(self.baseURLMode, forKey: .baseURLMode)
         try container.encodeIfPresent(self.upstreamAdapter, forKey: .upstreamAdapter)
+        try container.encode(self.chatCompatibilityProfile, forKey: .chatCompatibilityProfile)
         try container.encode(self.apiKey, forKey: .apiKey)
         try container.encode(self.enabled, forKey: .enabled)
         try container.encode(self.automaticCooldownDisabled, forKey: .automaticCooldownDisabled)
@@ -5424,6 +5789,9 @@ public struct ProxyRequestTrace: Sendable {
     public var model: String
     public var actualModel: String?
     public var reasoningEffort: String?
+    public var projectRouteID: String?
+    public var projectRouteLabel: String?
+    public var effectiveProxyAPIKeyID: String?
     public var success: Bool
     public var latencyMS: Int64
     public var usage: UpstreamUsage
@@ -5440,6 +5808,9 @@ public struct ProxyRequestTrace: Sendable {
         model: String,
         actualModel: String? = nil,
         reasoningEffort: String? = nil,
+        projectRouteID: String? = nil,
+        projectRouteLabel: String? = nil,
+        effectiveProxyAPIKeyID: String? = nil,
         success: Bool,
         latencyMS: Int64,
         usage: UpstreamUsage = .init(),
@@ -5459,11 +5830,41 @@ public struct ProxyRequestTrace: Sendable {
         self.model = model
         self.actualModel = actualModel
         self.reasoningEffort = reasoningEffort
+        self.projectRouteID = Self.cleanedOptional(projectRouteID)
+        self.projectRouteLabel = Self.cleanedOptional(projectRouteLabel)
+        self.effectiveProxyAPIKeyID = Self.cleanedOptional(effectiveProxyAPIKeyID)
         self.success = success
         self.latencyMS = latencyMS
         self.usage = usage
         self.failureCategory = failureCategory
         self.lastError = lastError
+    }
+
+    public func applyingProjectRoute(_ context: CodexProjectRouteTraceContext?) -> ProxyRequestTrace {
+        guard let context else { return self }
+        var copy = self
+        copy.projectRouteID = context.projectRouteID
+        copy.projectRouteLabel = context.projectRouteLabel
+        copy.effectiveProxyAPIKeyID = context.effectiveProxyAPIKeyID
+        return copy
+    }
+
+    private static func cleanedOptional(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+public struct CodexProjectRouteTraceContext: Sendable, Equatable {
+    public var projectRouteID: String
+    public var projectRouteLabel: String?
+    public var effectiveProxyAPIKeyID: String
+
+    public init(projectRouteID: String, projectRouteLabel: String? = nil, effectiveProxyAPIKeyID: String) {
+        self.projectRouteID = projectRouteID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedLabel = projectRouteLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.projectRouteLabel = normalizedLabel.isEmpty ? nil : normalizedLabel
+        self.effectiveProxyAPIKeyID = effectiveProxyAPIKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -5473,6 +5874,7 @@ public struct ExtractedAuth: Sendable, Equatable {
     public var providerPreset: OpenAICompatibleProviderPreset
     public var baseURLMode: ManualAPIKeyBaseURLMode?
     public var upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+    public var chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     public var principalID: String
     public var accountID: String
     public var accessToken: String
@@ -5488,6 +5890,7 @@ public struct ExtractedAuth: Sendable, Equatable {
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
         upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto,
         principalID: String,
         accountID: String,
         accessToken: String,
@@ -5502,6 +5905,7 @@ public struct ExtractedAuth: Sendable, Equatable {
         self.providerPreset = providerPreset
         self.baseURLMode = baseURLMode
         self.upstreamAdapter = upstreamAdapter
+        self.chatCompatibilityProfile = chatCompatibilityProfile
         self.principalID = principalID
         self.accountID = accountID
         self.accessToken = accessToken

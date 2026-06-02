@@ -13,6 +13,18 @@ public enum ClientConfigBackupReason: String, Codable, Sendable, Equatable {
     case beforeRestore = "before_restore"
 }
 
+private enum ClaudeProjectRouteManagedEnv {
+    static let customModelOption = "ANTHROPIC_CUSTOM_MODEL_OPTION"
+    static let customModelOptionName = "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"
+    static let customModelOptionDescription = "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"
+
+    static let keys: Set<String> = [
+        Self.customModelOption,
+        Self.customModelOptionName,
+        Self.customModelOptionDescription,
+    ]
+}
+
 public enum ClientConfigCurrentKeyKind: String, Codable, Sendable, Equatable {
     case missing
     case matched
@@ -239,6 +251,21 @@ public final class ClientConfigFileService: @unchecked Sendable {
         }
     }
 
+    public func codexProjectConfigURL(projectPath: String) -> URL {
+        let normalizedPath = CodexProjectRouteRule.normalizedProjectPath(projectPath)
+        return URL(fileURLWithPath: normalizedPath, isDirectory: true)
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("config.toml")
+    }
+
+    public func claudeProjectConfigURL(projectPath: String, scope: ClaudeProjectSettingsScope) -> URL {
+        let normalizedPath = CodexProjectRouteRule.normalizedProjectPath(projectPath)
+        let filename = scope == .local ? "settings.local.json" : "settings.json"
+        return URL(fileURLWithPath: normalizedPath, isDirectory: true)
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent(filename)
+    }
+
     public func inspectAll(
         availableProxyAPIKeys: [ProxyAPIKeyRecord]
     ) -> [ClientConfigTarget: ClientConfigInspection] {
@@ -330,6 +357,33 @@ public final class ClientConfigFileService: @unchecked Sendable {
         return ClientConfigPreview(target: target, files: files)
     }
 
+    public func previewCurrentCodexProjectRoute(_ rule: CodexProjectRouteRule) -> ClientConfigPreview {
+        self.previewCurrentProjectRoute(rule)
+    }
+
+    public func previewProposedCodexProjectRoute(_ rule: CodexProjectRouteRule) -> ClientConfigPreview {
+        self.previewProposedProjectRoute(rule)
+    }
+
+    public func previewCurrentProjectRoute(_ rule: CodexProjectRouteRule) -> ClientConfigPreview {
+        ClientConfigPreview(
+            target: rule.client == .codex ? .codex : .claudeCode,
+            files: [self.currentTextSnapshot(url: self.projectRouteConfigURL(rule))]
+        )
+    }
+
+    public func previewProposedProjectRoute(_ rule: CodexProjectRouteRule) -> ClientConfigPreview {
+        let configURL = self.projectRouteConfigURL(rule)
+        return ClientConfigPreview(
+            target: rule.client == .codex ? .codex : .claudeCode,
+            files: [
+                self.proposedTextSnapshot(url: configURL) {
+                    try self.updatedProjectRouteConfigData(url: configURL, rule: rule)
+                },
+            ]
+        )
+    }
+
     public func loadBackupDetail(id: String) throws -> ClientConfigBackupDetail {
         let record = try self.loadBackup(id: id)
         let backupDirectory = self.backupDirectoryURL().appendingPathComponent(record.id, isDirectory: true)
@@ -356,6 +410,70 @@ public final class ClientConfigFileService: @unchecked Sendable {
 
         do {
             try self.writeConfiguration(target: target, desired: desired)
+            return backup
+        } catch let applyError {
+            do {
+                try self.restoreBackupRecord(backup)
+            } catch let rollbackError {
+                throw ProxyError.message(
+                    "\(applyError.localizedDescription)|Rollback failed: \(rollbackError.localizedDescription)"
+                )
+            }
+            throw applyError
+        }
+    }
+
+    @discardableResult
+    public func applyCodexProjectRouteConfiguration(_ rule: CodexProjectRouteRule) throws -> ClientConfigBackupRecord {
+        try self.applyProjectRouteConfiguration(rule)
+    }
+
+    @discardableResult
+    public func clearCodexProjectRouteConfiguration(_ rule: CodexProjectRouteRule) throws -> ClientConfigBackupRecord {
+        try self.clearProjectRouteConfiguration(rule)
+    }
+
+    @discardableResult
+    public func applyProjectRouteConfiguration(_ rule: CodexProjectRouteRule) throws -> ClientConfigBackupRecord {
+        let normalizedRule = try self.normalizedProjectRouteRule(rule)
+        let configURL = self.projectRouteConfigURL(normalizedRule)
+        let backup = try self.createBackup(
+            target: normalizedRule.client == .codex ? .codex : .claudeCode,
+            reason: .beforeApply,
+            proxyAPIKey: nil,
+            urls: [configURL]
+        )
+
+        do {
+            let data = try self.updatedProjectRouteConfigData(url: configURL, rule: normalizedRule)
+            try self.writeFile(configURL, data: data, posixMode: 0o600)
+            return backup
+        } catch let applyError {
+            do {
+                try self.restoreBackupRecord(backup)
+            } catch let rollbackError {
+                throw ProxyError.message(
+                    "\(applyError.localizedDescription)|Rollback failed: \(rollbackError.localizedDescription)"
+                )
+            }
+            throw applyError
+        }
+    }
+
+    @discardableResult
+    public func clearProjectRouteConfiguration(_ rule: CodexProjectRouteRule) throws -> ClientConfigBackupRecord {
+        let normalizedRule = try self.normalizedProjectRouteRule(rule)
+        let configURL = self.projectRouteConfigURL(normalizedRule)
+        let backup = try self.createBackup(
+            target: normalizedRule.client == .codex ? .codex : .claudeCode,
+            reason: .beforeApply,
+            proxyAPIKey: nil,
+            urls: [configURL]
+        )
+
+        do {
+            let data = try self.clearedProjectRouteConfigData(url: configURL, rule: normalizedRule)
+            try self.writeFile(configURL, data: data, posixMode: 0o600)
             return backup
         } catch let applyError {
             do {
@@ -445,6 +563,20 @@ public final class ClientConfigFileService: @unchecked Sendable {
         reason: ClientConfigBackupReason,
         proxyAPIKey: ProxyAPIKeyRecord?
     ) throws -> ClientConfigBackupRecord {
+        try self.createBackup(
+            target: target,
+            reason: reason,
+            proxyAPIKey: proxyAPIKey,
+            urls: self.managedFileURLs(for: target)
+        )
+    }
+
+    private func createBackup(
+        target: ClientConfigTarget,
+        reason: ClientConfigBackupReason,
+        proxyAPIKey: ProxyAPIKeyRecord?,
+        urls: [URL]
+    ) throws -> ClientConfigBackupRecord {
         let root = self.backupDirectoryURL()
         try Helpers.ensureDirectory(root)
 
@@ -456,7 +588,7 @@ public final class ClientConfigFileService: @unchecked Sendable {
         try Helpers.ensureDirectory(directoryURL)
         try Helpers.ensureDirectory(filesDirectoryURL)
 
-        let captured = try self.captureManagedFiles(for: target)
+        let captured = try self.captureManagedFiles(urls: urls)
         var entries: [ClientConfigBackupRecord.FileEntry] = []
 
         for (index, file) in captured.enumerated() {
@@ -610,7 +742,11 @@ public final class ClientConfigFileService: @unchecked Sendable {
     }
 
     private func captureManagedFiles(for target: ClientConfigTarget) throws -> [CapturedManagedFile] {
-        try self.managedFileURLs(for: target).map { url in
+        try self.captureManagedFiles(urls: self.managedFileURLs(for: target))
+    }
+
+    private func captureManagedFiles(urls: [URL]) throws -> [CapturedManagedFile] {
+        try urls.map { url in
             let exists = FileManager.default.fileExists(atPath: url.path)
             let attributes = exists ? (try? FileManager.default.attributesOfItem(atPath: url.path)) : nil
             let data = exists ? try Data(contentsOf: url) : nil
@@ -710,6 +846,37 @@ public final class ClientConfigFileService: @unchecked Sendable {
 
         try self.writeFile(envURL, data: envData, posixMode: 0o600)
         try self.writeFile(settingsURL, data: settingsData, posixMode: 0o600)
+    }
+
+    private func normalizedProjectRouteRule(_ rule: CodexProjectRouteRule) throws -> CodexProjectRouteRule {
+        let normalizedRule = CodexProjectRouteRule(
+            id: rule.id,
+            client: rule.client,
+            claudeSettingsScope: rule.claudeSettingsScope,
+            label: rule.label,
+            projectPath: rule.projectPath,
+            routeModel: rule.routeModel,
+            targetModel: rule.targetModel,
+            proxyAPIKeyID: rule.proxyAPIKeyID,
+            enabled: rule.enabled,
+            createdAt: rule.createdAt
+        )
+        guard normalizedRule.projectPath.isEmpty == false else {
+            throw ProxyError.message("项目目录不能为空")
+        }
+        guard normalizedRule.routeModel.isEmpty == false else {
+            throw ProxyError.message("项目路由模型不能为空")
+        }
+        return normalizedRule
+    }
+
+    private func projectRouteConfigURL(_ rule: CodexProjectRouteRule) -> URL {
+        switch rule.client {
+        case .codex:
+            return self.codexProjectConfigURL(projectPath: rule.projectPath)
+        case .claudeCode:
+            return self.claudeProjectConfigURL(projectPath: rule.projectPath, scope: rule.claudeSettingsScope)
+        }
     }
 
     private func readCurrentConfiguration(target: ClientConfigTarget) throws -> ResolvedConfiguration {
@@ -816,6 +983,83 @@ public final class ClientConfigFileService: @unchecked Sendable {
             ]
         )
         return Data(updated.utf8)
+    }
+
+    private func updatedCodexProjectConfigData(url: URL, routeModel: String) throws -> Data {
+        let normalizedRouteModel = routeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedRouteModel.isEmpty == false else {
+            throw ProxyError.message("项目路由模型不能为空")
+        }
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let updated = self.upsertTopLevelAssignment(
+            in: existing,
+            key: "model",
+            value: "\"\(self.tomlEscaped(normalizedRouteModel))\""
+        )
+        return Data(updated.utf8)
+    }
+
+    private func updatedProjectRouteConfigData(url: URL, rule: CodexProjectRouteRule) throws -> Data {
+        switch rule.client {
+        case .codex:
+            return try self.updatedCodexProjectConfigData(url: url, routeModel: rule.routeModel)
+        case .claudeCode:
+            return try self.updatedClaudeProjectSettingsData(url: url, rule: rule)
+        }
+    }
+
+    private func clearedCodexProjectConfigData(url: URL) -> Data {
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let updated = self.removeTopLevelAssignment(in: existing, key: "model")
+        return Data(updated.utf8)
+    }
+
+    private func clearedProjectRouteConfigData(url: URL, rule: CodexProjectRouteRule) throws -> Data {
+        switch rule.client {
+        case .codex:
+            return self.clearedCodexProjectConfigData(url: url)
+        case .claudeCode:
+            return try self.clearedClaudeProjectSettingsData(url: url)
+        }
+    }
+
+    private func updatedClaudeProjectSettingsData(url: URL, rule: CodexProjectRouteRule) throws -> Data {
+        let normalizedRouteModel = rule.routeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedRouteModel.isEmpty == false else {
+            throw ProxyError.message("项目路由模型不能为空")
+        }
+        var object: [String: Any]
+        if FileManager.default.fileExists(atPath: url.path) {
+            object = try self.jsonObject(from: url)
+        } else {
+            object = [:]
+        }
+        object["model"] = normalizedRouteModel
+        var env = object["env"] as? [String: Any] ?? [:]
+        env[ClaudeProjectRouteManagedEnv.customModelOption] = normalizedRouteModel
+        env[ClaudeProjectRouteManagedEnv.customModelOptionName] = rule.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Codex Proxy Project Route"
+            : "项目路由：\(rule.label.trimmingCharacters(in: .whitespacesAndNewlines))"
+        env[ClaudeProjectRouteManagedEnv.customModelOptionDescription] = "由 Codex Proxy 项目路由转发到绑定账号"
+        object["env"] = env
+        return try self.jsonData(from: object)
+    }
+
+    private func clearedClaudeProjectSettingsData(url: URL) throws -> Data {
+        var object: [String: Any]
+        if FileManager.default.fileExists(atPath: url.path) {
+            object = try self.jsonObject(from: url)
+        } else {
+            object = [:]
+        }
+        object.removeValue(forKey: "model")
+        if var env = object["env"] as? [String: Any] {
+            for key in ClaudeProjectRouteManagedEnv.keys {
+                env.removeValue(forKey: key)
+            }
+            object["env"] = env
+        }
+        return try self.jsonData(from: object)
     }
 
     private func updatedClaudeSettingsData(
@@ -996,6 +1240,36 @@ public final class ClientConfigFileService: @unchecked Sendable {
         }
 
         return updatedLines.joined(separator: "\n").trimmingCharacters(in: CharacterSet.newlines) + "\n"
+    }
+
+    private func removeTopLevelAssignment(
+        in text: String,
+        key: String
+    ) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var updatedLines: [String] = []
+        var currentSection: String?
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.isTOMLSectionHeader(trimmed) {
+                currentSection = trimmed
+                updatedLines.append(line)
+                continue
+            }
+
+            if currentSection == nil,
+               let assignment = Self.parseTOMLAssignment(trimmed),
+               assignment.key == key
+            {
+                continue
+            }
+
+            updatedLines.append(line)
+        }
+
+        let updated = updatedLines.joined(separator: "\n").trimmingCharacters(in: CharacterSet.newlines)
+        return updated.isEmpty ? "" : updated + "\n"
     }
 
     private func upsertSectionAssignments(

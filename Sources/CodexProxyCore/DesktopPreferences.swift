@@ -135,6 +135,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case settingsSubtitle
     case clientConfigTitle
     case clientConfigSubtitle
+    case codexProjectRoutesTitle
+    case codexProjectRoutesSubtitle
+    case actionOpenCodexProjectRoutes
+    case actionClearCodexProjectConfig
     case menuDaemonRunning
     case menuDaemonStopped
     case menuNoEndpoint
@@ -610,6 +614,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case helperAutomaticCooldownPolicy
     case helperManualAccountGenericOpenAICompatible
     case helperManualAccountUpstreamAdapter
+    case helperManualAccountChatCompatibilityProfile
     case helperManualAccountAliyunCodingPlan
     case helperManualAccountAnthropicAPICompatible
     case helperManualAccountGoogleGeminiCompatible
@@ -755,6 +760,12 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case optionImageEdits
     case optionUpstreamAdapterChatCompletions
     case optionUpstreamAdapterResponses
+    case optionChatCompatibilityAuto
+    case optionChatCompatibilityGeneric
+    case optionChatCompatibilityDeepSeekV4Thinking
+    case optionChatCompatibilityDeepSeekLegacyReasoner
+    case optionChatCompatibilityMiMoStrict
+    case labelChatCompatibilityProfile
     case optionAnthropicMessages
     case optionGeminiGenerateContent
     case optionAutoSelectByOrder
@@ -778,6 +789,10 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelDailyTrend
     case labelWeeklyTrend
     case labelMonthlyTrend
+    case labelTrafficChartType
+    case optionLineChart
+    case optionBarChart
+    case optionMixedChart
     case labelOverviewTrafficAPIKeyFilter
     case optionAllProxyAPIKeys
     case overviewServiceHint
@@ -938,6 +953,7 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case labelDiagnosticRequestBodiesOlderThan
     case labelDiagnosticBodyHash
     case labelDiagnosticPrefixHash
+    case labelDiagnosticMetadata
     case confirmClearReasoningCacheExpiredTitle
     case confirmClearReasoningCacheExpiredMessage
     case confirmClearReasoningCacheAccountTitle
@@ -2113,6 +2129,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .settingsSubtitle: "Desktop preferences and proxy behavior controls.",
             .clientConfigTitle: "Codex/Claude Config",
             .clientConfigSubtitle: "Configure local Codex and Claude Code authentication files.",
+            .codexProjectRoutesTitle: "Project Routes",
+            .codexProjectRoutesSubtitle: "Bind Codex and Claude Code model tags to workspaces so different projects can use different account pools.",
+            .actionOpenCodexProjectRoutes: "Project Routes",
+            .actionClearCodexProjectConfig: "Clear Project Config",
             .menuDaemonRunning: "Daemon Running",
             .menuDaemonStopped: "Daemon Stopped",
             .menuNoEndpoint: "No endpoint available",
@@ -2594,6 +2614,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "When disabled, this API key account keeps participating in routing even if its upstream returns intermittent errors.",
             .helperManualAccountGenericOpenAICompatible: "Use the standard OpenAI-compatible flow. Enter the final upstream API prefix exactly as your provider expects, including `/v1` when needed, and Codex Proxy will use it as-is. Choose Responses for providers that support the OpenAI Responses API, or Chat Completions for providers that only expose `/chat/completions`. If you're using Google's official Gemini compatibility root, switch Provider to `Google Gemini Compatible` instead.",
             .helperManualAccountUpstreamAdapter: "Responses is the default. Choose Chat Completions when the upstream provider does not support `/responses`.",
+            .helperManualAccountChatCompatibilityProfile: "`Auto` detects DeepSeek, MiMo, and generic providers from the base URL and model. Use a fixed strategy only when the upstream has strict thinking/tool-call history requirements or rejects reasoning_content.",
             .helperManualAccountAliyunCodingPlan: "Use Aliyun Bailian / Qwen Coding Plan compatibility mode. Validation and runtime requests switch to an agent-style `chat/completions` path so existing local proxy clients can keep working without changing their own request format.",
             .helperManualAccountAnthropicAPICompatible: "Use Anthropic's native API key flow. Validation first checks `/v1/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `/v1/messages`. Runtime requests use the official `/v1/messages` and `/v1/messages/count_tokens` paths with `x-api-key` authentication.",
             .helperManualAccountGoogleGeminiCompatible: "Use Google's official Gemini OpenAI compatibility root with a Gemini API key from Google AI Studio. This preset is for API-key compatibility traffic, not for the official Gemini CLI route. Validation first checks `/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `chat/completions`. Runtime requests use `chat/completions` compatibility mode.",
@@ -2739,6 +2760,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionImageEdits: "Image Edits",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
+            .optionChatCompatibilityAuto: "Auto",
+            .optionChatCompatibilityGeneric: "Generic",
+            .optionChatCompatibilityDeepSeekV4Thinking: "DeepSeek V4 Thinking",
+            .optionChatCompatibilityDeepSeekLegacyReasoner: "DeepSeek Legacy Reasoner",
+            .optionChatCompatibilityMiMoStrict: "MiMo Strict",
+            .labelChatCompatibilityProfile: "Chat Completions Compatibility",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",
             .optionAutoSelectByOrder: "Auto Select (By Order)",
@@ -2762,6 +2789,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelDailyTrend: "Daily Trend",
             .labelWeeklyTrend: "Weekly Trend",
             .labelMonthlyTrend: "Monthly Trend",
+            .labelTrafficChartType: "Chart Type",
+            .optionLineChart: "Line",
+            .optionBarChart: "Bar",
+            .optionMixedChart: "Mixed",
             .labelOverviewTrafficAPIKeyFilter: "Local API Key",
             .optionAllProxyAPIKeys: "All API Keys",
             .overviewServiceHint: "A concise health view for your local proxy runtime and recent request distribution.",
@@ -2916,6 +2947,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelDiagnosticRequestBodiesOlderThan: "Older Than",
             .labelDiagnosticBodyHash: "Body SHA-256",
             .labelDiagnosticPrefixHash: "Prefix SHA-256",
+            .labelDiagnosticMetadata: "Diagnostic Metadata",
             .confirmClearReasoningCacheExpiredTitle: "Clear expired reasoning cache?",
             .confirmClearReasoningCacheExpiredMessage: "Expired reasoning backfill entries will be removed. Active cache entries remain available for restart recovery.",
             .confirmClearReasoningCacheAccountTitle: "Clear this account's reasoning cache?",
@@ -2953,6 +2985,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .settingsSubtitle: "调整桌面偏好与代理行为。",
             .clientConfigTitle: "Codex/Claude 配置",
             .clientConfigSubtitle: "配置本机 Codex 和 Claude Code 认证文件。",
+            .codexProjectRoutesTitle: "项目路由",
+            .codexProjectRoutesSubtitle: "为 Codex 与 Claude Code 的不同工作目录绑定专用模型标签，让不同项目走不同账号池。",
+            .actionOpenCodexProjectRoutes: "项目路由",
+            .actionClearCodexProjectConfig: "清空项目配置",
             .menuDaemonRunning: "服务运行中",
             .menuDaemonStopped: "服务未运行",
             .menuNoEndpoint: "暂无可用地址",
@@ -3182,6 +3218,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelDiagnosticRequestBodiesOlderThan: "早于",
             .labelDiagnosticBodyHash: "请求体 SHA-256",
             .labelDiagnosticPrefixHash: "前缀 SHA-256",
+            .labelDiagnosticMetadata: "诊断元数据",
             .sectionRuntime: "运行概览",
             .sectionTraffic: "流量统计",
             .sectionLatestActivity: "最近活动",
@@ -3445,6 +3482,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "禁用后，即使上游偶发报错，这个 API Key 账号也会继续参与路由，不会被自动冷却跳过。",
             .helperManualAccountGenericOpenAICompatible: "使用标准 OpenAI 兼容模式。请直接填写上游要求的最终 API 前缀；如果对方要求带 `/v1`，这里就保留 `/v1`，后续会按你填写的前缀原样请求。支持 Responses API 的厂商选 Responses；只提供 `/chat/completions` 的厂商选 Chat Completions。如果你填的是 Google 官方 Gemini OpenAI 兼容根地址，请改选 `Google Gemini Compatible`。",
             .helperManualAccountUpstreamAdapter: "默认使用 Responses。如果上游厂商不支持 `/responses`，请选择 Chat Completions。",
+            .helperManualAccountChatCompatibilityProfile: "`自动` 会根据 Base URL 和模型识别 DeepSeek、MiMo 或通用厂商。只有当上游对 thinking、tool_calls 历史或 reasoning_content 有严格要求时，才需要手动固定策略。",
             .helperManualAccountAliyunCodingPlan: "使用阿里百炼 / Qwen Coding Plan 兼容模式。校验和运行时都会改走更接近 Coding Agent 的 `chat/completions` 链路，让现有本地代理客户端在不改请求格式的前提下尽量保持可用。",
             .helperManualAccountAnthropicAPICompatible: "使用 Anthropic 原生 API Key 模式。连通性校验会先尝试 `/v1/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `/v1/messages` 探针。运行时使用官方 `/v1/messages` 和 `/v1/messages/count_tokens` 链路，并通过 `x-api-key` 鉴权。",
             .helperManualAccountGoogleGeminiCompatible: "使用 Google 官方 Gemini OpenAI 兼容根地址，并填写 Google AI Studio 生成的 Gemini API key。这个 preset 只用于 API key 兼容流量，不再作为官方 Gemini CLI 的后端路径。连通性校验会先尝试 `/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `chat/completions` 探针。运行时改走 `chat/completions` 兼容链路。",
@@ -3590,6 +3628,12 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionImageEdits: "图片编辑",
             .optionUpstreamAdapterChatCompletions: "Chat Completions",
             .optionUpstreamAdapterResponses: "Responses",
+            .optionChatCompatibilityAuto: "自动",
+            .optionChatCompatibilityGeneric: "通用",
+            .optionChatCompatibilityDeepSeekV4Thinking: "DeepSeek V4 Thinking",
+            .optionChatCompatibilityDeepSeekLegacyReasoner: "DeepSeek Legacy Reasoner",
+            .optionChatCompatibilityMiMoStrict: "MiMo 严格模式",
+            .labelChatCompatibilityProfile: "Chat Completions 兼容策略",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",
             .optionAutoSelectByOrder: "自动选择（按排序）",
@@ -3613,6 +3657,10 @@ public struct LocalizationStore: Sendable, Equatable {
             .labelDailyTrend: "按日趋势",
             .labelWeeklyTrend: "按周趋势",
             .labelMonthlyTrend: "按月趋势",
+            .labelTrafficChartType: "图表类型",
+            .optionLineChart: "折线",
+            .optionBarChart: "柱状",
+            .optionMixedChart: "混合",
             .labelOverviewTrafficAPIKeyFilter: "本地 API Key",
             .optionAllProxyAPIKeys: "全部 API Key",
             .overviewServiceHint: "用更专业的视图快速掌握本地代理运行状态和最近请求分布。",

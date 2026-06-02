@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import CodexProxyCore
 import SwiftUI
 
@@ -14,27 +15,7 @@ struct ClientConfigManagerView: View {
             let renderState = self.model.clientConfigManagerRenderState
 
             ZStack(alignment: .topTrailing) {
-                HStack(alignment: .top, spacing: layout.columnSpacing) {
-                    ClientConfigPlanSidebar(
-                        model: self.model,
-                        layout: layout,
-                        inspection: renderState.inspection,
-                        selectionStatusText: self.selectionStatusText,
-                        selectionStatusTone: self.selectionStatusTone
-                    )
-                    .frame(width: layout.sidebarWidth)
-                    .frame(maxHeight: .infinity, alignment: .top)
-
-                    ClientConfigWorkspace(
-                        model: self.model,
-                        layout: layout,
-                        renderState: renderState,
-                        missingFileText: self.model.localized(zh: "这个文件当前不存在。", en: "This file does not exist yet.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .padding(.horizontal, layout.outerPadding)
-                .padding(.vertical, layout.outerPadding)
+                self.content(layout: layout, renderState: renderState)
 
                 if renderState.isBackupDrawerPresented {
                     Color.black
@@ -90,6 +71,56 @@ struct ClientConfigManagerView: View {
         }
     }
 
+    private func content(
+        layout: ClientConfigManagerLayout,
+        renderState: ClientConfigManagerRenderState
+    ) -> some View {
+        self.regularContent(layout: layout, renderState: renderState)
+    }
+
+    private func regularContent(
+        layout: ClientConfigManagerLayout,
+        renderState: ClientConfigManagerRenderState
+    ) -> some View {
+        HStack(alignment: .top, spacing: layout.columnSpacing) {
+            self.sidebar(layout: layout, renderState: renderState)
+                .frame(width: layout.sidebarWidth)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+            self.workspace(layout: layout, renderState: renderState)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(.horizontal, layout.outerPadding)
+        .padding(.vertical, layout.outerPadding)
+        .frame(width: layout.viewportWidth, height: layout.viewportHeight, alignment: .topLeading)
+        .clipped()
+    }
+
+    private func sidebar(
+        layout: ClientConfigManagerLayout,
+        renderState: ClientConfigManagerRenderState
+    ) -> some View {
+        ClientConfigPlanSidebar(
+            model: self.model,
+            layout: layout,
+            inspection: renderState.inspection,
+            selectionStatusText: self.selectionStatusText,
+            selectionStatusTone: self.selectionStatusTone
+        )
+    }
+
+    private func workspace(
+        layout: ClientConfigManagerLayout,
+        renderState: ClientConfigManagerRenderState
+    ) -> some View {
+        ClientConfigWorkspace(
+            model: self.model,
+            layout: layout,
+            renderState: renderState,
+            missingFileText: self.model.localized(zh: "这个文件当前不存在。", en: "This file does not exist yet.")
+        )
+    }
+
     private var inspection: ClientConfigInspection {
         self.model.clientConfigManagerInspection(for: self.model.clientConfigManagerTarget)
     }
@@ -140,8 +171,13 @@ struct ClientConfigManagerView: View {
 }
 
 private struct ClientConfigManagerLayout {
+    let viewportWidth: CGFloat
+    let viewportHeight: CGFloat
     let isTightHeight: Bool
     let isCompactHeight: Bool
+    let isNarrowWidth: Bool
+    let isCompactWidth: Bool
+    let usesCompactWorkspaceHeader: Bool
     let outerPadding: CGFloat
     let panelPadding: CGFloat
     let innerPanelPadding: CGFloat
@@ -151,26 +187,35 @@ private struct ClientConfigManagerLayout {
     let backupFileListWidth: CGFloat
     let editorMinHeight: CGFloat
     let backupEditorMinHeight: CGFloat
+    let sidebarApplyFooterReservedHeight: CGFloat
     let listDrawerWidth: CGFloat
     let detailDrawerWidth: CGFloat
 
     init(size: CGSize) {
         let tightHeight = size.height < 560
         let compactHeight = size.height < 700
+        let narrowWidth = size.width < 900
         let compactWidth = size.width < 1180
-        let compact = compactWidth || compactHeight
+        let compact = compactWidth || compactHeight || narrowWidth
+        let dense = narrowWidth || tightHeight
 
+        self.viewportWidth = max(size.width, 0)
+        self.viewportHeight = max(size.height, 0)
         self.isTightHeight = tightHeight
         self.isCompactHeight = compactHeight
-        self.outerPadding = tightHeight ? 10 : (compact ? 14 : 22)
-        self.panelPadding = tightHeight ? 12 : (compact ? 14 : 18)
-        self.innerPanelPadding = tightHeight ? 10 : (compact ? 12 : 14)
-        self.columnSpacing = tightHeight ? 10 : (compact ? 12 : 16)
-        self.sidebarWidth = compact ? 310 : 340
-        self.fileListWidth = tightHeight ? 260 : 280
-        self.backupFileListWidth = tightHeight ? 250 : 270
-        self.editorMinHeight = tightHeight ? 180 : (compact ? 260 : 390)
-        self.backupEditorMinHeight = tightHeight ? 200 : (compact ? 280 : 440)
+        self.isNarrowWidth = narrowWidth
+        self.isCompactWidth = compactWidth
+        self.usesCompactWorkspaceHeader = compactWidth || compactHeight || size.width < 1220
+        self.outerPadding = dense ? 10 : (compact ? 14 : 22)
+        self.panelPadding = dense ? 11 : (compact ? 14 : 18)
+        self.innerPanelPadding = dense ? 9 : (compact ? 12 : 14)
+        self.columnSpacing = dense ? 9 : (compact ? 12 : 16)
+        self.sidebarWidth = narrowWidth ? 260 : (compactWidth ? 292 : 340)
+        self.fileListWidth = narrowWidth ? 205 : (compactWidth ? 235 : 280)
+        self.backupFileListWidth = narrowWidth ? 220 : (compact ? 245 : 270)
+        self.editorMinHeight = tightHeight ? 150 : (compactHeight ? 220 : 390)
+        self.backupEditorMinHeight = tightHeight ? 190 : (compact ? 260 : 440)
+        self.sidebarApplyFooterReservedHeight = tightHeight ? 66 : (compactHeight ? 72 : 82)
         self.listDrawerWidth = min(max(size.width * 0.36, 380), min(520, max(size.width - 120, 380)))
         self.detailDrawerWidth = min(max(size.width * 0.62, 620), min(920, max(size.width - 96, 620)))
     }
@@ -188,17 +233,15 @@ private struct ClientConfigPlanSidebar: View {
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
 
-        VStack(alignment: .leading, spacing: 0) {
+        ZStack(alignment: .bottom) {
             self.scrollableContent(palette: palette)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .layoutPriority(1)
 
             self.fixedApplyButtonArea(palette: palette)
-                .fixedSize(horizontal: false, vertical: true)
-                .layoutPriority(2)
+                .frame(maxWidth: .infinity, alignment: .bottom)
         }
         .padding(self.layout.panelPadding)
-        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(palette.panel.opacity(self.colorScheme == .dark ? 0.96 : 0.985))
@@ -211,93 +254,101 @@ private struct ClientConfigPlanSidebar: View {
 
     private func scrollableContent(palette: AppearancePalette) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                self.header(palette: palette)
-
-                ClientConfigStepGuide(
-                    steps: self.stepGuideItems,
-                    palette: palette
-                )
-
-                VStack(alignment: .leading, spacing: 12) {
-                    ClientConfigSidebarPanel(title: self.model.localized(zh: "目标客户端", en: "Target Client")) {
-                        ClientConfigTargetSelector(
-                            selection: self.model.clientConfigManagerTarget,
-                            targets: ClientConfigTarget.allCases,
-                            title: { self.model.clientConfigManagerTitle(for: $0) },
-                            subtitle: self.targetSubtitle(for:),
-                            onSelect: self.selectTarget
-                        )
-                    }
-
-                    ClientConfigSidebarPanel(title: self.model.localized(zh: "要写入的本地 Key", en: "Local Key To Write")) {
-                        if self.model.clientConfigManagerAvailableProxyAPIKeys.isEmpty {
-                            ClientConfigInlineNotice(
-                                title: self.model.localized(zh: "没有启用的本地 Key", en: "No Enabled Local Key"),
-                                detail: self.model.localized(
-                                    zh: "先到代理页启用至少一把本地 API Key。",
-                                    en: "Enable at least one local API key on the Proxy page first."
-                                ),
-                                tone: .warning
-                            )
-                        } else {
-                            ClientConfigKeySelector(
-                                model: self.model,
-                                records: self.model.clientConfigManagerAvailableProxyAPIKeys,
-                                selectedRecord: self.model.clientConfigManagerSelectedProxyAPIKeyRecord(),
-                                unavailableText: self.model.text(.statusUnavailable),
-                                accessibilityLabel: self.model.localized(zh: "选择要写入的本地 Key", en: "Choose the local key to write"),
-                                helpText: self.model.localized(zh: "选择要写入 Codex、Claude Code 或 Gemini 配置文件的本地代理 Key。", en: "Choose the local proxy key to write into Codex, Claude Code, or Gemini config files."),
-                                title: { self.model.proxyAPIKeyDisplayLabel($0) },
-                                detail: { "\(self.model.proxyAPIKeyMaskedValue($0)) · \(self.model.label(for: $0.dataSource))" },
-                                onSelect: { self.model.clientConfigManagerSelectProxyAPIKey($0) }
-                            )
-                        }
-                    }
-
-                    ClientConfigSidebarPanel(title: self.model.localized(zh: "即将写入", en: "Write Preview")) {
-                        VStack(alignment: .leading, spacing: 9) {
-                            ClientConfigPlanMetaRow(
-                                label: self.model.localized(zh: "客户端", en: "Client"),
-                                value: self.model.clientConfigManagerTitle(for: self.model.clientConfigManagerTarget)
-                            )
-                            ClientConfigPlanMetaRow(
-                                label: self.model.localized(zh: "本地 Key", en: "Local Key"),
-                                value: self.model.clientConfigManagerSelectedProxyAPIKeyRecord().map {
-                                    self.model.proxyAPIKeyDisplayLabel($0)
-                                } ?? self.model.text(.statusUnavailable)
-                            )
-                            ClientConfigPlanMetaRow(
-                                label: self.model.localized(zh: "代理地址", en: "Endpoint"),
-                                value: self.model.clientConfigManagerEndpointText()
-                            )
-                            ClientConfigPlanMetaRow(
-                                label: self.model.localized(zh: "写入摘要", en: "Write Summary"),
-                                value: self.model.clientConfigManagerChangeSummaryText
-                            )
-                            ClientConfigPlanMetaRow(
-                                label: self.model.localized(zh: "当前 Key", en: "Current Key"),
-                                value: self.model.clientConfigManagerCurrentKeyStatusText(for: self.inspection)
-                            )
-                        }
-                    }
-
-                    self.statusNotice
-                }
-            }
-            .padding(.trailing, 2)
+            self.sidebarContent(palette: palette)
+                .padding(.trailing, 2)
+                .padding(.bottom, self.layout.sidebarApplyFooterReservedHeight)
         }
         .scrollIndicators(.hidden)
     }
 
+    private func sidebarContent(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 8 : (self.layout.isCompactHeight ? 10 : 14)) {
+            self.header(palette: palette)
+
+            ClientConfigStepGuide(
+                steps: self.stepGuideItems,
+                palette: palette,
+                compact: self.layout.isCompactWidth || self.layout.isCompactHeight
+            )
+
+            VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 8 : (self.layout.isCompactHeight ? 10 : 12)) {
+                ClientConfigSidebarPanel(title: self.model.localized(zh: "目标客户端", en: "Target Client")) {
+                    ClientConfigTargetSelector(
+                        selection: self.model.clientConfigManagerTarget,
+                        targets: ClientConfigTarget.allCases,
+                        title: { self.model.clientConfigManagerTitle(for: $0) },
+                        subtitle: self.targetSubtitle(for:),
+                        onSelect: self.selectTarget
+                    )
+                }
+
+                ClientConfigSidebarPanel(title: self.model.localized(zh: "要写入的本地 Key", en: "Local Key To Write")) {
+                    if self.model.clientConfigManagerAvailableProxyAPIKeys.isEmpty {
+                        ClientConfigInlineNotice(
+                            title: self.model.localized(zh: "没有启用的本地 Key", en: "No Enabled Local Key"),
+                            detail: self.model.localized(
+                                zh: "先到代理页启用至少一把本地 API Key。",
+                                en: "Enable at least one local API key on the Proxy page first."
+                            ),
+                            tone: .warning
+                        )
+                    } else {
+                        ClientConfigKeySelector(
+                            model: self.model,
+                            records: self.model.clientConfigManagerAvailableProxyAPIKeys,
+                            selectedRecord: self.model.clientConfigManagerSelectedProxyAPIKeyRecord(),
+                            unavailableText: self.model.text(.statusUnavailable),
+                            accessibilityLabel: self.model.localized(zh: "选择要写入的本地 Key", en: "Choose the local key to write"),
+                            helpText: self.model.localized(zh: "选择要写入 Codex、Claude Code 或 Gemini 配置文件的本地代理 Key。", en: "Choose the local proxy key to write into Codex, Claude Code, or Gemini config files."),
+                            title: { self.model.proxyAPIKeyDisplayLabel($0) },
+                            detail: { "\(self.model.proxyAPIKeyMaskedValue($0)) · \(self.model.label(for: $0.dataSource))" },
+                            onSelect: { self.model.clientConfigManagerSelectProxyAPIKey($0) }
+                        )
+                    }
+                }
+
+                ClientConfigSidebarPanel(title: self.model.localized(zh: "即将写入", en: "Write Preview")) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        ClientConfigPlanMetaRow(
+                            label: self.model.localized(zh: "客户端", en: "Client"),
+                            value: self.model.clientConfigManagerTitle(for: self.model.clientConfigManagerTarget)
+                        )
+                        ClientConfigPlanMetaRow(
+                            label: self.model.localized(zh: "本地 Key", en: "Local Key"),
+                            value: self.model.clientConfigManagerSelectedProxyAPIKeyRecord().map {
+                                self.model.proxyAPIKeyDisplayLabel($0)
+                            } ?? self.model.text(.statusUnavailable)
+                        )
+                        ClientConfigPlanMetaRow(
+                            label: self.model.localized(zh: "代理地址", en: "Endpoint"),
+                            value: self.model.clientConfigManagerEndpointText()
+                        )
+                        ClientConfigPlanMetaRow(
+                            label: self.model.localized(zh: "写入摘要", en: "Write Summary"),
+                            value: self.model.clientConfigManagerChangeSummaryText
+                        )
+                        ClientConfigPlanMetaRow(
+                            label: self.model.localized(zh: "当前 Key", en: "Current Key"),
+                            value: self.model.clientConfigManagerCurrentKeyStatusText(for: self.inspection)
+                        )
+                    }
+                }
+
+                self.statusNotice
+            }
+        }
+    }
+
     private func header(palette: AppearancePalette) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
+        let compact = self.layout.isCompactWidth || self.layout.isCompactHeight
+
+        return VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 4 : 6) {
+            HStack(alignment: .center, spacing: compact ? 6 : 8) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: compact ? 13 : 14, weight: .semibold))
                     .foregroundStyle(palette.accent)
                 Text(self.model.clientConfigManagerWindowTitle)
-                    .font(.system(size: 19, weight: .bold))
+                    .font(.system(size: compact ? 17 : 19, weight: .bold))
                     .foregroundStyle(palette.textPrimary)
             }
 
@@ -305,32 +356,54 @@ private struct ClientConfigPlanSidebar: View {
                 zh: "选择 Codex、Claude Code 或 Gemini，再选择要写入的本地代理 Key。确认右侧预览后点击应用。",
                 en: "Choose Codex, Claude Code, or Gemini, select the local proxy key to write, then review the preview and apply."
             ))
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: compact ? 10 : 11, weight: .medium))
             .foregroundStyle(palette.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func fixedApplyButtonArea(palette: AppearancePalette) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 7 : 10) {
             Rectangle()
                 .fill(palette.divider.opacity(self.colorScheme == .dark ? 0.72 : 0.58))
                 .frame(height: 1)
-                .padding(.bottom, 2)
+                .padding(.bottom, self.layout.isTightHeight ? 0 : 2)
 
-            Button {
-                Task { await self.model.applyClientConfigManagerSelection() }
-            } label: {
-                Text(self.model.clientConfigManagerApplyButtonTitle())
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
-            .buttonStyle(AppActionButtonStyle(kind: .primary))
-            .frame(maxWidth: .infinity)
-            .disabled(!self.model.clientConfigManagerCanApplyCurrentSelection)
+            self.applyButton
         }
-        .padding(.top, 12)
+        .padding(.top, self.layout.isTightHeight ? 8 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(palette.panel.opacity(self.colorScheme == .dark ? 0.88 : 0.94))
+        .overlay {
+            ClientConfigAccessibilityFrameMarker(identifier: "client-config-apply-footer")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .accessibilityIdentifier("client-config-apply-footer")
+    }
+
+    private var applyButton: some View {
+        Button {
+            Task { await self.model.applyClientConfigManagerSelection() }
+        } label: {
+            Text(self.model.clientConfigManagerApplyButtonTitle())
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .buttonStyle(AppActionButtonStyle(kind: .primary))
+        .frame(maxWidth: .infinity)
+        .disabled(!self.model.clientConfigManagerCanApplyCurrentSelection)
+        .overlay {
+            ClientConfigAccessibilityFrameMarker(
+                identifier: "client-config-apply-button",
+                label: self.model.clientConfigManagerApplyButtonTitle()
+            )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .accessibilityLabel(self.model.clientConfigManagerApplyButtonTitle())
+        .accessibilityIdentifier("client-config-apply-button")
     }
 
     private var statusNotice: some View {
@@ -422,6 +495,28 @@ private struct ClientConfigPlanSidebar: View {
     }
 }
 
+private struct ClientConfigAccessibilityFrameMarker: NSViewRepresentable {
+    let identifier: String
+    var label: String?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        self.updateIdentifier(on: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        self.updateIdentifier(on: nsView)
+    }
+
+    private func updateIdentifier(on view: NSView) {
+        view.identifier = NSUserInterfaceItemIdentifier(self.identifier)
+        view.setAccessibilityIdentifier(self.identifier)
+        view.setAccessibilityLabel(self.label)
+        view.setAccessibilityElement(false)
+    }
+}
+
 private struct ClientConfigStepGuideItem: Identifiable {
     let number: Int
     let title: String
@@ -434,16 +529,17 @@ private struct ClientConfigStepGuideItem: Identifiable {
 private struct ClientConfigStepGuide: View {
     let steps: [ClientConfigStepGuideItem]
     let palette: AppearancePalette
+    let compact: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: self.compact ? 6 : 8) {
             ForEach(self.steps) { step in
-                HStack(alignment: .top, spacing: 9) {
+                HStack(alignment: .top, spacing: self.compact ? 7 : 9) {
                     Text("\(step.number)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .font(.system(size: self.compact ? 9 : 10, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(self.stepForeground(tone: step.tone))
-                        .frame(width: 20, height: 20)
+                        .frame(width: self.compact ? 18 : 20, height: self.compact ? 18 : 20)
                         .background(
                             Circle()
                                 .fill(self.stepBackground(tone: step.tone))
@@ -451,11 +547,11 @@ private struct ClientConfigStepGuide: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(step.title)
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.system(size: self.compact ? 10 : 11, weight: .bold))
                             .foregroundStyle(palette.textPrimary)
                             .lineLimit(1)
                         Text(step.detail)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: self.compact ? 9 : 10, weight: .medium))
                             .foregroundStyle(palette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -464,7 +560,7 @@ private struct ClientConfigStepGuide: View {
                 }
             }
         }
-        .padding(10)
+        .padding(self.compact ? 8 : 10)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(palette.panelRaised.opacity(0.72))
@@ -726,33 +822,38 @@ private struct ClientConfigWorkspace: View {
         let changedFileCount = self.renderState.changedFileCount
         let currentKeyText = self.model.clientConfigManagerCurrentKeyStatusText(for: self.renderState.inspection)
 
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(self.model.clientConfigManagerTitle(for: self.renderState.target))
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(palette.textPrimary)
-                    Text(self.model.localized(
-                        zh: "右侧内容是只读预览；只有点击左侧写入按钮，才会创建备份并写入磁盘。",
-                        en: "This is a read-only preview; files are backed up and written only when you use the write button on the left."
-                    ))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(palette.textSecondary)
-                }
+        return VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 9 : 12) {
+            if self.layout.usesCompactWorkspaceHeader {
+                VStack(alignment: .leading, spacing: self.layout.isTightHeight ? 8 : 10) {
+                    self.headerTitleBlock(palette: palette)
 
-                Spacer(minLength: 0)
-
-                VStack(alignment: .trailing, spacing: 8) {
                     self.headerActions
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
                     StatusPill(
                         text: self.operationText,
                         tone: self.operationTone,
                         compact: true
                     )
                 }
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    self.headerTitleBlock(palette: palette)
+
+                    Spacer(minLength: 0)
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        self.headerActions
+                        StatusPill(
+                            text: self.operationText,
+                            tone: self.operationTone,
+                            compact: true
+                        )
+                    }
+                }
             }
 
-            LazyVGrid(columns: self.metricColumns, alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: self.metricColumns, alignment: .leading, spacing: self.layout.isCompactWidth ? 8 : 10) {
                 ClientConfigMiniMetric(
                     title: self.model.localized(zh: "受管文件", en: "Managed Files"),
                     value: "\(self.renderState.inspection.files.filter(\.exists).count) / \(self.renderState.inspection.files.count)",
@@ -775,8 +876,31 @@ private struct ClientConfigWorkspace: View {
         }
     }
 
+    private func headerTitleBlock(palette: AppearancePalette) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(self.model.clientConfigManagerTitle(for: self.renderState.target))
+                .font(.system(size: self.layout.usesCompactWorkspaceHeader ? 20 : 24, weight: .bold))
+                .foregroundStyle(palette.textPrimary)
+            Text(self.model.localized(
+                zh: "右侧内容是只读预览；只有点击左侧写入按钮，才会创建备份并写入磁盘。",
+                en: "This is a read-only preview; files are backed up and written only when you use the write button on the left."
+            ))
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var headerActions: some View {
-        QuickActionWrapLayout(horizontalSpacing: 7, verticalSpacing: 7) {
+        QuickActionWrapLayout(
+            horizontalSpacing: self.layout.isCompactWidth ? 5 : 7,
+            verticalSpacing: self.layout.isCompactWidth ? 5 : 7
+        ) {
+            self.headerActionButton(
+                title: self.model.text(.actionOpenCodexProjectRoutes),
+                systemImage: "arrow.triangle.branch",
+                action: self.model.openCodexProjectRoutesWindow
+            )
             self.headerActionButton(
                 title: self.model.clientConfigManagerRevealFilesButtonTitle,
                 systemImage: "folder",
@@ -802,25 +926,25 @@ private struct ClientConfigWorkspace: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: self.layout.isCompactWidth ? 4 : 5) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 16)
+                    .font(.system(size: self.layout.isCompactWidth ? 10 : 11, weight: .semibold))
+                    .frame(width: self.layout.isCompactWidth ? 13 : 14)
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: self.layout.isCompactWidth ? 10 : 10.5, weight: .semibold))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+                    .minimumScaleFactor(0.76)
             }
-            .frame(minHeight: 28)
+            .frame(minHeight: self.layout.isCompactWidth ? 24 : 26)
         }
-        .buttonStyle(AppActionButtonStyle(kind: .secondary))
+        .buttonStyle(ClientConfigHeaderActionButtonStyle())
         .disabled(self.model.isClientConfigManagerBusy)
         .help(title)
     }
 
     private var metricColumns: [GridItem] {
         [
-            GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 10, alignment: .top),
+            GridItem(.adaptive(minimum: self.layout.isCompactWidth ? 128 : 150, maximum: 220), spacing: self.layout.isCompactWidth ? 8 : 10, alignment: .top),
         ]
     }
 
@@ -863,6 +987,35 @@ private struct ClientConfigWorkspace: View {
         case .external:
             return .neutral
         }
+    }
+}
+
+private struct ClientConfigHeaderActionButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let palette = AppearanceStore.palette(for: self.colorScheme)
+        let pressed = configuration.isPressed && self.isEnabled
+
+        return configuration.label
+            .lineLimit(1)
+            .foregroundStyle(self.isEnabled ? palette.textPrimary : palette.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(palette.panel.opacity(pressed ? 0.74 : 0.88))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(palette.border, lineWidth: 1)
+            )
+            .shadow(color: palette.shadow.opacity(pressed ? 0.04 : 0.12), radius: 3, x: 0, y: 1)
+            .scaleEffect(pressed ? 0.99 : 1.0)
+            .opacity(self.isEnabled ? 1.0 : 0.88)
+            .animation(.easeOut(duration: 0.14), value: pressed)
+            .interactiveCursor(isEnabled: self.isEnabled)
     }
 }
 

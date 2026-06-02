@@ -117,6 +117,7 @@ public enum AuthService {
                 from: payload,
                 providerPreset: providerPreset
             )
+            let chatCompatibilityProfile = self.extractChatCompletionsCompatibilityProfile(from: payload)
             let apiKey = (tokens["access_token"] as? String) ?? self.extractManualAPIKey(from: payload, providerPreset: providerPreset)
             guard let apiKey, !apiKey.isEmpty else {
                 throw ProxyError.message("auth.json 缺少 API Key")
@@ -134,6 +135,7 @@ public enum AuthService {
                 providerPreset: providerPreset,
                 baseURLMode: baseURLMode,
                 upstreamAdapter: upstreamAdapter,
+                chatCompatibilityProfile: chatCompatibilityProfile,
                 principalID: accountID,
                 accountID: accountID,
                 accessToken: apiKey,
@@ -233,7 +235,8 @@ public enum AuthService {
         providerPreset: OpenAICompatibleProviderPreset,
         upstreamBaseURL: String?,
         baseURLMode: ManualAPIKeyBaseURLMode?,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter?,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
     ) {
         let payload = (try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) ?? [:]
         let authMode = self.authMode(from: payload)
@@ -244,25 +247,30 @@ public enum AuthService {
         let upstreamBaseURL: String?
         let baseURLMode: ManualAPIKeyBaseURLMode?
         let upstreamAdapter: ManualAPIKeyUpstreamAdapter?
+        let chatCompatibilityProfile: ChatCompletionsCompatibilityProfile
         switch authMode {
         case .chatGPT:
             upstreamBaseURL = nil
             baseURLMode = nil
             upstreamAdapter = nil
+            chatCompatibilityProfile = .auto
         case .openAIAPIKey, .anthropicAPIKey:
             upstreamBaseURL = self.extractManualAPIKeyBaseURL(from: payload)
             baseURLMode = self.resolvedManualAPIKeyBaseURLMode(from: payload, providerPreset: providerPreset)
             upstreamAdapter = self.resolvedManualAPIKeyUpstreamAdapter(from: payload, providerPreset: providerPreset)
+            chatCompatibilityProfile = self.extractChatCompletionsCompatibilityProfile(from: payload)
         case .anthropicSubscriptionOAuth:
             upstreamBaseURL = self.extractAnthropicBaseURL(from: payload)
             baseURLMode = nil
             upstreamAdapter = nil
+            chatCompatibilityProfile = .auto
         case .geminiOAuth:
             upstreamBaseURL = self.extractGeminiBaseURL(from: payload)
             baseURLMode = nil
             upstreamAdapter = nil
+            chatCompatibilityProfile = .auto
         }
-        return (providerFamily, authMode, providerPreset, upstreamBaseURL, baseURLMode, upstreamAdapter)
+        return (providerFamily, authMode, providerPreset, upstreamBaseURL, baseURLMode, upstreamAdapter, chatCompatibilityProfile)
     }
 
     public static func geminiAuthBackend(from text: String) -> String? {
@@ -515,7 +523,8 @@ public enum AuthService {
         apiKey: String,
         providerPreset: OpenAICompatibleProviderPreset = .genericOpenAICompatible,
         baseURLMode: ManualAPIKeyBaseURLMode? = nil,
-        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil
+        upstreamAdapter: ManualAPIKeyUpstreamAdapter? = nil,
+        chatCompatibilityProfile: ChatCompletionsCompatibilityProfile = .auto
     ) throws -> String {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedKey.isEmpty == false else {
@@ -534,6 +543,9 @@ public enum AuthService {
         }
         if let upstreamAdapter, providerPreset == .genericOpenAICompatible {
             normalized["upstream_adapter"] = upstreamAdapter.rawValue
+        }
+        if providerPreset == .genericOpenAICompatible {
+            normalized["chat_compatibility_profile"] = chatCompatibilityProfile.rawValue
         }
         return try self.normalizeManualAPIKeyAuthPayload(normalized, explicitProviderSelection: true)
     }
@@ -824,6 +836,27 @@ public enum AuthService {
         return raw.flatMap(ManualAPIKeyUpstreamAdapter.init(rawValue:))
     }
 
+    private static func extractChatCompletionsCompatibilityProfile(
+        from payload: [String: Any]
+    ) -> ChatCompletionsCompatibilityProfile {
+        let candidates = [
+            payload["chat_compatibility_profile"] as? String,
+            payload["chatCompatibilityProfile"] as? String,
+            (payload["tokens"] as? [String: Any])?["chat_compatibility_profile"] as? String,
+            (payload["tokens"] as? [String: Any])?["chatCompatibilityProfile"] as? String,
+        ]
+        let raw = candidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+        guard let raw,
+              let data = try? JSONEncoder().encode(raw),
+              let decoded = try? JSONDecoder().decode(ChatCompletionsCompatibilityProfile.self, from: data)
+        else {
+            return .auto
+        }
+        return decoded
+    }
+
     private static func resolvedManualAPIKeyUpstreamAdapter(
         from payload: [String: Any],
         providerPreset: OpenAICompatibleProviderPreset
@@ -1009,6 +1042,7 @@ public enum AuthService {
             from: payload,
             providerPreset: effectiveProviderPreset
         )
+        let chatCompatibilityProfile = self.extractChatCompletionsCompatibilityProfile(from: payload)
         let upstreamBaseURL = try self.normalizeManualAPIKeyBaseURL(
             rawBaseURL,
             providerPreset: effectiveProviderPreset
@@ -1032,6 +1066,9 @@ public enum AuthService {
         }
         if let upstreamAdapter, effectiveProviderPreset == .genericOpenAICompatible {
             normalized["upstream_adapter"] = upstreamAdapter.rawValue
+        }
+        if effectiveProviderPreset == .genericOpenAICompatible {
+            normalized["chat_compatibility_profile"] = chatCompatibilityProfile.rawValue
         }
         return try self.jsonString(normalized)
     }

@@ -1,5 +1,10 @@
 #if os(macOS)
 import CodexProxyCore
+#if canImport(CryptoKit)
+import CryptoKit
+#elseif canImport(Crypto)
+import Crypto
+#endif
 import Darwin
 import Foundation
 
@@ -29,9 +34,14 @@ final class LocalDaemonController {
     private nonisolated static let graceHealthCheckAttempts = 4
     private nonisolated static let exitedBeforeHealthCheckMessage = "Daemon exited before passing its health check."
     private nonisolated static let runningButHealthCheckPendingMessage = "Daemon process is running, but the health endpoint did not become ready in time."
+    private nonisolated static let daemonBinarySHA256EnvironmentKey = "CODEX_PROXY_DAEMON_BINARY_SHA256"
 
     typealias PrepareForLaunchHandler = (AppConfig) async throws -> Void
     typealias ApplyLaunchConfigurationHandler = (AppConfig, Bool) async throws -> ApplyLaunchConfigurationOutcome
+    typealias InstallLaunchAgentHandler = (AppConfig) async throws -> Bool
+    typealias LaunchctlHandler = ([String], Bool) async throws -> String
+    typealias HealthCheckHandler = (AppConfig) async -> Bool
+    typealias SleepHandler = (Duration) async -> Void
     typealias StartHandler = (AppConfig) async throws -> Void
     typealias StopHandler = () async throws -> Void
     typealias StatusHandler = () async -> LocalServiceStatus
@@ -40,6 +50,10 @@ final class LocalDaemonController {
     let serviceLabel = "io.shiguanghuxian.codex-proxy"
     private let prepareForLaunchHandler: PrepareForLaunchHandler?
     private let applyLaunchConfigurationHandler: ApplyLaunchConfigurationHandler?
+    private let installLaunchAgentHandler: InstallLaunchAgentHandler?
+    private let launchctlHandler: LaunchctlHandler?
+    private let healthCheckHandler: HealthCheckHandler?
+    private let sleepHandler: SleepHandler?
     private let startHandler: StartHandler?
     private let stopHandler: StopHandler?
     private let statusHandler: StatusHandler?
@@ -48,6 +62,10 @@ final class LocalDaemonController {
         dataDirectory: URL = Paths.defaultDataDirectory(),
         prepareForLaunchHandler: PrepareForLaunchHandler? = nil,
         applyLaunchConfigurationHandler: ApplyLaunchConfigurationHandler? = nil,
+        installLaunchAgentHandler: InstallLaunchAgentHandler? = nil,
+        launchctlHandler: LaunchctlHandler? = nil,
+        healthCheckHandler: HealthCheckHandler? = nil,
+        sleepHandler: SleepHandler? = nil,
         startHandler: StartHandler? = nil,
         stopHandler: StopHandler? = nil,
         statusHandler: StatusHandler? = nil
@@ -55,6 +73,10 @@ final class LocalDaemonController {
         self.dataDirectory = dataDirectory
         self.prepareForLaunchHandler = prepareForLaunchHandler
         self.applyLaunchConfigurationHandler = applyLaunchConfigurationHandler
+        self.installLaunchAgentHandler = installLaunchAgentHandler
+        self.launchctlHandler = launchctlHandler
+        self.healthCheckHandler = healthCheckHandler
+        self.sleepHandler = sleepHandler
         self.startHandler = startHandler
         self.stopHandler = stopHandler
         self.statusHandler = statusHandler
@@ -77,6 +99,10 @@ final class LocalDaemonController {
     }
 
     func installLaunchAgent(config: AppConfig) async throws -> Bool {
+        if let installLaunchAgentHandler {
+            return try await installLaunchAgentHandler(config)
+        }
+
         let dataDirectory = self.dataDirectory
         let serviceLabel = self.serviceLabel
         let daemonBinaryPath = self.daemonBinaryPath(config: config)
@@ -136,7 +162,7 @@ final class LocalDaemonController {
 
         _ = try await self.installLaunchAgent(config: config)
         _ = try await self.run("/bin/launchctl", ["bootout", self.serviceTarget()], ignoreFailure: true)
-        _ = try await self.run("/bin/launchctl", ["bootstrap", self.guiDomain(), Paths.launchAgentURL().path])
+        try await self.bootstrapLaunchAgent(config: config)
         _ = try await self.run("/bin/launchctl", ["kickstart", "-k", self.serviceTarget()])
 
         guard await self.waitForHealth(config: config, attempts: Self.initialHealthCheckAttempts) else {
@@ -266,7 +292,7 @@ final class LocalDaemonController {
                 _ = try await self.run("/bin/launchctl", ["bootout", self.serviceTarget()], ignoreFailure: true)
             }
             if didChange || status.launchctlState == "not_registered" {
-                _ = try await self.run("/bin/launchctl", ["bootstrap", self.guiDomain(), Paths.launchAgentURL().path])
+                try await self.bootstrapLaunchAgent(config: config)
             }
             if didChange || !status.running {
                 let arguments = didChange ? ["kickstart", "-k", self.serviceTarget()] : ["kickstart", self.serviceTarget()]
@@ -278,17 +304,79 @@ final class LocalDaemonController {
         }
     }
 
+    private func bootstrapLaunchAgent(config: AppConfig) async throws {
+        let arguments = ["bootstrap", self.guiDomain(), Paths.launchAgentURL().path]
+        do {
+            _ = try await self.run("/bin/launchctl", arguments)
+        } catch {
+            guard Self.isTransientBootstrapInputOutputError(error) else {
+                throw error
+            }
+            try await self.recoverFromTransientBootstrapFailure(
+                config: config,
+                originalError: error,
+                bootstrapArguments: arguments
+            )
+        }
+    }
+
+    private func recoverFromTransientBootstrapFailure(
+        config: AppConfig,
+        originalError: Error,
+        bootstrapArguments: [String]
+    ) async throws {
+        await self.sleepForLaunchAgentRecoveryPoll()
+        if await self.serviceRecoveredAfterTransientBootstrap(config: config) {
+            return
+        }
+
+        do {
+            _ = try await self.run("/bin/launchctl", bootstrapArguments)
+            return
+        } catch {
+            guard Self.isTransientBootstrapInputOutputError(error) else {
+                throw error
+            }
+        }
+
+        await self.sleepForLaunchAgentRecoveryPoll()
+        if await self.serviceRecoveredAfterTransientBootstrap(config: config) {
+            return
+        }
+        throw originalError
+    }
+
+    private func serviceRecoveredAfterTransientBootstrap(config: AppConfig) async -> Bool {
+        if await self.healthCheck(config: config) {
+            return true
+        }
+        let status = await self.status()
+        return status.running || status.launchctlState == "running"
+    }
+
+    private func sleepForLaunchAgentRecoveryPoll() async {
+        if let sleepHandler {
+            await sleepHandler(.milliseconds(350))
+        } else {
+            try? await Task.sleep(for: .milliseconds(350))
+        }
+    }
+
     private func waitForHealth(config: AppConfig, attempts: Int) async -> Bool {
         for _ in 0..<attempts {
             if await self.healthCheck(config: config) {
                 return true
             }
-            try? await Task.sleep(for: .milliseconds(350))
+            await self.sleepForLaunchAgentRecoveryPoll()
         }
         return false
     }
 
     private func healthCheck(config: AppConfig) async -> Bool {
+        if let healthCheckHandler {
+            return await healthCheckHandler(config)
+        }
+
         guard let url = URL(string: "http://\(config.publicHost):\(config.publicPort)/health") else {
             return false
         }
@@ -328,32 +416,16 @@ final class LocalDaemonController {
     ) throws -> Bool {
         try Helpers.ensureDirectory(dataDirectory)
 
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>Label</key><string>\(serviceLabel)</string>
-          <key>ProgramArguments</key>
-          <array>
-            <string>\(daemonBinaryPath)</string>
-            <string>serve</string>
-            <string>--data-dir</string>
-            <string>\(dataDirectory.path)</string>
-            <string>--public-host</string>
-            <string>\(config.publicHost)</string>
-            <string>--public-port</string>
-            <string>\(config.publicPort)</string>
-            <string>--admin-port</string>
-            <string>\(config.adminPort)</string>
-          </array>
-          <key>RunAtLoad</key><\(config.autoStart ? "true" : "false")/>
-          <key>KeepAlive</key><\(config.autoStart ? "true" : "false")/>
-          <key>StandardOutPath</key><string>\(stdoutPath)</string>
-          <key>StandardErrorPath</key><string>\(stderrPath)</string>
-        </dict>
-        </plist>
-        """
+        let daemonBinaryFingerprint = Self.daemonBinaryFingerprint(forPath: daemonBinaryPath)
+        let plist = Self.makeLaunchAgentPlist(
+            dataDirectory: dataDirectory,
+            serviceLabel: serviceLabel,
+            daemonBinaryPath: daemonBinaryPath,
+            daemonBinaryFingerprint: daemonBinaryFingerprint,
+            stdoutPath: stdoutPath,
+            stderrPath: stderrPath,
+            config: config
+        )
 
         let url = Paths.launchAgentURL()
         let data = Data(plist.utf8)
@@ -362,6 +434,75 @@ final class LocalDaemonController {
         }
         try Helpers.writeFile(url, data: data, posixMode: 0o644)
         return true
+    }
+
+    nonisolated static func daemonBinaryFingerprint(forPath path: String) -> String {
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            return "unreadable:\(path)"
+        }
+        defer { try? handle.close() }
+
+        do {
+            var hasher = SHA256()
+            while true {
+                let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                guard chunk.isEmpty == false else { break }
+                hasher.update(data: chunk)
+            }
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch {
+            return "unreadable:\(path)"
+        }
+    }
+
+    nonisolated static func makeLaunchAgentPlist(
+        dataDirectory: URL,
+        serviceLabel: String,
+        daemonBinaryPath: String,
+        daemonBinaryFingerprint: String,
+        stdoutPath: String,
+        stderrPath: String,
+        config: AppConfig
+    ) -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key><string>\(Self.xmlEscaped(serviceLabel))</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>\(Self.xmlEscaped(daemonBinaryPath))</string>
+            <string>serve</string>
+            <string>--data-dir</string>
+            <string>\(Self.xmlEscaped(dataDirectory.path))</string>
+            <string>--public-host</string>
+            <string>\(Self.xmlEscaped(config.publicHost))</string>
+            <string>--public-port</string>
+            <string>\(config.publicPort)</string>
+            <string>--admin-port</string>
+            <string>\(config.adminPort)</string>
+          </array>
+          <key>EnvironmentVariables</key>
+          <dict>
+            <key>\(Self.daemonBinarySHA256EnvironmentKey)</key><string>\(Self.xmlEscaped(daemonBinaryFingerprint))</string>
+          </dict>
+          <key>RunAtLoad</key><\(config.autoStart ? "true" : "false")/>
+          <key>KeepAlive</key><\(config.autoStart ? "true" : "false")/>
+          <key>StandardOutPath</key><string>\(Self.xmlEscaped(stdoutPath))</string>
+          <key>StandardErrorPath</key><string>\(Self.xmlEscaped(stderrPath))</string>
+        </dict>
+        </plist>
+        """
+    }
+
+    nonisolated private static func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 
     nonisolated private static func parseLaunchctlState(from output: String, installed: Bool) -> String {
@@ -507,6 +648,26 @@ final class LocalDaemonController {
         return nil
     }
 
+    nonisolated static func isTransientBootstrapInputOutputError(_ output: String) -> Bool {
+        let lowercased = output.lowercased()
+        return lowercased.contains("bootstrap failed: 5")
+            && lowercased.contains("input/output error")
+    }
+
+    nonisolated private static func isTransientBootstrapInputOutputError(_ error: Error) -> Bool {
+        Self.isTransientBootstrapInputOutputError(Self.launchctlErrorText(from: error))
+    }
+
+    nonisolated private static func launchctlErrorText(from error: Error) -> String {
+        if let proxyError = error as? ProxyError {
+            switch proxyError {
+            case .message(let message):
+                return message
+            }
+        }
+        return error.localizedDescription
+    }
+
     nonisolated private static func readTail(of url: URL, maxLines: Int) -> String {
         guard
             let text = try? String(contentsOf: url, encoding: .utf8),
@@ -580,7 +741,10 @@ final class LocalDaemonController {
     }
 
     private func run(_ executable: String, _ arguments: [String], ignoreFailure: Bool = false) async throws -> String {
-        try await Self.runBlocking {
+        if executable == "/bin/launchctl", let launchctlHandler {
+            return try await launchctlHandler(arguments, ignoreFailure)
+        }
+        return try await Self.runBlocking {
             try Self.runProcess(executable, arguments, ignoreFailure: ignoreFailure)
         }
     }

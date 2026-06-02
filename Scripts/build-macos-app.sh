@@ -214,11 +214,107 @@ prepare_mlx_ocr_helper() {
   echo "Cached Local MLX OCR helper: $MLX_OCR_HELPER_CACHE_BIN"
 }
 
+resolve_swift_stdlib_tool() {
+  local swift_exec_path swift_bin_dir tool
+  if [[ "$SWIFT_EXEC" == */* ]]; then
+    swift_exec_path="$SWIFT_EXEC"
+  else
+    swift_exec_path="$(command -v "$SWIFT_EXEC")"
+  fi
+
+  swift_bin_dir="$(cd "$(dirname "$swift_exec_path")" && pwd)"
+  tool="$swift_bin_dir/swift-stdlib-tool"
+  if [[ -x "$tool" ]]; then
+    printf '%s\n' "$tool"
+    return 0
+  fi
+
+  xcrun --find swift-stdlib-tool
+}
+
+swift_macos_runtime_library_path() {
+  "$SWIFT_EXEC" -print-target-info | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+for path in payload.get("paths", {}).get("runtimeLibraryPaths", []):
+    if path != "/usr/lib/swift" and path.endswith("/macosx"):
+        print(path)
+        break
+'
+}
+
+swift_rpaths_for_binary() {
+  local binary="$1"
+  otool -l "$binary" | awk '
+    $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+    in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+  '
+}
+
+is_external_swift_toolchain_rpath() {
+  local rpath="$1"
+  [[ "$rpath" == *".xctoolchain/usr/lib/swift"* ]]
+}
+
+embed_swift_runtime_libraries() {
+  local frameworks_dir="$1"
+  shift
+
+  local swift_runtime_library_path swift_stdlib_tool
+  swift_runtime_library_path="$(swift_macos_runtime_library_path)"
+  if [[ -z "$swift_runtime_library_path" || ! -d "$swift_runtime_library_path" ]]; then
+    echo "Unable to locate Swift macOS runtime libraries for $SWIFT_EXEC." >&2
+    exit 1
+  fi
+
+  swift_stdlib_tool="$(resolve_swift_stdlib_tool)"
+  "$swift_stdlib_tool" \
+    --copy \
+    --platform macosx \
+    --destination "$frameworks_dir" \
+    --source-libraries "$swift_runtime_library_path" \
+    "$@"
+}
+
+prepare_embedded_swift_runtime() {
+  local frameworks_dir="$1"
+  shift
+
+  local scan_args=()
+  local binary rpath
+  for binary in "$@"; do
+    scan_args+=(--scan-executable "$binary")
+  done
+
+  embed_swift_runtime_libraries "$frameworks_dir" "${scan_args[@]}"
+
+  for binary in "$@"; do
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$binary" 2>/dev/null || true
+    while IFS= read -r rpath; do
+      if is_external_swift_toolchain_rpath "$rpath"; then
+        install_name_tool -delete_rpath "$rpath" "$binary" 2>/dev/null || true
+      fi
+    done < <(swift_rpaths_for_binary "$binary")
+  done
+
+  for binary in "$@"; do
+    while IFS= read -r rpath; do
+      if is_external_swift_toolchain_rpath "$rpath"; then
+        echo "Swift toolchain rpath remains in $binary: $rpath" >&2
+        exit 1
+      fi
+    done < <(swift_rpaths_for_binary "$binary")
+  done
+}
+
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 APP_DIR="$OUTPUT_DIR/AI Coding Proxy.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 HELPERS_DIR="$APP_DIR/Contents/Helpers"
+FRAMEWORKS_DIR="$APP_DIR/Contents/Frameworks"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 REMOTE_RESOURCES_DIR="$RESOURCES_DIR/RemoteArtifacts"
 
@@ -278,7 +374,7 @@ if [[ "$BUNDLE_PROFILE" == "full" ]]; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$HELPERS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 if [[ "$BUNDLE_PROFILE" == "full" ]]; then
   mkdir -p "$REMOTE_RESOURCES_DIR"
 fi
@@ -313,6 +409,12 @@ chmod +x "$OUTPUT_DIR/mihomo-macos"
 if [[ -f "$THIRD_PARTY_NOTICE" ]]; then
   cp "$THIRD_PARTY_NOTICE" "$RESOURCES_DIR/mihomo-third-party-notice.txt"
 fi
+
+prepare_embedded_swift_runtime \
+  "$FRAMEWORKS_DIR" \
+  "$MACOS_DIR/CodexProxyDesktop" \
+  "$MACOS_DIR/codex-proxyd" \
+  "$HELPERS_DIR/CodexProxyMLXOCRServer"
 
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true

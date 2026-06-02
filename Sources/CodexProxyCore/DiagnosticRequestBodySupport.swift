@@ -9,6 +9,7 @@ public struct DiagnosticRequestBodyCaptureInput {
     public var actualModel: String?
     public var body: Data
     public var bodyObject: [String: Any]
+    public var metadata: [String: String]
     public var config: DiagnosticRequestBodyCaptureConfig
     public var createdAt: Int64
 
@@ -21,6 +22,7 @@ public struct DiagnosticRequestBodyCaptureInput {
         actualModel: String?,
         body: Data,
         bodyObject: [String: Any],
+        metadata: [String: String] = [:],
         config: DiagnosticRequestBodyCaptureConfig,
         createdAt: Int64 = Helpers.now()
     ) {
@@ -32,6 +34,7 @@ public struct DiagnosticRequestBodyCaptureInput {
         self.actualModel = actualModel
         self.body = body
         self.bodyObject = bodyObject
+        self.metadata = metadata
         self.config = config
         self.createdAt = createdAt
     }

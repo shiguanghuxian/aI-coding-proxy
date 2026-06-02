@@ -1436,6 +1436,28 @@ private struct DiagnosticRequestBodyDetailSheet: View {
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
 
+                if detail.entry.metadata.isEmpty == false {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(self.model.text(.labelDiagnosticMetadata))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        ForEach(detail.entry.metadata.sorted(by: { $0.key < $1.key }), id: \.key) { item in
+                            HStack(alignment: .top, spacing: 10) {
+                                Text(item.key)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 220, alignment: .leading)
+                                Text(item.value)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        }
+                    }
+                    .frame(width: 760, alignment: .leading)
+                    .padding(10)
+                    .dashboardFieldChrome()
+                }
+
                 if detail.available, let bodyText = detail.bodyText {
                     ScrollView {
                         Text(bodyText)

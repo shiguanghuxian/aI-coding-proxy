@@ -360,6 +360,192 @@ final class ClientConfigFileServiceTests: XCTestCase {
         XCTAssertTrue(preview.files[1].content.contains(#"base_url = "http://127.0.0.1:8787/v1""#))
     }
 
+    func testApplyCodexProjectRouteConfigurationOnlyWritesProjectModel() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/HeavyWork", isDirectory: true)
+        let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        try Self.write(
+            """
+            model = "old-model"
+            approval_policy = "never"
+
+            [tools]
+            web_search = true
+            """,
+            to: configURL
+        )
+        let rule = CodexProjectRouteRule(
+            label: "Heavy",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-heavy",
+            targetModel: "deepseek-reasoner",
+            proxyAPIKeyID: "heavy-key"
+        )
+
+        let proposed = context.service.previewProposedCodexProjectRoute(rule)
+        XCTAssertTrue(proposed.files.first?.content.contains(#"model = "cp-route-heavy""#) == true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: context.dataDirectory.appendingPathComponent("client-config-backups").path))
+
+        let backup = try context.service.applyCodexProjectRouteConfiguration(rule)
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertTrue(text.contains(#"model = "cp-route-heavy""#))
+        XCTAssertTrue(text.contains(#"approval_policy = "never""#))
+        XCTAssertTrue(text.contains("[tools]"))
+    }
+
+    func testClearCodexProjectRouteConfigurationOnlyRemovesTopLevelModel() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/HeavyWork", isDirectory: true)
+        let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        try Self.write(
+            """
+            model = "cp-route-heavy"
+            approval_policy = "never"
+
+            [tools]
+            model = "tool-model"
+            web_search = true
+            """,
+            to: configURL
+        )
+        let rule = CodexProjectRouteRule(
+            label: "Heavy",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-heavy",
+            targetModel: "deepseek-reasoner",
+            proxyAPIKeyID: "heavy-key"
+        )
+
+        let backup = try context.service.clearCodexProjectRouteConfiguration(rule)
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertFalse(text.contains(#"model = "cp-route-heavy""#))
+        XCTAssertTrue(text.contains(#"approval_policy = "never""#))
+        XCTAssertTrue(text.contains("[tools]"))
+        XCTAssertTrue(text.contains(#"model = "tool-model""#))
+    }
+
+    func testClearCodexProjectRouteConfigurationCreatesEmptyConfigWhenMissing() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/EmptyWork", isDirectory: true)
+        let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        let rule = CodexProjectRouteRule(
+            label: "Empty",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-empty",
+            targetModel: "gpt-5",
+            proxyAPIKeyID: "empty-key"
+        )
+
+        let backup = try context.service.clearCodexProjectRouteConfiguration(rule)
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertEqual(text, "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: configURL.path))
+    }
+
+    func testApplyClaudeProjectRouteConfigurationWritesSelectedSettingsScope() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/ClaudeWork", isDirectory: true)
+        let settingsURL = projectURL.appendingPathComponent(".claude/settings.local.json")
+        try Self.write(
+            """
+            {
+              "model": "old-model",
+              "env": { "FOO": "bar" },
+              "permissions": { "allow": ["Bash(ls)"] }
+            }
+            """,
+            to: settingsURL
+        )
+        let rule = CodexProjectRouteRule(
+            client: .claudeCode,
+            claudeSettingsScope: .local,
+            label: "Claude Local",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-claude",
+            targetModel: "claude-sonnet-4-5",
+            proxyAPIKeyID: "claude-key"
+        )
+
+        let proposed = context.service.previewProposedProjectRoute(rule)
+        XCTAssertTrue(proposed.files.first?.content.contains("cp-route-claude") == true)
+        XCTAssertTrue(proposed.files.first?.content.contains("ANTHROPIC_CUSTOM_MODEL_OPTION") == true)
+        XCTAssertTrue(proposed.files.first?.content.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME") == true)
+        XCTAssertTrue(proposed.files.first?.content.contains("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION") == true)
+
+        let backup = try context.service.applyProjectRouteConfiguration(rule)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any])
+        let env = try XCTUnwrap(object["env"] as? [String: Any])
+        let permissions = try XCTUnwrap(object["permissions"] as? [String: Any])
+
+        XCTAssertEqual(backup.files.map(\.path), [settingsURL.path])
+        XCTAssertEqual(object["model"] as? String, "cp-route-claude")
+        XCTAssertEqual(env["FOO"] as? String, "bar")
+        XCTAssertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION"] as? String, "cp-route-claude")
+        XCTAssertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] as? String, "项目路由：Claude Local")
+        XCTAssertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"] as? String, "由 Codex Proxy 项目路由转发到绑定账号")
+        XCTAssertNotNil(permissions["allow"])
+        XCTAssertFalse(proposed.files.first?.content.contains("ANTHROPIC_AUTH_TOKEN") == true)
+    }
+
+    func testClearClaudeProjectRouteConfigurationRemovesTopLevelModelAndManagedCustomModelEnvOnly() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/ClaudeShared", isDirectory: true)
+        let settingsURL = projectURL.appendingPathComponent(".claude/settings.json")
+        try Self.write(
+            """
+            {
+              "model": "cp-route-claude",
+              "env": {
+                "FOO": "bar",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": "cp-route-claude",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "项目路由：Claude Shared",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "由 Codex Proxy 项目路由转发到绑定账号"
+              },
+              "permissions": { "allow": ["Bash(ls)"] }
+            }
+            """,
+            to: settingsURL
+        )
+        let rule = CodexProjectRouteRule(
+            client: .claudeCode,
+            claudeSettingsScope: .shared,
+            label: "Claude Shared",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-claude",
+            targetModel: "claude-sonnet-4-5",
+            proxyAPIKeyID: "claude-key"
+        )
+
+        let backup = try context.service.clearProjectRouteConfiguration(rule)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any])
+        let env = try XCTUnwrap(object["env"] as? [String: Any])
+        let permissions = try XCTUnwrap(object["permissions"] as? [String: Any])
+
+        XCTAssertEqual(backup.files.map(\.path), [settingsURL.path])
+        XCTAssertNil(object["model"])
+        XCTAssertEqual(env["FOO"] as? String, "bar")
+        XCTAssertNil(env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
+        XCTAssertNil(env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"])
+        XCTAssertNil(env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"])
+        XCTAssertNotNil(permissions["allow"])
+    }
+
     func testLoadBackupDetailReadsExistingAndMissingFiles() throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
