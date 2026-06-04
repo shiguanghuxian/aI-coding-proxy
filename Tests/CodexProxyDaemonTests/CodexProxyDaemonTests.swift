@@ -1197,7 +1197,7 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
-    func testGenericChatCompletionsAdapterMapsReasoningEffortAndPreservesThinking() async throws {
+    func testGenericChatCompletionsAdapterMapsReasoningEffortAndStripsThinkingHookFields() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
 
@@ -1247,8 +1247,8 @@ final class CodexProxyDaemonTests: XCTestCase {
             let lastChatBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
             let chatPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lastChatBody.utf8)) as? [String: Any])
             XCTAssertEqual(chatPayload["reasoning_effort"] as? String, "vendor-deep")
-            let thinking = try XCTUnwrap(chatPayload["thinking"] as? [String: Any])
-            XCTAssertEqual(thinking["type"] as? String, "enabled")
+            XCTAssertNil(chatPayload["thinking"])
+            XCTAssertNil(chatPayload["enable_thinking"])
 
             let lowResponse = await harness.service.handle(
                 Self.makePublicRequest(
@@ -1266,6 +1266,93 @@ final class CodexProxyDaemonTests: XCTestCase {
             let lowChatBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
             let lowPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lowChatBody.utf8)) as? [String: Any])
             XCTAssertEqual(lowPayload["reasoning_effort"] as? String, "low")
+            XCTAssertNil(lowPayload["thinking"])
+            XCTAssertNil(lowPayload["enable_thinking"])
+        }
+    }
+
+    func testGenericDirectChatCompletionsRepairsToolHistoryByDefault() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["qwen-coder"],
+            requireValidToolCallHistory: true,
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Generic Direct Stable Provider",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-generic-direct-stable-provider",
+                    enabled: true
+                )
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"""
+                    {"model":"qwen-coder","messages":[{"role":"system","content":"system one"},{"role":"user","content":"inspect repo"},{"role":"system","content":"system two"},{"role":"assistant","content":"","tool_calls":[{"id":"call_generic_direct_missing","type":"function","function":{"name":"run_command","arguments":"{\"command\":\"ls\"}"}}]},{"role":"user","content":"continue"}],"thinking":{"type":"enabled"},"enable_thinking":true,"tool_choice":"auto","stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [
+                        ProxyHeaderName.testAccountKey: added.accountKey,
+                        "conversation_id": "generic-direct-provider-stable-session",
+                    ]
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let snapshot = await probe.snapshot()
+            let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let upstreamPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(upstreamBody.utf8)) as? [String: Any])
+            XCTAssertNil(upstreamPayload["thinking"])
+            XCTAssertNil(upstreamPayload["enable_thinking"])
+            XCTAssertNil(upstreamPayload["tool_choice"])
+
+            let messages = try XCTUnwrap(upstreamPayload["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.first?["role"] as? String, "system")
+            XCTAssertEqual(messages.first?["content"] as? String, "system one\n\nsystem two")
+            let assistantIndex = try XCTUnwrap(messages.firstIndex { message in
+                let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+                return toolCalls.contains { ($0["id"] as? String) == "call_generic_direct_missing" }
+            })
+            XCTAssertNil(messages[assistantIndex]["content"])
+            XCTAssertNil(messages[assistantIndex]["reasoning_content"])
+            XCTAssertEqual(messages[assistantIndex + 1]["role"] as? String, "tool")
+            XCTAssertEqual(messages[assistantIndex + 1]["tool_call_id"] as? String, "call_generic_direct_missing")
+            XCTAssertEqual(messages[assistantIndex + 1]["content"] as? String, ChatCompletionsCompatibility.missingToolOutputPlaceholder)
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let latestLog = try XCTUnwrap(logs.entries.first)
+            let diagnostics = try await harness.controller.diagnosticRequestBodies(requestLogID: latestLog.id)
+            let diagnostic = try XCTUnwrap(diagnostics.first)
+            XCTAssertEqual(diagnostic.metadata["chat_compatibility_profile"], "generic")
+            XCTAssertEqual(diagnostic.metadata["reasoning_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["tool_output_placeholder_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["assistant_tool_content_omitted_by_provider_count"], "1")
         }
     }
 
@@ -1317,6 +1404,187 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testGenericResponsesChatCompletionsStableAssemblyKeepsToolPrefixGrowingByDefault() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["qwen-coder"],
+            requireValidToolCallHistory: true,
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "Generic Strict Stable Provider",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-generic-strict-stable-provider",
+                    enabled: true
+                )
+            )
+            let headers = [
+                ProxyHeaderName.testAccountKey: added.accountKey,
+                "conversation_id": "generic-strict-provider-stable-session",
+            ]
+
+            let first = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"{"model":"qwen-coder","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]}],"stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let firstBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstBody))
+
+            let second = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"qwen-coder","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect repo"}]},{"type":"function_call","call_id":"call_generic_stable_missing","name":"run_command","arguments":"{\"command\":\"ls\"}"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"stream":false}
+                    """#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let secondBody = try await Self.data(from: second.body)
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
+
+            let snapshot = await probe.snapshot()
+            let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let upstreamPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(upstreamBody.utf8)) as? [String: Any])
+            let messages = try XCTUnwrap(upstreamPayload["messages"] as? [[String: Any]])
+            func containsToolCall(_ message: [String: Any], id: String) -> Bool {
+                let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+                return toolCalls.contains { ($0["id"] as? String) == id }
+            }
+            XCTAssertTrue(messages.contains { containsToolCall($0, id: "call_generic_stable_missing") })
+            let assistantIndex = try XCTUnwrap(messages.firstIndex {
+                containsToolCall($0, id: "call_generic_stable_missing")
+            })
+            XCTAssertNil(messages[assistantIndex]["content"])
+            XCTAssertNil(messages[assistantIndex]["reasoning_content"])
+            XCTAssertEqual(messages[assistantIndex + 1]["role"] as? String, "tool")
+            XCTAssertEqual(messages[assistantIndex + 1]["tool_call_id"] as? String, "call_generic_stable_missing")
+            XCTAssertEqual(messages[assistantIndex + 1]["content"] as? String, ChatCompletionsCompatibility.missingToolOutputPlaceholder)
+            XCTAssertEqual(upstreamPayload["max_tokens"] as? Int, nil)
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let latestLog = try XCTUnwrap(logs.entries.first(where: { $0.accountKey == added.accountKey }))
+            let diagnostics = try await harness.controller.diagnosticRequestBodies(requestLogID: latestLog.id)
+            let diagnostic = try XCTUnwrap(diagnostics.first)
+            XCTAssertEqual(diagnostic.metadata["chat_compatibility_profile"], "generic")
+            XCTAssertEqual(diagnostic.metadata["chat_assembly_mode"], "provider_stable")
+            XCTAssertEqual(diagnostic.metadata["reasoning_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["tool_output_placeholder_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["chat_previous_messages_are_prefix_of_current"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_account_same_as_previous"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_provider_shape_same_as_previous"], "true")
+        }
+    }
+
+    func testDeepSeekResponsesChatCompletionsUsesRecordBaseURLWhenAuthJSONHasDefaultBaseURL() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+        let proxyAPIKey = config.proxyAPIKey
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-chat"],
+            requireReasoningContentForAssistantToolCallHistory: true,
+            requireValidToolCallHistory: true,
+            responsesAvailable: false,
+            toolTurnMode: true
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "DeepSeek Record Base URL",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-deepseek-record-base-url",
+                    enabled: true
+                )
+            )
+            let normalizedBaseURL = try OpenAICompatibleUpstream.normalizeBaseURL(
+                baseURL,
+                providerPreset: .genericOpenAICompatible
+            )
+            var record = try harness.controller.store.loadAccountRecord(id: added.id)
+            let authJSON = """
+            {
+              "auth_mode": "openai_api_key",
+              "provider_preset": "generic_openai_compatible",
+              "upstream_adapter": "chat_completions",
+              "tokens": {
+                "access_token": "sk-deepseek-record-base-url",
+                "provider_preset": "generic_openai_compatible",
+                "account_id": "\(record.accountID)"
+              }
+            }
+            """
+            record.authJSON = authJSON
+            record.upstreamBaseURL = normalizedBaseURL
+            record.updatedAt = Helpers.now()
+            _ = try harness.controller.store.upsertAccount(record)
+            XCTAssertTrue(
+                try harness.controller.store.listAccountRecords().contains { $0.accountKey == added.accountKey }
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"deepseek-chat","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]},{"type":"reasoning","encrypted_content":"record base url thinking"},{"type":"function_call","call_id":"call_record_base_url","name":"run_command","arguments":"{\"command\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_record_base_url","output":"/tmp/repo"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"stream":false}
+                    """#,
+                    proxyKey: proxyAPIKey
+                ),
+                kind: .publicAPI
+            )
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+
+            let snapshot = await probe.snapshot()
+            let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(upstreamBody.contains(#""reasoning_content":"record base url thinking""#), upstreamBody)
+        }
+    }
+
     func testGenericChatCompletionsRestoresDeepSeekReasoningCache() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -1362,7 +1630,10 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertEqual(first.statusCode, 200, Self.string(from: firstResponseBody))
             let firstSnapshot = await probe.snapshot()
             let firstBody = try XCTUnwrap(firstSnapshot.chatRequestBodies.last)
-            XCTAssertFalse(firstBody.contains(#""thinking""#), firstBody)
+            let firstPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(firstBody.utf8)) as? [String: Any])
+            let firstThinking = try XCTUnwrap(firstPayload["thinking"] as? [String: Any])
+            XCTAssertEqual(firstThinking["type"] as? String, "enabled")
+            XCTAssertEqual(firstPayload["reasoning_effort"] as? String, "high")
 
             let second = await harness.service.handle(
                 Self.makePublicRequest(
@@ -1382,13 +1653,26 @@ final class CodexProxyDaemonTests: XCTestCase {
             let snapshot = await probe.snapshot()
             let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
             XCTAssertTrue(followUpBody.contains(#""reasoning_content":"cached generic thinking""#), followUpBody)
-            XCTAssertFalse(followUpBody.contains(#""thinking""#), followUpBody)
+            let followUpPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(followUpBody.utf8)) as? [String: Any])
+            let followUpThinking = try XCTUnwrap(followUpPayload["thinking"] as? [String: Any])
+            XCTAssertEqual(followUpThinking["type"] as? String, "enabled")
+            XCTAssertEqual(followUpPayload["reasoning_effort"] as? String, "high")
         }
     }
 
     func testGenericResponsesChatCompletionsUsesEncryptedReasoningRoundTripBeforePlaceholder() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+        let proxyAPIKey = config.proxyAPIKey
 
         let probe = GenericOpenAICompatibilityProbe()
         let upstream = Self.makeGenericOpenAICompatibilityApplication(
@@ -1420,7 +1704,7 @@ final class CodexProxyDaemonTests: XCTestCase {
                     body: #"""
                     {"model":"deepseek-chat","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]},{"type":"reasoning","encrypted_content":"encrypted full thinking","summary":[{"type":"summary_text","text":"visible summary only"}]},{"type":"function_call","call_id":"call_encrypted_roundtrip","name":"run_command","arguments":"{\"command\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_encrypted_roundtrip","output":"/tmp/repo"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"thinking":{"type":"enabled","budget_tokens":512},"stream":false}
                     """#,
-                    proxyKey: harness.config.proxyAPIKey,
+                    proxyKey: proxyAPIKey,
                     extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
                 ),
                 kind: .publicAPI
@@ -1435,6 +1719,124 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertFalse(upstreamBody.contains("visible summary only"), upstreamBody)
             XCTAssertTrue(upstreamBody.contains(#""tool_calls""#), upstreamBody)
             XCTAssertTrue(upstreamBody.contains(#""role":"tool""#), upstreamBody)
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let requestLog = try XCTUnwrap(logs.entries.first(where: { $0.accountKey == added.accountKey }))
+            XCTAssertTrue(requestLog.hasDiagnosticRequestBody)
+            let diagnostics = try await harness.controller.diagnosticRequestBodies(requestLogID: requestLog.id)
+            let diagnostic = try XCTUnwrap(diagnostics.first)
+            XCTAssertEqual(diagnostic.metadata["chat_compatibility_profile"], "deep_seek_v4_thinking")
+            XCTAssertEqual(diagnostic.metadata["chat_assembly_mode"], "deep_seek_stable")
+            XCTAssertEqual(diagnostic.metadata["used_encrypted_content"], "true")
+            XCTAssertEqual(diagnostic.metadata["reasoning_source_encrypted_content_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["reasoning_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["tool_output_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["chat_prefix_stability_tracked"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_prefix_same_as_previous"], "unknown")
+            XCTAssertEqual(diagnostic.metadata["chat_previous_messages_are_prefix_of_current"], "unknown")
+            XCTAssertEqual(diagnostic.metadata["chat_provider_shape_same_as_previous"], "unknown")
+            XCTAssertEqual(diagnostic.metadata["chat_provider_defaults_thinking"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_provider_default_reasoning_effort"], "high")
+            XCTAssertFalse((diagnostic.metadata["final_messages_prefix_sha256"] ?? "").isEmpty)
+        }
+    }
+
+    func testGenericResponsesChatCompletionsDeepSeekDiagnosticsTrackMessagePrefixStability() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        var config = try await harness.controller.loadConfig()
+        config.diagnosticRequestBodyCapture = DiagnosticRequestBodyCaptureConfig(
+            enabled: true,
+            retentionDays: 7,
+            maxBodySizeBytes: 64 * 1_024,
+            captureJSONOnly: true
+        )
+        _ = try await harness.controller.saveConfig(config)
+        let proxyAPIKey = config.proxyAPIKey
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-chat"],
+            requireReasoningContentForAssistantToolCallHistory: true,
+            requireValidToolCallHistory: true,
+            responsesAvailable: false,
+            toolTurnMode: true
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "DeepSeek Prefix Diagnostics",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-deepseek-prefix",
+                    enabled: true
+                )
+            )
+            let headers = [
+                ProxyHeaderName.testAccountKey: added.accountKey,
+                "session_id": "deepseek-prefix-session",
+            ]
+
+            let first = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"deepseek-chat","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]}],"stream":false}
+                    """#,
+                    proxyKey: proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let firstBody = try await Self.data(from: first.body)
+            XCTAssertEqual(first.statusCode, 200, Self.string(from: firstBody))
+
+            let second = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/responses",
+                    body: #"""
+                    {"model":"deepseek-chat","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]},{"type":"reasoning","encrypted_content":"deepseek stable thinking"},{"type":"function_call","call_id":"call_deepseek_prefix","name":"run_command","arguments":"{\"command\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_deepseek_prefix","output":"/tmp/repo"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}],"stream":false}
+                    """#,
+                    proxyKey: proxyAPIKey,
+                    extraHeaders: headers
+                ),
+                kind: .publicAPI
+            )
+            let secondBody = try await Self.data(from: second.body)
+            XCTAssertEqual(second.statusCode, 200, Self.string(from: secondBody))
+
+            let snapshot = await probe.snapshot()
+            let followUpBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            XCTAssertTrue(followUpBody.contains(#""reasoning_content":"deepseek stable thinking""#), followUpBody)
+            XCTAssertFalse(followUpBody.contains(ChatCompletionsCompatibility.missingReasoningPlaceholder), followUpBody)
+
+            let logs = try await harness.controller.requestLogs(
+                query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10)
+            )
+            let latestLog = try XCTUnwrap(logs.entries.first(where: { $0.accountKey == added.accountKey }))
+            let diagnostics = try await harness.controller.diagnosticRequestBodies(requestLogID: latestLog.id)
+            let diagnostic = try XCTUnwrap(diagnostics.first)
+            XCTAssertEqual(diagnostic.metadata["chat_compatibility_profile"], "deep_seek_v4_thinking")
+            XCTAssertEqual(diagnostic.metadata["chat_assembly_mode"], "deep_seek_stable")
+            XCTAssertEqual(diagnostic.metadata["used_encrypted_content"], "true")
+            XCTAssertEqual(diagnostic.metadata["reasoning_source_encrypted_content_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["reasoning_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["tool_output_placeholder_count"], "0")
+            XCTAssertEqual(diagnostic.metadata["chat_prefix_stability_tracked"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_previous_messages_are_prefix_of_current"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_common_message_prefix_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["chat_previous_message_count"], "1")
+            XCTAssertEqual(diagnostic.metadata["chat_current_message_count"], "4")
+            XCTAssertEqual(diagnostic.metadata["chat_provider_shape_same_as_previous"], "true")
+            XCTAssertEqual(diagnostic.metadata["chat_account_same_as_previous"], "true")
         }
     }
 
@@ -1546,7 +1948,7 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
-    func testGenericResponsesChatCompletionsDropsIncompleteToolHistoryBeforeDeepSeekUpstream() async throws {
+    func testGenericResponsesChatCompletionsRepairsIncompleteToolHistoryBeforeDeepSeekUpstream() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
 
@@ -1588,8 +1990,10 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
             let snapshot = await probe.snapshot()
             let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
-            XCTAssertFalse(upstreamBody.contains("call_orphan"), upstreamBody)
-            XCTAssertFalse(upstreamBody.contains(#""tool_calls""#), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains("call_orphan"), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(#""tool_calls""#), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(ChatCompletionsCompatibility.missingReasoningPlaceholder), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(ChatCompletionsCompatibility.missingToolOutputPlaceholder), upstreamBody)
         }
     }
 
@@ -1762,6 +2166,54 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
+    func testGenericChatCompletionsDefaultsDeepSeekThinkingAndHighEffort() async throws {
+        let harness = try await Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
+
+        let probe = GenericOpenAICompatibilityProbe()
+        let upstream = Self.makeGenericOpenAICompatibilityApplication(
+            probe: probe,
+            routePrefix: "",
+            listedModels: ["deepseek-chat"],
+            responsesAvailable: false
+        )
+        try await upstream.test(.ahc()) { upstreamClient in
+            let baseURL = "http://localhost:\(upstreamClient.port ?? 0)"
+            let added = try await harness.controller.manualAddAPIKeyAccount(
+                ManualAPIKeyAccountInput(
+                    label: "DeepSeek Default Thinking",
+                    providerPreset: .genericOpenAICompatible,
+                    baseURL: baseURL,
+                    baseURLMode: .exactAPIPrefix,
+                    upstreamAdapter: .chatCompletions,
+                    apiKey: "sk-deepseek-default-thinking",
+                    enabled: true
+                )
+            )
+
+            let response = await harness.service.handle(
+                Self.makePublicRequest(
+                    path: "/v1/chat/completions",
+                    body: #"{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"temperature":0.7,"top_p":0.9,"stream":false}"#,
+                    proxyKey: harness.config.proxyAPIKey,
+                    extraHeaders: [ProxyHeaderName.testAccountKey: added.accountKey]
+                ),
+                kind: .publicAPI
+            )
+
+            let body = try await Self.data(from: response.body)
+            XCTAssertEqual(response.statusCode, 200, Self.string(from: body))
+            let snapshot = await probe.snapshot()
+            let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(upstreamBody.utf8)) as? [String: Any])
+            let thinking = try XCTUnwrap(payload["thinking"] as? [String: Any])
+            XCTAssertEqual(thinking["type"] as? String, "enabled")
+            XCTAssertEqual(payload["reasoning_effort"] as? String, "high")
+            XCTAssertNil(payload["temperature"])
+            XCTAssertNil(payload["top_p"])
+        }
+    }
+
     func testGenericChatCompletionsPreservesToolHistoryWithLatestReasoningFallbackForDeepSeekThinkingUpstream() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
@@ -1829,7 +2281,7 @@ final class CodexProxyDaemonTests: XCTestCase {
         }
     }
 
-    func testAnthropicCountTokensChatCompletionsDropsToolHistoryMissingReasoningBeforeDeepSeekThinkingUpstream() async throws {
+    func testAnthropicCountTokensChatCompletionsRepairsToolHistoryMissingReasoningBeforeDeepSeekThinkingUpstream() async throws {
         let harness = try await Self.makeHarness()
         defer { try? FileManager.default.removeItem(at: harness.dataDirectory) }
 
@@ -1873,8 +2325,11 @@ final class CodexProxyDaemonTests: XCTestCase {
             XCTAssertTrue(Self.string(from: body).contains(#""input_tokens""#), Self.string(from: body))
             let snapshot = await probe.snapshot()
             let upstreamBody = try XCTUnwrap(snapshot.chatRequestBodies.last)
-            XCTAssertFalse(upstreamBody.contains("call_count_uncached_reasoning"), upstreamBody)
-            XCTAssertFalse(upstreamBody.contains(#""tool_calls""#), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains("call_count_uncached_reasoning"), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(#""tool_calls""#), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(ChatCompletionsCompatibility.missingReasoningPlaceholder), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains(#""role":"tool""#), upstreamBody)
+            XCTAssertTrue(upstreamBody.contains("Package.swift"), upstreamBody)
         }
     }
 

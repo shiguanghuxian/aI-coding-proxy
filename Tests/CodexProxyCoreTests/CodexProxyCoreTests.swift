@@ -2464,7 +2464,7 @@ final class CodexProxyCoreTests: XCTestCase {
             now: 1_000
         )
 
-        let restored = cache.apply(
+        let restoredResult = cache.applyWithReport(
             to: [
                 "messages": [[
                     "role": "assistant",
@@ -2483,6 +2483,10 @@ final class CodexProxyCoreTests: XCTestCase {
             sessionKey: "session-a",
             now: 1_001
         )
+        XCTAssertEqual(restoredResult.report.restoredReasoningContentCount, 1)
+        XCTAssertEqual(restoredResult.report.restoredByToolCallIDCount, 1)
+        XCTAssertEqual(restoredResult.report.restoredExactReasoningContentCount, 1)
+        let restored = restoredResult.request
         let messages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.first?["reasoning_content"] as? String, "id matched thinking")
     }
@@ -2710,12 +2714,15 @@ final class CodexProxyCoreTests: XCTestCase {
                 ]],
             ]],
         ]
-        let restored = single.apply(
+        let restoredResult = single.applyWithReport(
             to: unknownToolRequest,
             accountKey: "account-a",
             sessionKey: "session-a",
             now: 4_001
         )
+        XCTAssertEqual(restoredResult.report.restoredReasoningContentCount, 1)
+        XCTAssertEqual(restoredResult.report.restoredByUniqueToolReasoningCount, 1)
+        let restored = restoredResult.request
         let restoredMessages = try XCTUnwrap(restored["messages"] as? [[String: Any]])
         XCTAssertEqual(restoredMessages.first?["reasoning_content"] as? String, "single tool thinking")
 
@@ -2742,14 +2749,41 @@ final class CodexProxyCoreTests: XCTestCase {
             sessionKey: "session-a",
             now: 4_001
         )
-        let latestRestored = multiple.apply(
+        let latestRestoredResult = multiple.applyWithReport(
             to: unknownToolRequest,
             accountKey: "account-a",
             sessionKey: "session-a",
             now: 4_002
         )
+        XCTAssertEqual(latestRestoredResult.report.restoredReasoningContentCount, 1)
+        XCTAssertEqual(latestRestoredResult.report.restoredByLatestToolReasoningCount, 1)
+        XCTAssertGreaterThan(latestRestoredResult.report.pinnedFallbackReasoningCount, 0)
+        let latestRestored = latestRestoredResult.request
         let latestRestoredMessages = try XCTUnwrap(latestRestored["messages"] as? [[String: Any]])
         XCTAssertEqual(latestRestoredMessages.first?["reasoning_content"] as? String, "second tool thinking")
+
+        multiple.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "third tool thinking",
+                callID: "call_three",
+                name: "search",
+                arguments: #"{"query":"cache"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_003
+        )
+        let pinnedRestoredResult = multiple.applyWithReport(
+            to: unknownToolRequest,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 4_004
+        )
+        XCTAssertEqual(pinnedRestoredResult.report.restoredReasoningContentCount, 1)
+        XCTAssertEqual(pinnedRestoredResult.report.restoredByToolCallIDCount, 1)
+        XCTAssertEqual(pinnedRestoredResult.report.restoredByLatestToolReasoningCount, 0)
+        let pinnedMessages = try XCTUnwrap(pinnedRestoredResult.request["messages"] as? [[String: Any]])
+        XCTAssertEqual(pinnedMessages.first?["reasoning_content"] as? String, "second tool thinking")
     }
 
     func testChatCompletionsReasoningCacheDoesNotUseLatestToolFallbackForPlainAssistantHistory() throws {
@@ -2905,6 +2939,27 @@ final class CodexProxyCoreTests: XCTestCase {
         )
         XCTAssertEqual(camel.chatCompatibilityProfile, .mimoStrict)
 
+        let genericStrict = try JSONDecoder().decode(
+            ChatCompletionsCompatibilityProfile.self,
+            from: Data(#""genericStrict""#.utf8)
+        )
+        XCTAssertEqual(genericStrict, .genericStrict)
+        let minimaxStrict = try JSONDecoder().decode(
+            ChatCompletionsCompatibilityProfile.self,
+            from: Data(#""minimax_strict""#.utf8)
+        )
+        XCTAssertEqual(minimaxStrict, .minimaxStrict)
+        let senseNovaStrict = try JSONDecoder().decode(
+            ChatCompletionsCompatibilityProfile.self,
+            from: Data(#""senseNovaStrict""#.utf8)
+        )
+        XCTAssertEqual(senseNovaStrict, .senseNovaStrict)
+        let kimiStrict = try JSONDecoder().decode(
+            ChatCompletionsCompatibilityProfile.self,
+            from: Data(#""kimiStrict""#.utf8)
+        )
+        XCTAssertEqual(kimiStrict, .kimiStrict)
+
         let authJSON = try AuthService.normalizeManualAPIKeyInput(
             baseURL: "https://mimo.example.com/v1",
             apiKey: "sk-test",
@@ -2913,6 +2968,63 @@ final class CodexProxyCoreTests: XCTestCase {
         )
         XCTAssertEqual(AuthService.extractAuthMetadata(from: authJSON).chatCompatibilityProfile, .mimoStrict)
         XCTAssertEqual(try AuthService.extractAuth(from: authJSON).chatCompatibilityProfile, .mimoStrict)
+
+        let strictAuthJSON = try AuthService.normalizeManualAPIKeyInput(
+            baseURL: "https://api.minimaxi.com/v1",
+            apiKey: "sk-test",
+            upstreamAdapter: .chatCompletions,
+            chatCompatibilityProfile: .minimaxStrict
+        )
+        XCTAssertEqual(AuthService.extractAuthMetadata(from: strictAuthJSON).chatCompatibilityProfile, .minimaxStrict)
+        XCTAssertEqual(try AuthService.extractAuth(from: strictAuthJSON).chatCompatibilityProfile, .minimaxStrict)
+    }
+
+    func testChatCompletionsCompatibilityAutoResolvesKnownStrictProviders() throws {
+        XCTAssertEqual(
+            ChatCompletionsCompatibility.resolvedProfile(
+                configured: .auto,
+                baseURL: "https://api.deepseek.com/v1",
+                providerPreset: .genericOpenAICompatible,
+                model: "deepseek-chat"
+            ),
+            .deepSeekV4Thinking
+        )
+        XCTAssertEqual(
+            ChatCompletionsCompatibility.resolvedProfile(
+                configured: .auto,
+                baseURL: "https://mimo.example.com/v1",
+                providerPreset: .genericOpenAICompatible,
+                model: "mimo-v4"
+            ),
+            .mimoStrict
+        )
+        XCTAssertEqual(
+            ChatCompletionsCompatibility.resolvedProfile(
+                configured: .auto,
+                baseURL: "https://api.minimaxi.com/v1",
+                providerPreset: .genericOpenAICompatible,
+                model: "MiniMax-M2"
+            ),
+            .minimaxStrict
+        )
+        XCTAssertEqual(
+            ChatCompletionsCompatibility.resolvedProfile(
+                configured: .auto,
+                baseURL: "https://token.sensenova.cn/v1",
+                providerPreset: .genericOpenAICompatible,
+                model: "deepseek-v4-flash"
+            ),
+            .senseNovaStrict
+        )
+        XCTAssertEqual(
+            ChatCompletionsCompatibility.resolvedProfile(
+                configured: .auto,
+                baseURL: "https://api.moonshot.cn/v1",
+                providerPreset: .genericOpenAICompatible,
+                model: "kimi-k2.6"
+            ),
+            .kimiStrict
+        )
     }
 
     func testChatCompletionsReasoningRoundTripsEncryptedContentFirst() throws {
@@ -2981,6 +3093,574 @@ final class CodexProxyCoreTests: XCTestCase {
         let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
         let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
         XCTAssertEqual(assistant["reasoning_content"] as? String, "private full thinking")
+    }
+
+    func testDeepSeekStableAssemblyMergesReasoningTextAndToolCalls() throws {
+        let normalized: [String: Any] = [
+            "model": "deepseek-chat",
+            "instructions": "system note",
+            "max_output_tokens": 128,
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "inspect"]],
+                ],
+                [
+                    "type": "reasoning",
+                    "encrypted_content": "encrypted turn thinking",
+                    "summary": [["type": "summary_text", "text": "visible summary"]],
+                ],
+                [
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [["type": "output_text", "text": "I will inspect."]],
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_stable_1",
+                    "name": "run_command",
+                    "arguments": #"{"command":"pwd"}"#,
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_stable_2",
+                    "name": "read_file",
+                    "arguments": #"{"path":"Package.swift"}"#,
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_stable_1",
+                    "output": "/tmp/repo",
+                ],
+            ],
+        ]
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: normalized,
+            upstreamModel: "deepseek-chat",
+            stream: false,
+            assemblyMode: .deepSeekStableAssembly
+        )
+
+        XCTAssertEqual(built.diagnostics.metadata["chat_assembly_mode"], "deep_seek_stable")
+        XCTAssertEqual(built.diagnostics.encryptedContentReasoningCount, 1)
+        XCTAssertEqual(built.request["max_completion_tokens"] as? Int, 128)
+        XCTAssertNil(built.request["max_tokens"])
+        let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertEqual(assistant["content"] as? String, "I will inspect.")
+        XCTAssertEqual(assistant["reasoning_content"] as? String, "encrypted turn thinking")
+        let toolCalls = try XCTUnwrap(assistant["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls.compactMap { $0["id"] as? String }, ["call_stable_1", "call_stable_2"])
+        XCTAssertTrue(messages.contains {
+            ($0["role"] as? String) == "tool"
+                && ($0["tool_call_id"] as? String) == "call_stable_1"
+        })
+    }
+
+    func testDeepSeekStableAssemblyFoldsReasoningAfterFunctionCallIntoSameAssistantTurn() throws {
+        let normalized: [String: Any] = [
+            "model": "deepseek-chat",
+            "max_output_tokens": 64,
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "inspect"]],
+                ],
+                [
+                    "type": "function_call",
+                    "call_id": "call_late_reasoning",
+                    "name": "run_command",
+                    "arguments": #"{"command":"ls"}"#,
+                ],
+                [
+                    "type": "reasoning",
+                    "encrypted_content": "late encrypted thinking",
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_late_reasoning",
+                    "output": "Package.swift",
+                ],
+            ],
+        ]
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: normalized,
+            upstreamModel: "deepseek-chat",
+            stream: false,
+            assemblyMode: .deepSeekStableAssembly
+        )
+
+        let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertEqual(assistant["reasoning_content"] as? String, "late encrypted thinking")
+        XCTAssertNil(assistant["content"])
+        XCTAssertEqual(built.diagnostics.assistantToolContentOmittedCount, 1)
+        XCTAssertTrue(Self.messagesContainToolCall(messages, id: "call_late_reasoning"))
+    }
+
+    func testDeepSeekStableAssemblyUsesMimo2CodexCompatibleToolMapping() throws {
+        let normalized: [String: Any] = [
+            "model": "deepseek-chat",
+            "input": "hello",
+            "tools": [
+                [
+                    "type": "local_shell",
+                ],
+                [
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply patch",
+                    "format": ["type": "grammar"],
+                ],
+                [
+                    "type": "namespace",
+                    "name": "mcp",
+                    "tools": [[
+                        "type": "function",
+                        "name": "read_file",
+                        "description": "Read file",
+                        "parameters": ["type": "object"],
+                        "strict": NSNull(),
+                    ]],
+                ],
+                [
+                    "type": "tool_search",
+                    "description": "Search deferred tools",
+                    "parameters": ["type": "object"],
+                ],
+                [
+                    "type": "web_search",
+                    "name": "web_search",
+                ],
+                [
+                    "type": "mcp",
+                    "server_label": "connector",
+                ],
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "read_file",
+                        "description": "Duplicate should be dropped",
+                        "parameters": ["type": "object"],
+                    ],
+                ],
+            ],
+        ]
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: normalized,
+            upstreamModel: "deepseek-chat",
+            stream: false,
+            assemblyMode: .deepSeekStableAssembly
+        )
+
+        let tools = try XCTUnwrap(built.request["tools"] as? [[String: Any]])
+        let names = tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+        XCTAssertEqual(names, ["shell", "apply_patch", "read_file", "tool_search"])
+        XCTAssertFalse(names.contains("web_search"))
+        XCTAssertFalse(names.contains("mcp"))
+
+        let shell = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "shell" })
+        let shellFunction = try XCTUnwrap(shell["function"] as? [String: Any])
+        let shellParameters = try XCTUnwrap(shellFunction["parameters"] as? [String: Any])
+        XCTAssertNotNil(shellParameters["required"])
+
+        let custom = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "apply_patch" })
+        let customFunction = try XCTUnwrap(custom["function"] as? [String: Any])
+        XCTAssertTrue((customFunction["description"] as? String)?.contains(#""grammar""#) == true)
+        let customParameters = try XCTUnwrap(customFunction["parameters"] as? [String: Any])
+        XCTAssertEqual(customParameters["additionalProperties"] as? Bool, true)
+
+        let readFile = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "read_file" })
+        let readFileFunction = try XCTUnwrap(readFile["function"] as? [String: Any])
+        XCTAssertNil(readFileFunction["strict"])
+    }
+
+    func testStandardAssemblyKeepsExistingMaxTokenAndToolContentBehavior() throws {
+        let normalized: [String: Any] = [
+            "model": "mimo-v4",
+            "max_output_tokens": 64,
+            "input": [
+                [
+                    "type": "function_call",
+                    "call_id": "call_standard",
+                    "name": "run_command",
+                    "arguments": #"{"command":"pwd"}"#,
+                ],
+                [
+                    "type": "function_call_output",
+                    "call_id": "call_standard",
+                    "output": "/tmp/repo",
+                ],
+            ],
+        ]
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: normalized,
+            upstreamModel: "mimo-v4",
+            stream: false
+        )
+
+        XCTAssertEqual(built.diagnostics.metadata["chat_assembly_mode"], "standard")
+        XCTAssertEqual(built.request["max_tokens"] as? Int, 64)
+        XCTAssertNil(built.request["max_completion_tokens"])
+        let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertEqual(assistant["content"] as? String, "")
+    }
+
+    func testGenericStrictProviderStrategyUsesStableAssemblyAndLocalToolRepair() throws {
+        let strategy = ChatCompletionsCompatibility.providerStrategy(
+            configured: .genericStrict,
+            baseURL: "https://provider.example.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            model: "qwen-coder"
+        )
+        XCTAssertEqual(strategy.providerID, .generic)
+        XCTAssertEqual(strategy.profile, .genericStrict)
+        XCTAssertEqual(strategy.assemblyMode, .providerStableAssembly)
+        XCTAssertTrue(strategy.forwardsResponsesReasoningEffort)
+        XCTAssertFalse(strategy.injectMissingPlainAssistantReasoning)
+        XCTAssertFalse(strategy.injectMissingToolReasoning)
+        XCTAssertTrue(strategy.injectMissingToolOutputs)
+        XCTAssertTrue(strategy.omitsEmptyAssistantToolContent)
+        XCTAssertEqual(strategy.stickySessionTTLSeconds, PromptCacheSupport.chatCompletionsAPIKeyStickySessionTTLSeconds)
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: [
+                "model": "qwen-coder",
+                "max_output_tokens": 64,
+                "parallel_tool_calls": false,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
+                "response_format": ["type": "json_object"],
+                "reasoning": ["effort": "high"],
+                "input": [[
+                    "type": "reasoning",
+                    "encrypted_content": "generic encrypted thinking",
+                ], [
+                    "type": "function_call",
+                    "call_id": "call_generic_stable",
+                    "name": "run_command",
+                    "arguments": #"{"command":"pwd"}"#,
+                ], [
+                    "type": "function_call_output",
+                    "call_id": "call_generic_stable",
+                    "output": "/tmp/repo",
+                ]],
+            ],
+            upstreamModel: "qwen-coder",
+            stream: false,
+            assemblyMode: strategy.assemblyMode,
+            forwardResponsesReasoningEffort: strategy.forwardsResponsesReasoningEffort
+        )
+
+        XCTAssertEqual(built.diagnostics.metadata["chat_assembly_mode"], "provider_stable")
+        XCTAssertEqual(built.request["max_completion_tokens"] as? Int, 64)
+        XCTAssertNil(built.request["max_tokens"])
+        XCTAssertEqual(built.request["parallel_tool_calls"] as? Bool, false)
+        XCTAssertEqual(built.request["presence_penalty"] as? Double, 0.2)
+        XCTAssertEqual(built.request["frequency_penalty"] as? Double, 0.3)
+        let responseFormat = try XCTUnwrap(built.request["response_format"] as? [String: Any])
+        XCTAssertEqual(responseFormat["type"] as? String, "json_object")
+        XCTAssertEqual(built.request["reasoning_effort"] as? String, "high")
+        let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertNil(assistant["content"])
+        XCTAssertEqual(assistant["reasoning_content"] as? String, "generic encrypted thinking")
+        XCTAssertTrue(Self.messagesContainToolCall(messages, id: "call_generic_stable"))
+        XCTAssertTrue(messages.contains {
+            ($0["role"] as? String) == "tool"
+                && ($0["tool_call_id"] as? String) == "call_generic_stable"
+        })
+
+        let repaired = ChatCompletionsCompatibility.prepareRequestWithReport(
+            built.request,
+            configuredProfile: .genericStrict,
+            baseURL: "https://provider.example.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_205
+        )
+        let repairedMessages = try XCTUnwrap(repaired.request["messages"] as? [[String: Any]])
+        XCTAssertTrue(Self.messagesContainToolCall(repairedMessages, id: "call_generic_stable"))
+        XCTAssertFalse(repairedMessages.contains {
+            ($0["reasoning_content"] as? String) == ChatCompletionsCompatibility.missingReasoningPlaceholder
+        })
+        XCTAssertFalse(repairedMessages.contains {
+            ($0["content"] as? String) == ChatCompletionsCompatibility.missingToolOutputPlaceholder
+        })
+        XCTAssertEqual(repaired.report.placeholderReasoningCount, 0)
+        XCTAssertEqual(repaired.report.placeholderToolOutputCount, 0)
+    }
+
+    func testGenericProviderStrategyUsesStableAssemblyByDefaultForPromptCachePrefix() throws {
+        let strategy = ChatCompletionsCompatibility.providerStrategy(
+            configured: .auto,
+            baseURL: "https://provider.example.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            model: "qwen-coder"
+        )
+        XCTAssertEqual(strategy.providerID, .generic)
+        XCTAssertEqual(strategy.profile, .generic)
+        XCTAssertEqual(strategy.assemblyMode, .providerStableAssembly)
+        XCTAssertTrue(strategy.forwardsResponsesReasoningEffort)
+        XCTAssertFalse(strategy.injectMissingToolReasoning)
+        XCTAssertFalse(strategy.injectMissingPlainAssistantReasoning)
+        XCTAssertTrue(strategy.injectMissingToolOutputs)
+        XCTAssertTrue(strategy.omitsEmptyAssistantToolContent)
+        XCTAssertTrue(strategy.removesThinkingParameters)
+        XCTAssertTrue(strategy.dropsToolChoiceAuto)
+        XCTAssertTrue(strategy.mergesSystemMessages)
+
+        let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
+            from: [
+                "model": "qwen-coder",
+                "max_output_tokens": 64,
+                "reasoning": ["effort": "high"],
+                "input": [[
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "inspect"]],
+                ], [
+                    "type": "reasoning",
+                    "encrypted_content": "generic encrypted thinking",
+                ], [
+                    "type": "function_call",
+                    "call_id": "call_generic_default_stable",
+                    "name": "run_command",
+                    "arguments": #"{"command":"pwd"}"#,
+                ], [
+                    "type": "function_call_output",
+                    "call_id": "call_generic_default_stable",
+                    "output": "/tmp/repo",
+                ]],
+            ],
+            upstreamModel: "qwen-coder",
+            stream: false,
+            assemblyMode: strategy.assemblyMode,
+            forwardResponsesReasoningEffort: strategy.forwardsResponsesReasoningEffort
+        )
+
+        XCTAssertEqual(built.diagnostics.metadata["chat_assembly_mode"], "provider_stable")
+        XCTAssertEqual(built.request["max_completion_tokens"] as? Int, 64)
+        XCTAssertNil(built.request["max_tokens"])
+        XCTAssertEqual(built.request["reasoning_effort"] as? String, "high")
+        let messages = try XCTUnwrap(built.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertNil(assistant["content"])
+        XCTAssertEqual(assistant["reasoning_content"] as? String, "generic encrypted thinking")
+        XCTAssertTrue(Self.messagesContainToolCall(messages, id: "call_generic_default_stable"))
+
+        let repaired = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "qwen-coder",
+                "stream": false,
+                "thinking": ["type": "enabled"],
+                "enable_thinking": true,
+                "tool_choice": "auto",
+                "messages": [
+                    ["role": "system", "content": "system one"],
+                    ["role": "user", "content": "inspect"],
+                    ["role": "system", "content": "system two"],
+                    [
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [[
+                            "id": "call_generic_default_missing_output",
+                            "type": "function",
+                            "function": [
+                                "name": "run_command",
+                                "arguments": #"{"command":"ls"}"#,
+                            ],
+                        ]],
+                    ],
+                    ["role": "user", "content": "continue"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://provider.example.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_207
+        )
+        XCTAssertEqual(repaired.report.effectiveProfile, .generic)
+        XCTAssertNil(repaired.request["thinking"])
+        XCTAssertNil(repaired.request["enable_thinking"])
+        XCTAssertNil(repaired.request["tool_choice"])
+        XCTAssertEqual(repaired.report.placeholderReasoningCount, 0)
+        XCTAssertEqual(repaired.report.placeholderToolOutputCount, 1)
+        XCTAssertEqual(repaired.report.omittedAssistantToolContentCount, 1)
+
+        let repairedMessages = try XCTUnwrap(repaired.request["messages"] as? [[String: Any]])
+        XCTAssertEqual(repairedMessages.first?["role"] as? String, "system")
+        XCTAssertEqual(repairedMessages.first?["content"] as? String, "system one\n\nsystem two")
+        let repairedAssistant = try XCTUnwrap(repairedMessages.first {
+            Self.messagesContainToolCall([$0], id: "call_generic_default_missing_output")
+        })
+        XCTAssertNil(repairedAssistant["content"])
+        XCTAssertNil(repairedAssistant["reasoning_content"])
+        XCTAssertTrue(repairedMessages.contains {
+            ($0["role"] as? String) == "tool"
+                && ($0["tool_call_id"] as? String) == "call_generic_default_missing_output"
+                && ($0["content"] as? String) == ChatCompletionsCompatibility.missingToolOutputPlaceholder
+        })
+    }
+
+    func testChatCompletionsCompatibilityMiniMaxStrictAppliesProviderSanitizers() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "MiniMax-M2",
+                "stream": false,
+                "thinking": ["type": "disabled"],
+                "enable_thinking": true,
+                "reasoning_effort": "high",
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "response_format": ["type": "json_object"],
+                "messages": [
+                    ["role": "user", "content": "hello"],
+                    ["role": "system", "content": "system one"],
+                    ["role": "assistant", "content": NSNull()],
+                    ["role": "system", "content": "system two"],
+                ],
+                "tools": [
+                    [
+                        "type": "function",
+                        "function": [
+                            "name": "lookup",
+                            "strict": NSNull(),
+                            "parameters": ["type": "object"],
+                        ],
+                    ],
+                    [
+                        "type": "function",
+                        "function": [
+                            "name": "lookup",
+                            "parameters": ["type": "object"],
+                        ],
+                    ],
+                    [
+                        "type": "web_search",
+                        "name": "web_search",
+                    ],
+                ],
+            ],
+            configuredProfile: .minimaxStrict,
+            baseURL: "https://api.minimaxi.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_206
+        )
+
+        XCTAssertEqual(prepared.report.effectiveProfile, .minimaxStrict)
+        XCTAssertEqual(prepared.report.providerID, .minimax)
+        XCTAssertNil(prepared.request["thinking"])
+        XCTAssertNil(prepared.request["enable_thinking"])
+        XCTAssertEqual(prepared.request["reasoning_effort"] as? String, "none")
+        XCTAssertNil(prepared.request["tool_choice"])
+        XCTAssertNotNil(prepared.request["parallel_tool_calls"])
+        XCTAssertNotNil(prepared.request["response_format"])
+        XCTAssertNil(prepared.request["stream_options"])
+
+        let tools = try XCTUnwrap(prepared.request["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 2)
+        let function = try XCTUnwrap(tools.first?["function"] as? [String: Any])
+        XCTAssertNil(function["strict"])
+        XCTAssertTrue(tools.contains { ($0["type"] as? String) == "web_search" })
+
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "assistant"])
+        XCTAssertEqual(messages.first?["content"] as? String, "system one\n\nsystem two")
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertNil(assistant["content"])
+    }
+
+    func testChatCompletionsCompatibilitySenseNovaAndKimiStrictProviderSanitizers() throws {
+        let senseNova = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "deepseek-v4-flash",
+                "stream": false,
+                "thinking": ["type": "disabled"],
+                "reasoning_effort": "high",
+                "tool_choice": "auto",
+                "response_format": ["type": "json_object"],
+                "messages": [
+                    ["role": "system", "content": "one"],
+                    ["role": "user", "content": "hello"],
+                    ["role": "system", "content": "two"],
+                ],
+                "tools": [
+                    [
+                        "type": "function",
+                        "function": [
+                            "name": "lookup",
+                            "strict": NSNull(),
+                            "parameters": ["type": "object"],
+                        ],
+                    ],
+                    [
+                        "type": "file_search",
+                        "name": "file_search",
+                    ],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://token.sensenova.cn/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_207
+        )
+
+        XCTAssertEqual(senseNova.report.effectiveProfile, .senseNovaStrict)
+        XCTAssertEqual(senseNova.report.providerID, .senseNova)
+        XCTAssertNil(senseNova.request["thinking"])
+        XCTAssertNil(senseNova.request["tool_choice"])
+        XCTAssertNil(senseNova.request["response_format"])
+        XCTAssertEqual(senseNova.request["reasoning_effort"] as? String, "none")
+        let senseNovaTools = try XCTUnwrap(senseNova.request["tools"] as? [[String: Any]])
+        XCTAssertEqual(senseNovaTools.count, 1)
+        XCTAssertEqual(senseNovaTools.first?["type"] as? String, "function")
+        let senseNovaMessages = try XCTUnwrap(senseNova.request["messages"] as? [[String: Any]])
+        XCTAssertEqual(senseNovaMessages.first?["role"] as? String, "system")
+        XCTAssertEqual(senseNovaMessages.first?["content"] as? String, "one\n\ntwo")
+
+        let kimi = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "kimi-k2.6",
+                "stream": false,
+                "thinking": ["type": "enabled"],
+                "reasoning_effort": "high",
+                "messages": [
+                    ["role": "user", "content": "hello"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.moonshot.cn/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_208
+        )
+
+        XCTAssertEqual(kimi.report.effectiveProfile, .kimiStrict)
+        XCTAssertEqual(kimi.report.providerID, .kimi)
+        XCTAssertNotNil(kimi.request["thinking"])
+        XCTAssertNil(kimi.request["reasoning_effort"])
     }
 
     func testChatCompletionsCompatibilityDeepSeekV4PreservesStrictToolHistoryWithPlaceholders() throws {
@@ -3060,6 +3740,231 @@ final class CodexProxyCoreTests: XCTestCase {
                 && ($0["content"] as? String) == ChatCompletionsCompatibility.missingToolOutputPlaceholder
         })
         XCTAssertFalse(messages.contains { ($0["tool_call_id"] as? String) == "orphan" })
+    }
+
+    func testChatCompletionsCompatibilityDeepSeekDefaultsThinkingEnabledAndHighEffort() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "deepseek-chat",
+                "stream": false,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.deepseek.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_005
+        )
+
+        XCTAssertEqual(prepared.report.metadata["chat_provider_defaults_thinking"], "true")
+        XCTAssertEqual(prepared.report.metadata["chat_provider_default_reasoning_effort"], "high")
+        let thinking = try XCTUnwrap(prepared.request["thinking"] as? [String: Any])
+        XCTAssertEqual(thinking["type"] as? String, "enabled")
+        XCTAssertEqual(prepared.request["reasoning_effort"] as? String, "high")
+        XCTAssertNil(prepared.request["temperature"])
+        XCTAssertNil(prepared.request["top_p"])
+        XCTAssertNil(prepared.request["stream_options"])
+
+        let disabled = ChatCompletionsCompatibility.prepareRequest(
+            [
+                "model": "deepseek-chat",
+                "stream": false,
+                "thinking": ["type": "disabled"],
+                "reasoning_effort": "none",
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.deepseek.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_006
+        )
+        let disabledThinking = try XCTUnwrap(disabled["thinking"] as? [String: Any])
+        XCTAssertEqual(disabledThinking["type"] as? String, "disabled")
+        XCTAssertNil(disabled["reasoning_effort"])
+    }
+
+    func testChatCompletionsCompatibilityDeepSeekAddsPlainAssistantMixedModePlaceholder() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "deepseek-chat",
+                "stream": false,
+                "reasoning_effort": "medium",
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                    ["role": "assistant", "content": "plain historical answer"],
+                    ["role": "user", "content": "continue"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.deepseek.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_010
+        )
+
+        XCTAssertEqual(prepared.report.placeholderReasoningCount, 1)
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertEqual(assistant["reasoning_content"] as? String, ChatCompletionsCompatibility.missingReasoningPlaceholder)
+    }
+
+    func testChatCompletionsCompatibilityMimoDoesNotAddPlainAssistantPlaceholder() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "mimo-v4",
+                "stream": false,
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                    ["role": "assistant", "content": "plain historical answer"],
+                    ["role": "user", "content": "continue"],
+                ],
+            ],
+            configuredProfile: .mimoStrict,
+            baseURL: "https://mimo.example.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_011
+        )
+
+        XCTAssertEqual(prepared.report.placeholderReasoningCount, 0)
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertNil(assistant["reasoning_content"])
+    }
+
+    func testChatCompletionsCompatibilityDeepSeekRepairsInterruptedToolTurnLocally() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "deepseek-chat",
+                "stream": false,
+                "reasoning_effort": "medium",
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                    [
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [[
+                            "id": "call_interrupted",
+                            "type": "function",
+                            "function": [
+                                "name": "run_command",
+                                "arguments": #"{"command":"pwd"}"#,
+                            ],
+                        ]],
+                    ],
+                    ["role": "developer", "content": "late instruction"],
+                    ["role": "tool", "tool_call_id": "call_interrupted", "content": "/tmp/repo"],
+                    ["role": "user", "content": "continue"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.deepseek.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: nil,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_012
+        )
+
+        XCTAssertEqual(prepared.report.placeholderReasoningCount, 1)
+        XCTAssertEqual(prepared.report.placeholderToolOutputCount, 1)
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        let assistantIndex = try XCTUnwrap(messages.firstIndex {
+            Self.messagesContainToolCall([$0], id: "call_interrupted")
+        })
+        XCTAssertEqual(messages[assistantIndex + 1]["role"] as? String, "tool")
+        XCTAssertEqual(messages[assistantIndex + 1]["tool_call_id"] as? String, "call_interrupted")
+        XCTAssertEqual(messages[assistantIndex + 1]["content"] as? String, ChatCompletionsCompatibility.missingToolOutputPlaceholder)
+        XCTAssertEqual(messages[assistantIndex + 2]["role"] as? String, "developer")
+        XCTAssertFalse(messages.contains {
+            ($0["role"] as? String) == "tool"
+                && ($0["content"] as? String) == "/tmp/repo"
+        })
+    }
+
+    func testChatCompletionsCompatibilityUsesCachedReasoningBeforeDeepSeekPlaceholder() throws {
+        let cache = ChatCompletionsReasoningCache(ttlSeconds: 60, capacity: 8)
+        cache.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "latest real thinking",
+                callID: "call_seen",
+                name: "run_command",
+                arguments: #"{"command":"pwd"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_020
+        )
+        cache.record(
+            completedResponse: Self.completedReasoningToolCallResponse(
+                reasoning: "newest real thinking",
+                callID: "call_newest",
+                name: "read_file",
+                arguments: #"{"path":"Package.swift"}"#
+            ),
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_021
+        )
+
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
+            [
+                "model": "deepseek-chat",
+                "stream": false,
+                "reasoning_effort": "medium",
+                "messages": [
+                    ["role": "user", "content": "inspect"],
+                    [
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [[
+                            "id": "call_unknown",
+                            "type": "function",
+                            "function": [
+                                "name": "list_files",
+                                "arguments": #"{"path":"."}"#,
+                            ],
+                        ]],
+                    ],
+                    ["role": "tool", "tool_call_id": "call_unknown", "content": "Package.swift"],
+                    ["role": "user", "content": "continue"],
+                ],
+            ],
+            configuredProfile: .auto,
+            baseURL: "https://api.deepseek.com/v1",
+            providerPreset: .genericOpenAICompatible,
+            reasoningCache: cache,
+            accountKey: "account-a",
+            sessionKey: "session-a",
+            now: 6_022
+        )
+
+        XCTAssertEqual(prepared.report.cacheRestoredReasoningCount, 1)
+        XCTAssertEqual(prepared.report.cacheRestoredByLatestToolReasoningCount, 1)
+        XCTAssertEqual(prepared.report.placeholderReasoningCount, 0)
+        XCTAssertEqual(prepared.report.metadata["reasoning_source_cache_latest_tool_count"], "1")
+        XCTAssertEqual(prepared.report.metadata["reasoning_placeholder_count"], "0")
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" })
+        XCTAssertEqual(assistant["reasoning_content"] as? String, "newest real thinking")
+        XCTAssertFalse(messages.contains {
+            ($0["reasoning_content"] as? String) == ChatCompletionsCompatibility.missingReasoningPlaceholder
+        })
     }
 
     func testChatCompletionsCompatibilityKeepsRealReasoningWithoutPlaceholdersAndStablePrefixHash() throws {
@@ -3143,8 +4048,8 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertNil(messages.first?["reasoning_content"])
     }
 
-    func testChatCompletionsCompatibilityGenericDropsIncompleteToolGroupConservatively() throws {
-        let prepared = ChatCompletionsCompatibility.prepareRequest(
+    func testChatCompletionsCompatibilityGenericStrictRepairsIncompleteToolGroupLocally() throws {
+        let prepared = ChatCompletionsCompatibility.prepareRequestWithReport(
             [
                 "model": "generic-chat",
                 "messages": [
@@ -3164,7 +4069,7 @@ final class CodexProxyCoreTests: XCTestCase {
                     ["role": "user", "content": "continue"],
                 ],
             ],
-            configuredProfile: .generic,
+            configuredProfile: .genericStrict,
             baseURL: "https://example.com/v1",
             providerPreset: .genericOpenAICompatible,
             reasoningCache: nil,
@@ -3172,9 +4077,20 @@ final class CodexProxyCoreTests: XCTestCase {
             sessionKey: "session-a",
             now: 6_200
         )
-        let messages = try XCTUnwrap(prepared["messages"] as? [[String: Any]])
-        XCTAssertFalse(Self.messagesContainToolCall(messages, id: "call_missing_output"))
-        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(prepared.report.placeholderReasoningCount, 0)
+        XCTAssertEqual(prepared.report.placeholderToolOutputCount, 1)
+        XCTAssertEqual(prepared.report.omittedAssistantToolContentCount, 1)
+        let messages = try XCTUnwrap(prepared.request["messages"] as? [[String: Any]])
+        XCTAssertTrue(Self.messagesContainToolCall(messages, id: "call_missing_output"))
+        let assistant = try XCTUnwrap(messages.first { Self.messagesContainToolCall([$0], id: "call_missing_output") })
+        XCTAssertNil(assistant["content"])
+        XCTAssertNil(assistant["reasoning_content"])
+        XCTAssertTrue(messages.contains {
+            ($0["role"] as? String) == "tool"
+                && ($0["tool_call_id"] as? String) == "call_missing_output"
+                && ($0["content"] as? String) == ChatCompletionsCompatibility.missingToolOutputPlaceholder
+        })
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["user", "assistant", "tool", "user"])
     }
 
     func testChatCompletionsReasoningCachePreparedRequestOnlyDropsToolGroupsMissingReasoning() throws {
@@ -3870,6 +4786,45 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(chatMessage["reasoning_content"] as? String, "deepseek thinking")
     }
 
+    func testCompletedChatCompletionCanExtractInlineThinkTagsForStrictProviders() throws {
+        let payload: [String: Any] = [
+            "id": "chatcmpl_inline_think",
+            "created": 1_710_000_000,
+            "choices": [[
+                "message": [
+                    "role": "assistant",
+                    "content": "<think>private inline thinking</think>Visible answer",
+                ],
+            ]],
+            "usage": [
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            ],
+        ]
+
+        let completed = ProxyTranscoder.completedResponse(
+            fromChatCompletion: payload,
+            requestedModel: "minimax-m2",
+            extractInlineThinkTags: true
+        )
+        let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        let reasoning = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "reasoning" }))
+        let message = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "message" }))
+
+        XCTAssertEqual(reasoning["encrypted_content"] as? String, "private inline thinking")
+        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "Visible answer")
+        XCTAssertEqual((message["content"] as? [[String: Any]])?.first?["text"] as? String, "Visible answer")
+
+        let unextracted = ProxyTranscoder.completedResponse(
+            fromChatCompletion: payload,
+            requestedModel: "generic-model",
+            extractInlineThinkTags: false
+        )
+        XCTAssertNil((unextracted["output"] as? [[String: Any]])?.first(where: { ($0["type"] as? String) == "reasoning" }))
+        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: unextracted), "<think>private inline thinking</think>Visible answer")
+    }
+
     func testToolCallChatCompletionReasoningContentIsPreservedAsReasoningItem() throws {
         let payload: [String: Any] = [
             "id": "chatcmpl_reasoning_tool",
@@ -3988,6 +4943,48 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(chatMessage["reasoning_content"] as? String, "think more")
         let usage = ProxyTranscoder.usageFromCompletedResponse(completed)
         XCTAssertEqual(usage.cacheHitTokens, 1)
+    }
+
+    func testStreamingChatCompletionCanExtractInlineThinkTagsOnFinalize() throws {
+        var state = OpenAIChatSyntheticStreamState(
+            responseID: "resp_inline_stream",
+            createdAt: 1_710_000_000,
+            textItemID: "msg_inline_stream"
+        )
+        let events: [SSEEvent] = [
+            .init(event: nil, data: #"{"id":"chatcmpl_inline_stream","created":1710000000,"choices":[{"delta":{"role":"assistant"}}]}"#),
+            .init(event: nil, data: #"{"choices":[{"delta":{"content":"<think>stream private"}}]}"#),
+            .init(event: nil, data: #"{"choices":[{"delta":{"content":" thinking</think>Visible"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"prompt_cache_hit_tokens":1}}"#),
+        ]
+
+        var chunks = try events.flatMap { event in
+            try ProxyTranscoder.responseSSEChunks(
+                fromChatCompletionEvent: event,
+                state: &state,
+                requestedModel: "minimax-m2",
+                extractInlineThinkTags: true
+            )
+        }
+        chunks.append(contentsOf: ProxyTranscoder.finalizeResponseSSEChunks(
+            fromChatCompletionState: state,
+            requestedModel: "minimax-m2",
+            extractInlineThinkTags: true
+        ))
+
+        let completed = ProxyTranscoder.completedResponse(
+            fromChatCompletionState: state,
+            requestedModel: "minimax-m2",
+            extractInlineThinkTags: true
+        )
+        let output = try XCTUnwrap(completed["output"] as? [[String: Any]])
+        let reasoning = try XCTUnwrap(output.first(where: { ($0["type"] as? String) == "reasoning" }))
+        XCTAssertEqual(reasoning["encrypted_content"] as? String, "stream private thinking")
+        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: completed), "Visible")
+
+        let decoded = ProxyTranscoder.decodeSSE(Data(chunks.joined().utf8))
+        let finalized = try XCTUnwrap(ProxyTranscoder.extractCompletedResponse(from: decoded))
+        XCTAssertEqual(ProxyTranscoder.extractAssistantText(from: finalized), "Visible")
+        XCTAssertEqual(ProxyTranscoder.extractReasoningContent(from: finalized), "stream private thinking")
     }
 
     func testStreamingChatCompletionProducesResponsesLifecycleAndDisjointToolOutputIndices() throws {
@@ -6246,6 +7243,82 @@ final class CodexProxyCoreTests: XCTestCase {
         XCTAssertEqual(context.stickySessionKey, context.upstreamPromptCacheKey)
         XCTAssertEqual(context.upstreamPromptCacheKey?.hasPrefix("cpx_"), true)
         XCTAssertTrue(context.isGeminiCLISession)
+    }
+
+    func testChatCompletionsPrefixStabilityMetadataTracksPrefixAndAccountChanges() async {
+        let store = ChatCompletionsPrefixStabilityStore(ttlSeconds: 60)
+
+        let first = await store.metadata(
+            sessionKey: "session-a",
+            model: "deepseek-chat",
+            accountKey: "account-a",
+            prefixHash: "hash-one",
+            messageHashes: ["msg-a", "msg-b"],
+            providerShapeHash: "shape-one",
+            now: 10_000
+        )
+        XCTAssertEqual(first["chat_prefix_stability_tracked"], "true")
+        XCTAssertEqual(first["chat_prefix_same_as_previous"], "unknown")
+        XCTAssertEqual(first["chat_account_same_as_previous"], "unknown")
+        XCTAssertEqual(first["chat_previous_messages_are_prefix_of_current"], "unknown")
+        XCTAssertEqual(first["chat_current_message_count"], "2")
+        XCTAssertEqual(first["chat_provider_shape_same_as_previous"], "unknown")
+
+        let same = await store.metadata(
+            sessionKey: "session-a",
+            model: "deepseek-chat",
+            accountKey: "account-a",
+            prefixHash: "hash-one",
+            messageHashes: ["msg-a", "msg-b", "msg-c"],
+            providerShapeHash: "shape-one",
+            now: 10_001
+        )
+        XCTAssertEqual(same["chat_prefix_same_as_previous"], "true")
+        XCTAssertEqual(same["chat_account_same_as_previous"], "true")
+        XCTAssertEqual(same["chat_previous_messages_prefix_sha256"], "hash-one")
+        XCTAssertEqual(same["chat_previous_messages_are_prefix_of_current"], "true")
+        XCTAssertEqual(same["chat_common_message_prefix_count"], "2")
+        XCTAssertEqual(same["chat_previous_message_count"], "2")
+        XCTAssertEqual(same["chat_current_message_count"], "3")
+        XCTAssertEqual(same["chat_provider_shape_same_as_previous"], "true")
+
+        let switchedAccount = await store.metadata(
+            sessionKey: "session-a",
+            model: "deepseek-chat",
+            accountKey: "account-b",
+            prefixHash: "hash-one",
+            messageHashes: ["msg-a", "msg-x", "msg-c"],
+            providerShapeHash: "shape-two",
+            now: 10_002
+        )
+        XCTAssertEqual(switchedAccount["chat_prefix_same_as_previous"], "true")
+        XCTAssertEqual(switchedAccount["chat_account_same_as_previous"], "false")
+        XCTAssertEqual(switchedAccount["chat_previous_messages_are_prefix_of_current"], "false")
+        XCTAssertEqual(switchedAccount["chat_common_message_prefix_count"], "1")
+        XCTAssertEqual(switchedAccount["chat_provider_shape_same_as_previous"], "false")
+
+        let changedPrefix = await store.metadata(
+            sessionKey: "session-a",
+            model: "deepseek-chat",
+            accountKey: "account-b",
+            prefixHash: "hash-two",
+            messageHashes: ["msg-a", "msg-x", "msg-c", "msg-d"],
+            providerShapeHash: "shape-two",
+            now: 10_003
+        )
+        XCTAssertEqual(changedPrefix["chat_prefix_same_as_previous"], "false")
+        XCTAssertEqual(changedPrefix["chat_account_same_as_previous"], "true")
+        XCTAssertEqual(changedPrefix["chat_previous_messages_are_prefix_of_current"], "true")
+        XCTAssertEqual(changedPrefix["chat_provider_shape_same_as_previous"], "true")
+
+        let untracked = await store.metadata(
+            sessionKey: nil,
+            model: "deepseek-chat",
+            accountKey: "account-a",
+            prefixHash: "hash-one",
+            now: 10_004
+        )
+        XCTAssertEqual(untracked["chat_prefix_stability_tracked"], "false")
     }
 
     func testAnthropicUsageNormalizationPromotesCachedTokensToCacheReadInputTokens() {
@@ -10112,14 +11185,15 @@ final class CodexProxyCoreTests: XCTestCase {
             )
             XCTAssertEqual(upstreamPayload["stream"] as? Bool, false)
             XCTAssertNil(upstreamPayload["input"])
-            XCTAssertEqual(upstreamPayload["max_tokens"] as? Int, 16)
+            XCTAssertNil(upstreamPayload["max_tokens"])
+            XCTAssertEqual(upstreamPayload["max_completion_tokens"] as? Int, 16)
             let messages = try XCTUnwrap(upstreamPayload["messages"] as? [[String: Any]])
             XCTAssertEqual(messages.first?["role"] as? String, "system")
             XCTAssertEqual(messages.first?["content"] as? String, "Be concise")
             XCTAssertEqual(messages.last?["role"] as? String, "user")
             XCTAssertEqual(messages.last?["content"] as? String, "hello")
             XCTAssertNotNil(upstreamPayload["tools"])
-            XCTAssertEqual(upstreamPayload["tool_choice"] as? String, "auto")
+            XCTAssertNil(upstreamPayload["tool_choice"])
 
             let page = try store.loadRequestLogs(query: RequestLogQuery(timePreset: .last24Hours, page: 1, pageSize: 10))
             let entry = try XCTUnwrap(page.entries.first)

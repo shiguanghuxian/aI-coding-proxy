@@ -192,6 +192,14 @@ final class LocalDaemonController {
         await self.status().running
     }
 
+    func sleep(for duration: Duration) async {
+        if let sleepHandler {
+            await sleepHandler(duration)
+        } else {
+            try? await Task.sleep(for: duration)
+        }
+    }
+
     func status() async -> LocalServiceStatus {
         if let statusHandler {
             return await statusHandler()
@@ -355,11 +363,7 @@ final class LocalDaemonController {
     }
 
     private func sleepForLaunchAgentRecoveryPoll() async {
-        if let sleepHandler {
-            await sleepHandler(.milliseconds(350))
-        } else {
-            try? await Task.sleep(for: .milliseconds(350))
-        }
+        await self.sleep(for: .milliseconds(350))
     }
 
     private func waitForHealth(config: AppConfig, attempts: Int) async -> Bool {

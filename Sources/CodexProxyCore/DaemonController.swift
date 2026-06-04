@@ -581,6 +581,7 @@ public final class DaemonController: @unchecked Sendable {
     private let manageManagedProxyRuntime: Bool
     private let managedProxyRuntime: (any ManagedProxyRuntimeControlling)?
     private let stickySessionBindings: StickySessionBindingStore
+    private let chatCompletionsPrefixStabilityStore: ChatCompletionsPrefixStabilityStore
     private let managedProxyNodeCoordinator: ManagedProxyNodeCoordinator
     private let accountModelDiscoveryCache: AccountModelDiscoveryCache
     private let chatCompletionsReasoningCache: ChatCompletionsReasoningCache
@@ -625,6 +626,7 @@ public final class DaemonController: @unchecked Sendable {
         self.adminBaseURLProvider = adminBaseURLProvider
         self.manageManagedProxyRuntime = manageManagedProxyRuntime
         self.stickySessionBindings = StickySessionBindingStore()
+        self.chatCompletionsPrefixStabilityStore = ChatCompletionsPrefixStabilityStore()
         self.managedProxyNodeCoordinator = ManagedProxyNodeCoordinator()
         self.accountModelDiscoveryCache = AccountModelDiscoveryCache()
         self.chatCompletionsReasoningCache = ChatCompletionsReasoningCache(store: self.store)
@@ -4357,7 +4359,9 @@ public final class DaemonController: @unchecked Sendable {
                         from: compatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
                         stream: false,
-                        auth: candidate.auth
+                        auth: candidate.auth,
+                        upstreamBaseURL: self.chatCompletionsBaseURL(for: candidate),
+                        forwardResponsesReasoningEffort: false
                     )
                     upstreamRequestBody = builtRequest.body
                     upstreamDiagnosticMetadata = builtRequest.metadata
@@ -4382,7 +4386,20 @@ public final class DaemonController: @unchecked Sendable {
                     )
                     upstreamRequestBody = preparedRequest.body
                     upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
+                    upstreamDiagnosticMetadata.merge(
+                        await self.chatCompletionsPrefixStabilityMetadata(
+                            request: upstreamRequestBody,
+                            candidate: candidate,
+                            promptCacheContext: promptCacheContext
+                        )
+                    ) { _, new in new }
                 }
+                let extractInlineThinkTags = adapterUsesChatCompletions
+                    ? self.chatCompletionsProviderStrategy(
+                        for: candidate,
+                        request: upstreamRequestBody
+                    ).extractsInlineThinkTags
+                    : false
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
                 let candidateAuth = candidate.auth
@@ -4391,7 +4408,10 @@ public final class DaemonController: @unchecked Sendable {
                     var upstream = self.upstreamRequest(
                         for: candidateAuth,
                         config: requestConfig,
-                        accept: "application/json"
+                        accept: "application/json",
+                        upstreamBaseURL: adapterUsesChatCompletions
+                            ? self.chatCompletionsBaseURL(for: candidate)
+                            : nil
                     )
                     if candidateAuth.authMode == .chatGPT,
                        let sessionID = upstreamSessionID
@@ -4462,7 +4482,8 @@ public final class DaemonController: @unchecked Sendable {
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
                         requestedModel: requestedModel,
-                        input: compatibleRequest["input"]
+                        input: compatibleRequest["input"],
+                        extractInlineThinkTags: extractInlineThinkTags
                     )
                     self.chatCompletionsReasoningCache.record(
                         completedResponse: completed,
@@ -5227,7 +5248,9 @@ public final class DaemonController: @unchecked Sendable {
                     adapter: adapter,
                     stream: downstreamStream,
                     preserveCustomModel: explicitProxyTestCustomModel,
-                    useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting
+                    useResolvedModelAsFinalUpstreamModel: modelResolution.usesAccountModelRouting,
+                    upstreamBaseURL: self.chatCompletionsBaseURL(for: candidate),
+                    forwardResponsesReasoningEffort: reasoningEffort != nil
                 )
                 upstreamRequestBody = builtRequest.body
                 upstreamDiagnosticMetadata = builtRequest.metadata
@@ -5255,7 +5278,20 @@ public final class DaemonController: @unchecked Sendable {
                 )
                 upstreamRequestBody = preparedRequest.body
                 upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
+                upstreamDiagnosticMetadata.merge(
+                    await self.chatCompletionsPrefixStabilityMetadata(
+                        request: upstreamRequestBody,
+                        candidate: candidate,
+                        promptCacheContext: promptCacheContext
+                    )
+                ) { _, new in new }
             }
+            let extractInlineThinkTags = adapter == .chatCompletions
+                ? self.chatCompletionsProviderStrategy(
+                    for: candidate,
+                    request: upstreamRequestBody
+                ).extractsInlineThinkTags
+                : false
             let actualModel = self.loggedActualModel(from: upstreamRequestBody)
             let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
@@ -5265,7 +5301,10 @@ public final class DaemonController: @unchecked Sendable {
                         for: candidate.auth,
                         config: requestConfig,
                         accept: "text/event-stream",
-                        adapter: adapter
+                        adapter: adapter,
+                        upstreamBaseURL: adapter == .chatCompletions
+                            ? self.chatCompletionsBaseURL(for: candidate)
+                            : nil
                     )
                     if candidate.auth.authMode == .chatGPT,
                        let sessionID = promptCacheContext.upstreamSessionID
@@ -5350,10 +5389,17 @@ public final class DaemonController: @unchecked Sendable {
                         requestedModel: requestedModel,
                         inputData: streamInputData,
                         reasoningCacheAccountKey: candidate.record.accountKey,
-                        reasoningCacheSessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
+                        reasoningCacheSessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext),
+                        extractInlineThinkTags: extractInlineThinkTags
                     )
                     : response.body
-                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                await self.bindStickySessionIfNeeded(
+                    candidate: candidate,
+                    context: promptCacheContext,
+                    ttlSeconds: adapter == .chatCompletions
+                        ? self.chatCompletionsStickySessionTTLSeconds(for: candidate, request: upstreamRequestBody)
+                        : PromptCacheSupport.stickySessionTTLSeconds
+                )
                 return self.makeStreamingProxyResponse(
                     upstreamBody: adaptedBody,
                     endpoint: endpoint,
@@ -5377,7 +5423,10 @@ public final class DaemonController: @unchecked Sendable {
                     for: candidate.auth,
                     config: requestConfig,
                     accept: "application/json",
-                    adapter: adapter
+                    adapter: adapter,
+                    upstreamBaseURL: adapter == .chatCompletions
+                        ? self.chatCompletionsBaseURL(for: candidate)
+                        : nil
                 )
                 if candidate.auth.authMode == .chatGPT,
                    let sessionID = promptCacheContext.upstreamSessionID
@@ -5463,7 +5512,8 @@ public final class DaemonController: @unchecked Sendable {
                 completed = ProxyTranscoder.completedResponse(
                     fromChatCompletion: object,
                     requestedModel: requestedModel,
-                    input: upstreamCompatibleRequest["input"]
+                    input: upstreamCompatibleRequest["input"],
+                    extractInlineThinkTags: extractInlineThinkTags
                 )
                 self.chatCompletionsReasoningCache.record(
                     completedResponse: completed,
@@ -5523,7 +5573,13 @@ public final class DaemonController: @unchecked Sendable {
                 diagnosticRequestBodyID: diagnosticRequestBodyID
             )
             try self.noteCandidateAttemptSuccess(candidate)
-            await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+            await self.bindStickySessionIfNeeded(
+                candidate: candidate,
+                context: promptCacheContext,
+                ttlSeconds: adapter == .chatCompletions
+                    ? self.chatCompletionsStickySessionTTLSeconds(for: candidate, request: upstreamRequestBody)
+                    : PromptCacheSupport.stickySessionTTLSeconds
+            )
             return ProxyHTTPResponse(
                 statusCode: 200,
                 headers: ["content-type": "application/json"],
@@ -5650,7 +5706,9 @@ public final class DaemonController: @unchecked Sendable {
                         from: upstreamCompatibleRequest,
                         upstreamModel: resolvedUpstreamModel,
                         stream: downstreamStream,
-                        auth: candidate.auth
+                        auth: candidate.auth,
+                        upstreamBaseURL: self.chatCompletionsBaseURL(for: candidate),
+                        forwardResponsesReasoningEffort: reasoningEffort != nil
                     )
                     upstreamRequestBody = builtRequest.body
                     upstreamDiagnosticMetadata = builtRequest.metadata
@@ -5674,7 +5732,20 @@ public final class DaemonController: @unchecked Sendable {
                     )
                     upstreamRequestBody = preparedRequest.body
                     upstreamDiagnosticMetadata.merge(preparedRequest.metadata) { _, new in new }
+                    upstreamDiagnosticMetadata.merge(
+                        await self.chatCompletionsPrefixStabilityMetadata(
+                            request: upstreamRequestBody,
+                            candidate: candidate,
+                            promptCacheContext: promptCacheContext
+                        )
+                    ) { _, new in new }
                 }
+                let extractInlineThinkTags = adapterUsesChatCompletions
+                    ? self.chatCompletionsProviderStrategy(
+                        for: candidate,
+                        request: upstreamRequestBody
+                    ).extractsInlineThinkTags
+                    : false
                 let actualModel = self.loggedActualModel(from: upstreamRequestBody)
                 let serialized = try JSONSerialization.data(withJSONObject: upstreamRequestBody)
 
@@ -5682,7 +5753,13 @@ public final class DaemonController: @unchecked Sendable {
                     let candidateAuth = candidate.auth
                     let upstreamSessionID = promptCacheContext.upstreamSessionID
                     let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
-                        var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
+                        var upstream = self.upstreamRequest(
+                            for: candidateAuth,
+                            config: requestConfig,
+                            upstreamBaseURL: adapterUsesChatCompletions
+                                ? self.chatCompletionsBaseURL(for: candidate)
+                                : nil
+                        )
                         if candidateAuth.authMode == .chatGPT,
                            let sessionID = upstreamSessionID
                         {
@@ -5769,10 +5846,17 @@ public final class DaemonController: @unchecked Sendable {
                             requestedModel: requestedModel,
                             inputData: streamInputData,
                             reasoningCacheAccountKey: candidate.record.accountKey,
-                            reasoningCacheSessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext)
+                            reasoningCacheSessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext),
+                            extractInlineThinkTags: extractInlineThinkTags
                         )
                         : response.body
-                    await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                    await self.bindStickySessionIfNeeded(
+                        candidate: candidate,
+                        context: promptCacheContext,
+                        ttlSeconds: adapterUsesChatCompletions
+                            ? self.chatCompletionsStickySessionTTLSeconds(for: candidate, request: upstreamRequestBody)
+                            : PromptCacheSupport.stickySessionTTLSeconds
+                    )
                     return self.makeStreamingProxyResponse(
                         upstreamBody: adaptedBody,
                         endpoint: endpoint,
@@ -5794,7 +5878,13 @@ public final class DaemonController: @unchecked Sendable {
                 let candidateAuth = candidate.auth
                 let upstreamSessionID = promptCacheContext.upstreamSessionID
                 let (response, upstreamURL, diagnosticRequestBodyID) = try await self.withNetworkConfig(for: candidate.record) { requestConfig in
-                    var upstream = self.upstreamRequest(for: candidateAuth, config: requestConfig)
+                    var upstream = self.upstreamRequest(
+                        for: candidateAuth,
+                        config: requestConfig,
+                        upstreamBaseURL: adapterUsesChatCompletions
+                            ? self.chatCompletionsBaseURL(for: candidate)
+                            : nil
+                    )
                     if candidateAuth.authMode == .chatGPT,
                        let sessionID = upstreamSessionID
                     {
@@ -5880,7 +5970,8 @@ public final class DaemonController: @unchecked Sendable {
                     completed = ProxyTranscoder.completedResponse(
                         fromChatCompletion: object,
                         requestedModel: requestedModel,
-                        input: upstreamCompatibleRequest["input"]
+                        input: upstreamCompatibleRequest["input"],
+                        extractInlineThinkTags: extractInlineThinkTags
                     )
                     self.chatCompletionsReasoningCache.record(
                         completedResponse: completed,
@@ -5935,7 +6026,13 @@ public final class DaemonController: @unchecked Sendable {
                     diagnosticRequestBodyID: diagnosticRequestBodyID
                 )
                 try self.noteCandidateAttemptSuccess(candidate)
-                await self.bindStickySessionIfNeeded(candidate: candidate, context: promptCacheContext)
+                await self.bindStickySessionIfNeeded(
+                    candidate: candidate,
+                    context: promptCacheContext,
+                    ttlSeconds: adapterUsesChatCompletions
+                        ? self.chatCompletionsStickySessionTTLSeconds(for: candidate, request: upstreamRequestBody)
+                        : PromptCacheSupport.stickySessionTTLSeconds
+                )
                 return ProxyHTTPResponse(
                     statusCode: 200,
                     headers: ["content-type": "application/json"],
@@ -6098,7 +6195,8 @@ public final class DaemonController: @unchecked Sendable {
 
     private func bindStickySessionIfNeeded(
         candidate: ProxyCandidate,
-        context: PromptCacheContext
+        context: PromptCacheContext,
+        ttlSeconds: Int64 = PromptCacheSupport.stickySessionTTLSeconds
     ) async {
         guard let stickySessionKey = context.stickySessionKey,
               stickySessionKey.isEmpty == false,
@@ -6110,7 +6208,7 @@ public final class DaemonController: @unchecked Sendable {
         await self.stickySessionBindings.bind(
             sessionKey: stickySessionKey,
             accountKey: candidate.record.accountKey,
-            ttlSeconds: PromptCacheSupport.stickySessionTTLSeconds
+            ttlSeconds: ttlSeconds
         )
     }
 
@@ -6119,6 +6217,58 @@ public final class DaemonController: @unchecked Sendable {
             ?? context.sourcePromptCacheKey
             ?? context.sessionIdentifier
             ?? context.upstreamPromptCacheKey
+    }
+
+    private func chatCompletionsBaseURL(for candidate: ProxyCandidate) -> String {
+        candidate.record.upstreamBaseURL
+            ?? candidate.auth.upstreamBaseURL
+            ?? candidate.auth.providerPreset.defaultBaseURL
+    }
+
+    private func chatCompletionsProviderStrategy(
+        for candidate: ProxyCandidate,
+        request: [String: Any]
+    ) -> ChatCompletionsProviderStrategy {
+        ChatCompletionsCompatibility.providerStrategy(
+            configured: candidate.auth.chatCompatibilityProfile,
+            baseURL: self.chatCompletionsBaseURL(for: candidate),
+            providerPreset: candidate.auth.providerPreset,
+            model: request["model"] as? String
+        )
+    }
+
+    private func chatCompletionsStickySessionTTLSeconds(
+        for candidate: ProxyCandidate,
+        request: [String: Any]
+    ) -> Int64 {
+        guard candidate.auth.authMode == .openAIAPIKey,
+              self.usesOpenAIChatCompletionsAdapter(candidate.auth)
+        else {
+            return PromptCacheSupport.stickySessionTTLSeconds
+        }
+
+        return self.chatCompletionsProviderStrategy(
+            for: candidate,
+            request: request
+        ).stickySessionTTLSeconds
+    }
+
+    private func chatCompletionsPrefixStabilityMetadata(
+        request: [String: Any],
+        candidate: ProxyCandidate,
+        promptCacheContext: PromptCacheContext
+    ) async -> [String: String] {
+        let prefixHash = DiagnosticRequestBodySupport.normalizedPrefixSHA256(from: request)
+        let messageHashes = DiagnosticRequestBodySupport.normalizedMessageSHA256s(from: request)
+        let providerShapeHash = DiagnosticRequestBodySupport.normalizedProviderShapeSHA256(from: request)
+        return await self.chatCompletionsPrefixStabilityStore.metadata(
+            sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext),
+            model: request["model"] as? String,
+            accountKey: candidate.record.accountKey,
+            prefixHash: prefixHash,
+            messageHashes: messageHashes,
+            providerShapeHash: providerShapeHash
+        )
     }
 
     private struct PreparedChatCompletionsRequest {
@@ -6159,25 +6309,22 @@ public final class DaemonController: @unchecked Sendable {
             sessionKey: self.chatCompletionsReasoningSessionKey(from: promptCacheContext),
             now: Helpers.now()
         )
-        var prepared = preparedResult.request
+        let prepared = preparedResult.request
         var metadata = preparedResult.report.metadata
-        let effectiveProfile = ChatCompletionsCompatibility.resolvedProfile(
+        let strategy = ChatCompletionsCompatibility.providerStrategy(
             configured: candidate.auth.chatCompatibilityProfile,
             baseURL: baseURL,
             providerPreset: candidate.auth.providerPreset,
             model: (prepared["model"] as? String) ?? (request["model"] as? String)
         )
-        guard effectiveProfile == .generic,
-              forceToolHistoryProtection || self.requiresChatCompletionsThinkingToolHistoryProtection(
-                prepared,
-                auth: candidate.auth
-              )
-        else {
-            return PreparedChatCompletionsRequest(body: prepared, metadata: metadata)
+        if strategy.profile == .generic,
+           forceToolHistoryProtection || self.requiresChatCompletionsThinkingToolHistoryProtection(
+            prepared,
+            auth: candidate.auth
+           )
+        {
+            metadata["chat_tool_history_protection"] = "stable_local_repair"
         }
-        prepared = ChatCompletionsReasoningCache.removingToolCallHistoryMissingReasoningContent(from: prepared)
-        metadata["chat_tool_history_protection"] = "removed_missing_reasoning"
-        metadata.merge(self.chatCompletionsFinalRequestMetadata(prepared)) { _, new in new }
         return PreparedChatCompletionsRequest(body: prepared, metadata: metadata)
     }
 
@@ -6593,7 +6740,8 @@ public final class DaemonController: @unchecked Sendable {
     private func upstreamRequest(
         for auth: ExtractedAuth,
         config: AppConfig,
-        accept: String = "text/event-stream"
+        accept: String = "text/event-stream",
+        upstreamBaseURL: String? = nil
     ) -> (url: String, headers: [String: String]) {
         switch auth.authMode {
         case .chatGPT:
@@ -6615,9 +6763,19 @@ public final class DaemonController: @unchecked Sendable {
                 providerPreset: auth.providerPreset
             )
             if self.usesOpenAIChatCompletionsAdapter(auth) {
-                return (self.openAIChatCompletionsURL(config: config, auth: auth), headers)
+                return (
+                    self.openAIChatCompletionsURL(
+                        config: config,
+                        auth: auth,
+                        upstreamBaseURL: upstreamBaseURL
+                    ),
+                    headers
+                )
             }
-            return (self.openAIResponsesURL(config: config, auth: auth), headers)
+            return (
+                self.openAIResponsesURL(config: config, auth: auth, upstreamBaseURL: upstreamBaseURL),
+                headers
+            )
         case .geminiOAuth:
             return GeminiAuthService.apiRequest(auth: auth, method: "loadCodeAssist", accept: accept)
         case .anthropicAPIKey, .anthropicSubscriptionOAuth:
@@ -6774,7 +6932,8 @@ public final class DaemonController: @unchecked Sendable {
         requestedModel: String,
         inputData: Data? = nil,
         reasoningCacheAccountKey: String? = nil,
-        reasoningCacheSessionKey: String? = nil
+        reasoningCacheSessionKey: String? = nil,
+        extractInlineThinkTags: Bool = false
     ) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -6786,7 +6945,8 @@ public final class DaemonController: @unchecked Sendable {
                     let completed = ProxyTranscoder.completedResponse(
                         fromChatCompletionState: state,
                         requestedModel: requestedModel,
-                        input: input
+                        input: input,
+                        extractInlineThinkTags: extractInlineThinkTags
                     )
                     self.chatCompletionsReasoningCache.record(
                         completedResponse: completed,
@@ -6801,7 +6961,8 @@ public final class DaemonController: @unchecked Sendable {
                                 fromChatCompletionEvent: event,
                                 state: &state,
                                 requestedModel: requestedModel,
-                                input: input
+                                input: input,
+                                extractInlineThinkTags: extractInlineThinkTags
                             ) {
                                 continuation.yield(Data(syntheticChunk.utf8))
                             }
@@ -6817,7 +6978,8 @@ public final class DaemonController: @unchecked Sendable {
                             fromChatCompletionEvent: event,
                             state: &state,
                             requestedModel: requestedModel,
-                            input: input
+                            input: input,
+                            extractInlineThinkTags: extractInlineThinkTags
                         ) {
                             continuation.yield(Data(syntheticChunk.utf8))
                         }
@@ -6830,7 +6992,8 @@ public final class DaemonController: @unchecked Sendable {
                     for syntheticChunk in ProxyTranscoder.finalizeResponseSSEChunks(
                         fromChatCompletionState: state,
                         requestedModel: requestedModel,
-                        input: input
+                        input: input,
+                        extractInlineThinkTags: extractInlineThinkTags
                     ) {
                         continuation.yield(Data(syntheticChunk.utf8))
                     }
@@ -7275,12 +7438,39 @@ public final class DaemonController: @unchecked Sendable {
         auth: ExtractedAuth
     ) -> String {
         let trimmedSourceModel = sourceModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if self.shouldPreserveAnthropicSourceModelForChatCompletions(trimmedSourceModel, auth: auth) {
+            return trimmedSourceModel
+        }
         let mappedTarget = config.anthropicModelMappings.first(where: {
             $0.sourceModel == trimmedSourceModel
         })?.targetModel ?? config.anthropicDefaultTargetModel
         let trimmedMappedTarget = mappedTarget.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return trimmedMappedTarget.isEmpty ? AppConfig.defaultAnthropicTargetModel : trimmedMappedTarget
+    }
+
+    private func shouldPreserveAnthropicSourceModelForChatCompletions(
+        _ sourceModel: String,
+        auth: ExtractedAuth
+    ) -> Bool {
+        guard sourceModel.isEmpty == false,
+              auth.authMode == .openAIAPIKey,
+              self.usesOpenAIChatCompletionsAdapter(auth)
+        else {
+            return false
+        }
+        let modelOnlyProfile = ChatCompletionsCompatibility.resolvedProfile(
+            configured: .auto,
+            baseURL: nil,
+            providerPreset: .genericOpenAICompatible,
+            model: sourceModel
+        )
+        switch modelOnlyProfile {
+        case .deepSeekV4Thinking, .deepSeekLegacyReasoner, .mimoStrict:
+            return true
+        case .auto, .generic, .genericStrict, .minimaxStrict, .senseNovaStrict, .kimiStrict:
+            return false
+        }
     }
 
     private func normalizedGeminiSourceModel(_ value: String) -> String {
@@ -7330,7 +7520,15 @@ public final class DaemonController: @unchecked Sendable {
     }
 
     private func openAIResponsesURL(config: AppConfig, auth: ExtractedAuth) -> String {
-        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openAIResponsesURL(config: config, auth: auth, upstreamBaseURL: nil)
+    }
+
+    private func openAIResponsesURL(
+        config: AppConfig,
+        auth: ExtractedAuth,
+        upstreamBaseURL: String?
+    ) -> String {
+        let baseURL = (upstreamBaseURL ?? auth.upstreamBaseURL)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBaseURL = (baseURL?.isEmpty == false ? baseURL! : OpenAICompatibleUpstream.defaultBaseURL)
         return (try? OpenAICompatibleUpstream.responsesURL(
             from: resolvedBaseURL,
@@ -7346,7 +7544,15 @@ public final class DaemonController: @unchecked Sendable {
     }
 
     private func openAIChatCompletionsURL(config: AppConfig, auth: ExtractedAuth) -> String {
-        let baseURL = auth.upstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openAIChatCompletionsURL(config: config, auth: auth, upstreamBaseURL: nil)
+    }
+
+    private func openAIChatCompletionsURL(
+        config: AppConfig,
+        auth: ExtractedAuth,
+        upstreamBaseURL: String?
+    ) -> String {
+        let baseURL = (upstreamBaseURL ?? auth.upstreamBaseURL)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBaseURL = (baseURL?.isEmpty == false ? baseURL! : OpenAICompatibleUpstream.defaultBaseURL)
         return (try? OpenAICompatibleUpstream.chatCompletionsURL(
             from: resolvedBaseURL,
@@ -7379,7 +7585,8 @@ public final class DaemonController: @unchecked Sendable {
         for auth: ExtractedAuth,
         config: AppConfig,
         accept: String,
-        adapter: OpenAIUpstreamAdapter
+        adapter: OpenAIUpstreamAdapter,
+        upstreamBaseURL: String? = nil
     ) -> (url: String, headers: [String: String]) {
         let headers = OpenAICompatibleUpstream.requestHeaders(
             apiKey: auth.accessToken,
@@ -7388,9 +7595,9 @@ public final class DaemonController: @unchecked Sendable {
         )
         let url = switch adapter {
         case .responses:
-            self.openAIResponsesURL(config: config, auth: auth)
+            self.openAIResponsesURL(config: config, auth: auth, upstreamBaseURL: upstreamBaseURL)
         case .chatCompletions:
-            self.openAIChatCompletionsURL(config: config, auth: auth)
+            self.openAIChatCompletionsURL(config: config, auth: auth, upstreamBaseURL: upstreamBaseURL)
         }
         return (url, headers)
     }
@@ -7422,7 +7629,9 @@ public final class DaemonController: @unchecked Sendable {
         adapter: OpenAIUpstreamAdapter,
         stream: Bool,
         preserveCustomModel: Bool = false,
-        useResolvedModelAsFinalUpstreamModel: Bool = false
+        useResolvedModelAsFinalUpstreamModel: Bool = false,
+        upstreamBaseURL: String? = nil,
+        forwardResponsesReasoningEffort: Bool = false
     ) -> PreparedChatCompletionsRequest {
         let effectiveRequestedModel = (compatibleRequest["model"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7451,14 +7660,23 @@ public final class DaemonController: @unchecked Sendable {
                 metadata: [:]
             )
         case .chatCompletions:
+            let strategy = ChatCompletionsCompatibility.providerStrategy(
+                configured: auth.chatCompatibilityProfile,
+                baseURL: upstreamBaseURL ?? auth.upstreamBaseURL ?? auth.providerPreset.defaultBaseURL,
+                providerPreset: auth.providerPreset,
+                model: resolvedUpstreamModel
+            )
             let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
                 from: compatibleRequest,
                 upstreamModel: resolvedUpstreamModel,
-                stream: stream
+                stream: stream,
+                assemblyMode: strategy.assemblyMode,
+                forwardResponsesReasoningEffort: strategy.forwardsResponsesReasoningEffort
+                    && forwardResponsesReasoningEffort
             )
             return PreparedChatCompletionsRequest(
                 body: built.request,
-                metadata: built.diagnostics.metadata
+                metadata: built.diagnostics.metadata.merging(strategy.metadata) { _, new in new }
             )
         }
     }
@@ -7481,16 +7699,27 @@ public final class DaemonController: @unchecked Sendable {
         from compatibleRequest: [String: Any],
         upstreamModel: String,
         stream: Bool,
-        auth: ExtractedAuth
+        auth: ExtractedAuth,
+        upstreamBaseURL: String? = nil,
+        forwardResponsesReasoningEffort: Bool = false
     ) -> PreparedChatCompletionsRequest {
+        let strategy = ChatCompletionsCompatibility.providerStrategy(
+            configured: auth.chatCompatibilityProfile,
+            baseURL: upstreamBaseURL ?? auth.upstreamBaseURL ?? auth.providerPreset.defaultBaseURL,
+            providerPreset: auth.providerPreset,
+            model: upstreamModel
+        )
         let built = ProxyTranscoder.upstreamChatCompletionsRequestWithDiagnostics(
             from: compatibleRequest,
             upstreamModel: upstreamModel,
-            stream: stream
+            stream: stream,
+            assemblyMode: strategy.assemblyMode,
+            forwardResponsesReasoningEffort: strategy.forwardsResponsesReasoningEffort
+                && forwardResponsesReasoningEffort
         )
         return PreparedChatCompletionsRequest(
             body: built.request,
-            metadata: built.diagnostics.metadata
+            metadata: built.diagnostics.metadata.merging(strategy.metadata) { _, new in new }
         )
     }
 

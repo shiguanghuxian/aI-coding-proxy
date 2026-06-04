@@ -81,4 +81,50 @@ public enum DiagnosticRequestBodySupport {
         }
         return result
     }
+
+    public static func normalizedMessageSHA256s(from bodyObject: [String: Any]) -> [String] {
+        guard let messages = bodyObject["messages"] as? [[String: Any]], messages.isEmpty == false else {
+            return []
+        }
+        return messages.map { message in
+            guard JSONSerialization.isValidJSONObject(message),
+                  let data = try? JSONSerialization.data(withJSONObject: message, options: [.sortedKeys])
+            else {
+                return Helpers.sha256(Data())
+            }
+            return Helpers.sha256(data)
+        }
+    }
+
+    public static func normalizedProviderShapeSHA256(from bodyObject: [String: Any]) -> String {
+        let keys = [
+            "model",
+            "tools",
+            "tool_choice",
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "max_tokens",
+            "max_completion_tokens",
+            "parallel_tool_calls",
+            "stream",
+            "stream_options",
+        ]
+        var result: [String: Any] = [:]
+        for key in keys {
+            if let value = bodyObject[key] {
+                result[key] = value
+            }
+        }
+        guard JSONSerialization.isValidJSONObject(result),
+              let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        else {
+            return Helpers.sha256(Data())
+        }
+        return Helpers.sha256(data)
+    }
 }

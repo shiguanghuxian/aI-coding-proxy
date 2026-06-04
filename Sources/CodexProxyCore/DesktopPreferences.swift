@@ -762,9 +762,13 @@ public enum LocalizedTextKey: String, Sendable, CaseIterable {
     case optionUpstreamAdapterResponses
     case optionChatCompatibilityAuto
     case optionChatCompatibilityGeneric
+    case optionChatCompatibilityGenericStrict
     case optionChatCompatibilityDeepSeekV4Thinking
     case optionChatCompatibilityDeepSeekLegacyReasoner
     case optionChatCompatibilityMiMoStrict
+    case optionChatCompatibilityMiniMaxStrict
+    case optionChatCompatibilitySenseNovaStrict
+    case optionChatCompatibilityKimiStrict
     case labelChatCompatibilityProfile
     case optionAnthropicMessages
     case optionGeminiGenerateContent
@@ -2614,7 +2618,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "When disabled, this API key account keeps participating in routing even if its upstream returns intermittent errors.",
             .helperManualAccountGenericOpenAICompatible: "Use the standard OpenAI-compatible flow. Enter the final upstream API prefix exactly as your provider expects, including `/v1` when needed, and Codex Proxy will use it as-is. Choose Responses for providers that support the OpenAI Responses API, or Chat Completions for providers that only expose `/chat/completions`. If you're using Google's official Gemini compatibility root, switch Provider to `Google Gemini Compatible` instead.",
             .helperManualAccountUpstreamAdapter: "Responses is the default. Choose Chat Completions when the upstream provider does not support `/responses`.",
-            .helperManualAccountChatCompatibilityProfile: "`Auto` detects DeepSeek, MiMo, and generic providers from the base URL and model. Use a fixed strategy only when the upstream has strict thinking/tool-call history requirements or rejects reasoning_content.",
+            .helperManualAccountChatCompatibilityProfile: "`Auto` detects DeepSeek, MiMo, MiniMax, SenseNova, Kimi, and generic providers from the base URL and model. Use a fixed strategy only when the upstream has strict thinking, tool-call history, or request-field requirements.",
             .helperManualAccountAliyunCodingPlan: "Use Aliyun Bailian / Qwen Coding Plan compatibility mode. Validation and runtime requests switch to an agent-style `chat/completions` path so existing local proxy clients can keep working without changing their own request format.",
             .helperManualAccountAnthropicAPICompatible: "Use Anthropic's native API key flow. Validation first checks `/v1/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `/v1/messages`. Runtime requests use the official `/v1/messages` and `/v1/messages/count_tokens` paths with `x-api-key` authentication.",
             .helperManualAccountGoogleGeminiCompatible: "Use Google's official Gemini OpenAI compatibility root with a Gemini API key from Google AI Studio. This preset is for API-key compatibility traffic, not for the official Gemini CLI route. Validation first checks `/models`; if the upstream returns `404/405` for that list endpoint, it falls back to a minimal real `你好` probe over `chat/completions`. Runtime requests use `chat/completions` compatibility mode.",
@@ -2762,9 +2766,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionUpstreamAdapterResponses: "Responses",
             .optionChatCompatibilityAuto: "Auto",
             .optionChatCompatibilityGeneric: "Generic",
+            .optionChatCompatibilityGenericStrict: "Generic Strict",
             .optionChatCompatibilityDeepSeekV4Thinking: "DeepSeek V4 Thinking",
             .optionChatCompatibilityDeepSeekLegacyReasoner: "DeepSeek Legacy Reasoner",
             .optionChatCompatibilityMiMoStrict: "MiMo Strict",
+            .optionChatCompatibilityMiniMaxStrict: "MiniMax Strict",
+            .optionChatCompatibilitySenseNovaStrict: "SenseNova Strict",
+            .optionChatCompatibilityKimiStrict: "Kimi Strict",
             .labelChatCompatibilityProfile: "Chat Completions Compatibility",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",
@@ -3482,7 +3490,7 @@ public struct LocalizationStore: Sendable, Equatable {
             .helperAutomaticCooldownPolicy: "禁用后，即使上游偶发报错，这个 API Key 账号也会继续参与路由，不会被自动冷却跳过。",
             .helperManualAccountGenericOpenAICompatible: "使用标准 OpenAI 兼容模式。请直接填写上游要求的最终 API 前缀；如果对方要求带 `/v1`，这里就保留 `/v1`，后续会按你填写的前缀原样请求。支持 Responses API 的厂商选 Responses；只提供 `/chat/completions` 的厂商选 Chat Completions。如果你填的是 Google 官方 Gemini OpenAI 兼容根地址，请改选 `Google Gemini Compatible`。",
             .helperManualAccountUpstreamAdapter: "默认使用 Responses。如果上游厂商不支持 `/responses`，请选择 Chat Completions。",
-            .helperManualAccountChatCompatibilityProfile: "`自动` 会根据 Base URL 和模型识别 DeepSeek、MiMo 或通用厂商。只有当上游对 thinking、tool_calls 历史或 reasoning_content 有严格要求时，才需要手动固定策略。",
+            .helperManualAccountChatCompatibilityProfile: "`自动` 会根据 Base URL 和模型识别 DeepSeek、MiMo、MiniMax、SenseNova、Kimi 或通用厂商。只有当上游对 thinking、tool_calls 历史或请求字段有严格要求时，才需要手动固定策略。",
             .helperManualAccountAliyunCodingPlan: "使用阿里百炼 / Qwen Coding Plan 兼容模式。校验和运行时都会改走更接近 Coding Agent 的 `chat/completions` 链路，让现有本地代理客户端在不改请求格式的前提下尽量保持可用。",
             .helperManualAccountAnthropicAPICompatible: "使用 Anthropic 原生 API Key 模式。连通性校验会先尝试 `/v1/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `/v1/messages` 探针。运行时使用官方 `/v1/messages` 和 `/v1/messages/count_tokens` 链路，并通过 `x-api-key` 鉴权。",
             .helperManualAccountGoogleGeminiCompatible: "使用 Google 官方 Gemini OpenAI 兼容根地址，并填写 Google AI Studio 生成的 Gemini API key。这个 preset 只用于 API key 兼容流量，不再作为官方 Gemini CLI 的后端路径。连通性校验会先尝试 `/models`；如果上游对该模型列表接口返回 `404/405`，会自动回退到一条最小真实 `你好` 的 `chat/completions` 探针。运行时改走 `chat/completions` 兼容链路。",
@@ -3630,9 +3638,13 @@ public struct LocalizationStore: Sendable, Equatable {
             .optionUpstreamAdapterResponses: "Responses",
             .optionChatCompatibilityAuto: "自动",
             .optionChatCompatibilityGeneric: "通用",
+            .optionChatCompatibilityGenericStrict: "通用严格模式",
             .optionChatCompatibilityDeepSeekV4Thinking: "DeepSeek V4 Thinking",
             .optionChatCompatibilityDeepSeekLegacyReasoner: "DeepSeek Legacy Reasoner",
             .optionChatCompatibilityMiMoStrict: "MiMo 严格模式",
+            .optionChatCompatibilityMiniMaxStrict: "MiniMax 严格模式",
+            .optionChatCompatibilitySenseNovaStrict: "SenseNova 严格模式",
+            .optionChatCompatibilityKimiStrict: "Kimi 严格模式",
             .labelChatCompatibilityProfile: "Chat Completions 兼容策略",
             .optionAnthropicMessages: "Anthropic",
             .optionGeminiGenerateContent: "Gemini",

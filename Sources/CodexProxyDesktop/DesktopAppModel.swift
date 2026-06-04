@@ -611,6 +611,7 @@ final class DesktopAppModel: ObservableObject {
     var clientConfigManagerRefreshGeneration = 0
     var clientConfigManagerBackupLoadGeneration = 0
     var requestLogsWindowController: RequestLogsWindowController?
+    var assistantWindowController: AssistantWindowControlling?
     var remoteAdminWindowControllers: [String: RemoteAdminWindowControlling] = [:]
     var requestLogsRefreshTask: Task<Void, Never>?
     var requestLogsRefreshGeneration: UInt64 = 0
@@ -639,6 +640,8 @@ final class DesktopAppModel: ObservableObject {
     var appUpdateTask: Task<Void, Never>?
     var appUpdateNowProvider: () -> Date = { Date() }
     var appUpdateAutoCheckInterval: TimeInterval = 24 * 60 * 60
+    private nonisolated static let autoStartReadinessPollInterval: Duration = .milliseconds(500)
+    private nonisolated static let autoStartReadinessPollAttempts = 20
 
     init(
         admin: AdminAPIClient = AdminAPIClient(),
@@ -2278,12 +2281,20 @@ final class DesktopAppModel: ObservableObject {
             return self.text(.optionChatCompatibilityAuto)
         case .generic:
             return self.text(.optionChatCompatibilityGeneric)
+        case .genericStrict:
+            return self.text(.optionChatCompatibilityGenericStrict)
         case .deepSeekV4Thinking:
             return self.text(.optionChatCompatibilityDeepSeekV4Thinking)
         case .deepSeekLegacyReasoner:
             return self.text(.optionChatCompatibilityDeepSeekLegacyReasoner)
         case .mimoStrict:
             return self.text(.optionChatCompatibilityMiMoStrict)
+        case .minimaxStrict:
+            return self.text(.optionChatCompatibilityMiniMaxStrict)
+        case .senseNovaStrict:
+            return self.text(.optionChatCompatibilitySenseNovaStrict)
+        case .kimiStrict:
+            return self.text(.optionChatCompatibilityKimiStrict)
         }
     }
 
@@ -3379,6 +3390,8 @@ final class DesktopAppModel: ObservableObject {
         defer { self.isBusy = false }
 
         var firstError: (Error, OperationContext)?
+        var didResolveStatusDuringAutoStartWait = false
+        var shouldLoadAdminData = true
         do {
             self.settings = try await self.admin.getSettings()
             self.syncMinimalProxyDraftFromSettingsIfNeeded()
@@ -3393,45 +3406,98 @@ final class DesktopAppModel: ObservableObject {
             do {
                 try await self.daemon.prepareForLaunch(config: self.settings)
                 self.localServiceStatus = await self.daemon.status()
+                if self.settings.autoStart {
+                    if let readyStatus = await self.resolveReadyLocalDaemonStatus(refreshLocalStatus: false) {
+                        self.status = readyStatus
+                        didResolveStatusDuringAutoStartWait = true
+                    } else if let readyStatus = await self.waitForLocalDaemonReadyAfterAutoStart() {
+                        self.status = readyStatus
+                        didResolveStatusDuringAutoStartWait = true
+                    } else {
+                        firstError = firstError ?? (self.autoStartDaemonReadinessTimeoutError(), .startDaemon)
+                        shouldLoadAdminData = false
+                    }
+                }
             } catch {
                 firstError = firstError ?? (error, .startDaemon)
             }
         }
 
-        do {
-            self.status = try await self.admin.getStatus()
-        } catch {
-            firstError = firstError ?? (error, .loadAll)
-        }
+        if shouldLoadAdminData {
+            do {
+                if didResolveStatusDuringAutoStartWait == false {
+                    self.status = try await self.admin.getStatus()
+                }
+            } catch {
+                firstError = firstError ?? (error, .loadAll)
+            }
 
-        do {
-            self.accounts = try await self.admin.getAccounts()
-        } catch {
-            firstError = firstError ?? (error, .loadAll)
-        }
+            do {
+                self.accounts = try await self.admin.getAccounts()
+            } catch {
+                firstError = firstError ?? (error, .loadAll)
+            }
 
-        do {
-            self.stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
-        } catch {
-            firstError = firstError ?? (error, .loadAll)
-        }
+            do {
+                self.stats = try await self.admin.getStats(apiKey: self.overviewTrafficStatsAPIKeyValue)
+            } catch {
+                firstError = firstError ?? (error, .loadAll)
+            }
 
-        do {
-            self.proxyAPIKeyUsageReport = try await self.admin.getProxyAPIKeyUsage(query: self.proxyAPIKeyUsageFilter.query)
-        } catch {
-            firstError = firstError ?? (error, .loadAll)
-        }
+            do {
+                self.proxyAPIKeyUsageReport = try await self.admin.getProxyAPIKeyUsage(query: self.proxyAPIKeyUsageFilter.query)
+            } catch {
+                firstError = firstError ?? (error, .loadAll)
+            }
 
-        do {
-            let snapshot = try await self.admin.getManagedProxySnapshot()
-            self.syncManagedProxySnapshotState(snapshot)
-        } catch {
-            firstError = firstError ?? (error, .loadAll)
+            do {
+                let snapshot = try await self.admin.getManagedProxySnapshot()
+                self.syncManagedProxySnapshotState(snapshot)
+            } catch {
+                firstError = firstError ?? (error, .loadAll)
+            }
         }
 
         if let firstError {
             self.present(error: firstError.0, context: firstError.1)
         }
+    }
+
+    private func resolveReadyLocalDaemonStatus(refreshLocalStatus: Bool) async -> ProxyStatus? {
+        if refreshLocalStatus {
+            self.localServiceStatus = await self.daemon.status()
+        }
+        guard self.localServiceStatus?.running == true else { return nil }
+        do {
+            let status = try await self.admin.getStatus()
+            guard status.running else { return nil }
+            return status
+        } catch {
+            return nil
+        }
+    }
+
+    private func waitForLocalDaemonReadyAfterAutoStart() async -> ProxyStatus? {
+        let previousOperation = self.localServiceOperation
+        self.localServiceOperation = .starting
+        defer { self.localServiceOperation = previousOperation }
+
+        for _ in 0..<Self.autoStartReadinessPollAttempts {
+            await self.daemon.sleep(for: Self.autoStartReadinessPollInterval)
+            if let status = await self.resolveReadyLocalDaemonStatus(refreshLocalStatus: true) {
+                return status
+            }
+        }
+        return nil
+    }
+
+    private func autoStartDaemonReadinessTimeoutError() -> Error {
+        ProxyError.message(
+            self.localized(
+                zh: "本地服务在 10 秒内没有完成启动，请查看本地日志后重试。",
+                en: "The local service did not finish starting within 10 seconds. Check the local logs and try again."
+            )
+        )
     }
 
     func startStatsAutoRefreshIfNeeded(immediately: Bool = true) {
@@ -4751,6 +4817,7 @@ final class DesktopAppModel: ObservableObject {
         self.ocrCacheLogsWindowController?.refreshWindow()
         self.ocrModelManagerWindowController?.refreshWindow()
         self.requestLogsWindowController?.refreshWindow()
+        self.assistantWindowController?.refreshWindow()
         self.remoteAdminWindowControllers.values.forEach { $0.refreshWindow(preferences: self.preferences) }
     }
 

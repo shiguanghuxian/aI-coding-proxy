@@ -360,12 +360,13 @@ final class ClientConfigFileServiceTests: XCTestCase {
         XCTAssertTrue(preview.files[1].content.contains(#"base_url = "http://127.0.0.1:8787/v1""#))
     }
 
-    func testApplyCodexProjectRouteConfigurationOnlyWritesProjectModel() throws {
+    func testApplyCodexProjectRouteConfigurationWritesProjectModelAndModelCatalog() throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
 
         let projectURL = context.homeDirectory.appendingPathComponent("Projects/HeavyWork", isDirectory: true)
         let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        let catalogURL = projectURL.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
         try Self.write(
             """
             model = "old-model"
@@ -385,27 +386,47 @@ final class ClientConfigFileServiceTests: XCTestCase {
         )
 
         let proposed = context.service.previewProposedCodexProjectRoute(rule)
-        XCTAssertTrue(proposed.files.first?.content.contains(#"model = "cp-route-heavy""#) == true)
+        XCTAssertEqual(proposed.files.map(\.path), [configURL.path, catalogURL.path])
+        XCTAssertTrue(proposed.files[0].content.contains(#"model = "cp-route-heavy""#))
+        XCTAssertTrue(proposed.files[0].content.contains(#"model_catalog_json = "\#(catalogURL.path)""#))
+        XCTAssertTrue(proposed.files[1].content.contains(#""slug" : "cp-route-heavy""#))
+        XCTAssertTrue(proposed.files[1].content.contains(#""context_window" : 128000"#))
         XCTAssertFalse(FileManager.default.fileExists(atPath: context.dataDirectory.appendingPathComponent("client-config-backups").path))
 
         let backup = try context.service.applyCodexProjectRouteConfiguration(rule)
         let text = try String(contentsOf: configURL, encoding: .utf8)
+        let catalogObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: catalogURL)) as? [String: Any])
+        let models = try XCTUnwrap(catalogObject["models"] as? [[String: Any]])
+        let model = try XCTUnwrap(models.first)
+        let reasoningLevels = try XCTUnwrap(model["supported_reasoning_levels"] as? [[String: Any]])
 
-        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path, catalogURL.path])
         XCTAssertTrue(text.contains(#"model = "cp-route-heavy""#))
+        XCTAssertTrue(text.contains(#"model_catalog_json = "\#(catalogURL.path)""#))
         XCTAssertTrue(text.contains(#"approval_policy = "never""#))
         XCTAssertTrue(text.contains("[tools]"))
+        XCTAssertEqual(model["slug"] as? String, "cp-route-heavy")
+        XCTAssertEqual(model["display_name"] as? String, "Heavy")
+        XCTAssertEqual(model["default_reasoning_level"] as? String, "medium")
+        XCTAssertEqual(model["context_window"] as? Int, 128_000)
+        XCTAssertEqual(model["max_context_window"] as? Int, 128_000)
+        XCTAssertEqual(model["shell_type"] as? String, "shell_command")
+        XCTAssertEqual(model["visibility"] as? String, "list")
+        XCTAssertEqual(model["priority"] as? Int, 0)
+        XCTAssertEqual(reasoningLevels.compactMap { $0["effort"] as? String }, ["low", "medium", "high"])
     }
 
-    func testClearCodexProjectRouteConfigurationOnlyRemovesTopLevelModel() throws {
+    func testClearCodexProjectRouteConfigurationRemovesManagedModelCatalogOnly() throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
 
         let projectURL = context.homeDirectory.appendingPathComponent("Projects/HeavyWork", isDirectory: true)
         let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        let catalogURL = projectURL.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
         try Self.write(
             """
             model = "cp-route-heavy"
+            model_catalog_json = "\(catalogURL.path)"
             approval_policy = "never"
 
             [tools]
@@ -413,6 +434,16 @@ final class ClientConfigFileServiceTests: XCTestCase {
             web_search = true
             """,
             to: configURL
+        )
+        try Self.write(
+            """
+            {
+              "models": [
+                { "slug": "cp-route-heavy" }
+              ]
+            }
+            """,
+            to: catalogURL
         )
         let rule = CodexProjectRouteRule(
             label: "Heavy",
@@ -425,11 +456,47 @@ final class ClientConfigFileServiceTests: XCTestCase {
         let backup = try context.service.clearCodexProjectRouteConfiguration(rule)
         let text = try String(contentsOf: configURL, encoding: .utf8)
 
-        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path, catalogURL.path])
         XCTAssertFalse(text.contains(#"model = "cp-route-heavy""#))
+        XCTAssertFalse(text.contains("model_catalog_json"))
         XCTAssertTrue(text.contains(#"approval_policy = "never""#))
         XCTAssertTrue(text.contains("[tools]"))
         XCTAssertTrue(text.contains(#"model = "tool-model""#))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: catalogURL.path))
+    }
+
+    func testClearCodexProjectRouteConfigurationKeepsCustomModelCatalogReference() throws {
+        let context = try Self.makeContext()
+        defer { context.cleanup() }
+
+        let projectURL = context.homeDirectory.appendingPathComponent("Projects/CustomCatalogWork", isDirectory: true)
+        let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        let managedCatalogURL = projectURL.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
+        let customCatalogURL = projectURL.appendingPathComponent(".codex/custom-model-catalog.json")
+        try Self.write(
+            """
+            model = "cp-route-heavy"
+            model_catalog_json = "\(customCatalogURL.path)"
+            approval_policy = "never"
+            """,
+            to: configURL
+        )
+        try Self.write(#"{"models":[{"slug":"custom"}]}"#, to: customCatalogURL)
+        let rule = CodexProjectRouteRule(
+            label: "Heavy",
+            projectPath: projectURL.path,
+            routeModel: "cp-route-heavy",
+            targetModel: "deepseek-reasoner",
+            proxyAPIKeyID: "heavy-key"
+        )
+
+        let backup = try context.service.clearCodexProjectRouteConfiguration(rule)
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path, managedCatalogURL.path])
+        XCTAssertFalse(text.contains(#"model = "cp-route-heavy""#))
+        XCTAssertTrue(text.contains(#"model_catalog_json = "\#(customCatalogURL.path)""#))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: customCatalogURL.path))
     }
 
     func testClearCodexProjectRouteConfigurationCreatesEmptyConfigWhenMissing() throws {
@@ -438,6 +505,7 @@ final class ClientConfigFileServiceTests: XCTestCase {
 
         let projectURL = context.homeDirectory.appendingPathComponent("Projects/EmptyWork", isDirectory: true)
         let configURL = projectURL.appendingPathComponent(".codex/config.toml")
+        let catalogURL = projectURL.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
         let rule = CodexProjectRouteRule(
             label: "Empty",
             projectPath: projectURL.path,
@@ -449,7 +517,7 @@ final class ClientConfigFileServiceTests: XCTestCase {
         let backup = try context.service.clearCodexProjectRouteConfiguration(rule)
         let text = try String(contentsOf: configURL, encoding: .utf8)
 
-        XCTAssertEqual(backup.files.map(\.path), [configURL.path])
+        XCTAssertEqual(backup.files.map(\.path), [configURL.path, catalogURL.path])
         XCTAssertEqual(text, "")
         XCTAssertTrue(FileManager.default.fileExists(atPath: configURL.path))
     }

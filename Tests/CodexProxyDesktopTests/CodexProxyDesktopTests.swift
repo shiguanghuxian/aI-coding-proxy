@@ -1063,6 +1063,16 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(formSource.contains(".labelChatCompatibilityProfile"))
         XCTAssertTrue(formSource.contains(".helperManualAccountChatCompatibilityProfile"))
         XCTAssertTrue(accountsSource.contains("account.chatCompatibilityProfile"))
+
+        let modelSource = try Self.repoFileText("Sources/CodexProxyDesktop/DesktopAppModel.swift")
+        let preferencesSource = try Self.repoFileText("Sources/CodexProxyCore/DesktopPreferences.swift")
+        XCTAssertTrue(modelSource.contains(".optionChatCompatibilityGenericStrict"))
+        XCTAssertTrue(modelSource.contains(".optionChatCompatibilityMiniMaxStrict"))
+        XCTAssertTrue(modelSource.contains(".optionChatCompatibilitySenseNovaStrict"))
+        XCTAssertTrue(modelSource.contains(".optionChatCompatibilityKimiStrict"))
+        XCTAssertTrue(preferencesSource.contains("MiniMax 严格模式"))
+        XCTAssertTrue(preferencesSource.contains("SenseNova Strict"))
+        XCTAssertTrue(preferencesSource.contains("Kimi Strict"))
     }
 
     func testAccountReasoningEffortUIIsMenuOnlyAndLocalized() throws {
@@ -2111,8 +2121,8 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(routeViewSource.contains("CodexProjectRouteDetailPanel"))
         XCTAssertTrue(routeViewSource.contains("Current Project Config"))
         XCTAssertTrue(routeViewSource.contains("Proposed Project Config"))
-        XCTAssertTrue(routeViewSource.contains("self.model.currentProjectRoutePreviewFile(for: self.rule)"))
-        XCTAssertTrue(routeViewSource.contains("self.model.proposedProjectRoutePreviewFile(for: self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("self.model.currentProjectRoutePreviewFiles(for: self.rule)"))
+        XCTAssertTrue(routeViewSource.contains("self.model.proposedProjectRoutePreviewFiles(for: self.rule)"))
         XCTAssertTrue(routeViewSource.contains("项目路由"))
         XCTAssertTrue(routeViewSource.contains("Client Type"))
         XCTAssertTrue(routeViewSource.contains("Claude Settings Scope"))
@@ -2158,12 +2168,17 @@ final class CodexProxyDesktopTests: XCTestCase {
         XCTAssertTrue(supportSource.contains("项目路由已保存并写入项目配置"))
         XCTAssertTrue(supportSource.contains("Project Route Saved And Written"))
         XCTAssertTrue(supportSource.contains("selectedCodexProjectRouteRule(id:"))
+        XCTAssertTrue(supportSource.contains("currentProjectRoutePreviewFiles(for rule:"))
+        XCTAssertTrue(supportSource.contains("proposedProjectRoutePreviewFiles(for rule:"))
         XCTAssertTrue(supportSource.contains("currentProjectRoutePreviewFile(for rule:"))
         XCTAssertTrue(supportSource.contains("proposedProjectRoutePreviewFile(for rule:"))
         XCTAssertTrue(supportSource.contains("applyProjectRouteConfiguration(rule)"))
         XCTAssertTrue(supportSource.contains("clearProjectRouteConfiguration(rule)"))
         XCTAssertTrue(supportSource.contains("previewCurrentProjectRoute(rule)"))
-        XCTAssertTrue(supportSource.contains("projectRouteConfigMatches(content: file.content, rule: rule)"))
+        XCTAssertTrue(supportSource.contains("projectRouteConfigMatches(file:"))
+        XCTAssertTrue(supportSource.contains("codex-proxy-model-catalog.json"))
+        XCTAssertTrue(supportSource.contains("model_catalog_json"))
+        XCTAssertTrue(supportSource.contains("metadata fallback warning"))
         XCTAssertTrue(supportSource.contains("ANTHROPIC_CUSTOM_MODEL_OPTION"))
         XCTAssertTrue(supportSource.contains("Claude Code 自定义模型选项"))
         XCTAssertTrue(supportSource.contains("client: draft.client"))
@@ -14063,6 +14078,217 @@ final class CodexProxyDesktopTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadAllWaitsForAutoStartedDaemonBeforeLoadingAdminData() async {
+        let probe = AutoStartReadinessProbe(
+            localRunningSequence: [false, false, false, true, true],
+            proxyStatusFailuresBeforeSuccess: 1
+        )
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                await probe.recordAccountsCall()
+                return []
+            },
+            getStatusHandler: {
+                let running = try await probe.nextProxyRunning()
+                return Self.makeProxyStatus(running: running)
+            },
+            getStatsHandler: {
+                await probe.recordStatsCall()
+                return Self.makeStatsSummary(totalRequests: 0)
+            },
+            getSettingsHandler: { AppConfig(autoStart: true) },
+            getManagedProxySnapshotHandler: {
+                await probe.recordManagedProxySnapshotCall()
+                return ManagedProxySnapshot()
+            },
+            proxyAPIKeyUsageHandler: { _ in
+                await probe.recordProxyAPIKeyUsageCall()
+                return ProxyAPIKeyUsageReport(from: 0, to: 0)
+            }
+        )
+        let daemon = LocalDaemonController(
+            applyLaunchConfigurationHandler: { _, preserveRunningService in
+                await probe.recordApply(preserveRunningService: preserveRunningService)
+                return .appliedNow
+            },
+            sleepHandler: { duration in
+                await probe.recordSleep(duration)
+            },
+            statusHandler: {
+                let running = await probe.nextLocalRunning()
+                return Self.makeLocalServiceStatus(
+                    running: running,
+                    launchctlState: running ? "running" : "not_registered"
+                )
+            }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+        var operationSnapshots: [LocalServiceOperation] = []
+        let cancellable = model.$localServiceOperation.sink { operationSnapshots.append($0) }
+
+        await model.loadAll()
+
+        withExtendedLifetime(cancellable) {}
+        let dataCallCounts = await probe.adminDataCallCounts()
+        let applyPreserveFlags = await probe.applyPreserveFlags()
+        let sleepDurations = await probe.sleepDurations()
+        let proxyStatusCallCount = await probe.proxyStatusCallCount()
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertTrue(model.status?.running ?? false)
+        XCTAssertEqual(applyPreserveFlags, [false])
+        XCTAssertEqual(sleepDurations, Array(repeating: Duration.milliseconds(500), count: 3))
+        XCTAssertEqual(proxyStatusCallCount, 2)
+        XCTAssertEqual(dataCallCounts.accounts, 1)
+        XCTAssertEqual(dataCallCounts.stats, 1)
+        XCTAssertEqual(dataCallCounts.proxyAPIKeyUsage, 1)
+        XCTAssertEqual(dataCallCounts.managedProxySnapshot, 1)
+        XCTAssertTrue(operationSnapshots.contains(.starting))
+        XCTAssertEqual(model.localServiceOperation, .idle)
+    }
+
+    @MainActor
+    func testLoadAllReportsStartDaemonOnlyAfterAutoStartWaitTimeout() async {
+        let probe = AutoStartReadinessProbe(localRunningSequence: [false, false])
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                await probe.recordAccountsCall()
+                return []
+            },
+            getStatusHandler: {
+                let running = try await probe.nextProxyRunning()
+                return Self.makeProxyStatus(running: running)
+            },
+            getStatsHandler: {
+                await probe.recordStatsCall()
+                return Self.makeStatsSummary(totalRequests: 0)
+            },
+            getSettingsHandler: { AppConfig(autoStart: true) },
+            getManagedProxySnapshotHandler: {
+                await probe.recordManagedProxySnapshotCall()
+                return ManagedProxySnapshot()
+            },
+            proxyAPIKeyUsageHandler: { _ in
+                await probe.recordProxyAPIKeyUsageCall()
+                return ProxyAPIKeyUsageReport(from: 0, to: 0)
+            }
+        )
+        let daemon = LocalDaemonController(
+            applyLaunchConfigurationHandler: { _, preserveRunningService in
+                await probe.recordApply(preserveRunningService: preserveRunningService)
+                return .appliedNow
+            },
+            sleepHandler: { duration in
+                await probe.recordSleep(duration)
+            },
+            statusHandler: {
+                let running = await probe.nextLocalRunning()
+                return Self.makeLocalServiceStatus(
+                    running: running,
+                    launchctlState: running ? "running" : "not_registered"
+                )
+            }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+
+        await model.loadAll()
+
+        let dataCallCounts = await probe.adminDataCallCounts()
+        let sleepDurations = await probe.sleepDurations()
+        let proxyStatusCallCount = await probe.proxyStatusCallCount()
+        XCTAssertEqual(sleepDurations, Array(repeating: Duration.milliseconds(500), count: 20))
+        XCTAssertEqual(proxyStatusCallCount, 0)
+        XCTAssertEqual(dataCallCounts.accounts, 0)
+        XCTAssertEqual(dataCallCounts.stats, 0)
+        XCTAssertEqual(dataCallCounts.proxyAPIKeyUsage, 0)
+        XCTAssertEqual(dataCallCounts.managedProxySnapshot, 0)
+        XCTAssertEqual(model.banners.first?.tone, .error)
+        XCTAssertEqual(model.banners.first?.title, model.text(.errorDaemonControlFailed))
+        XCTAssertTrue(model.banners.first?.detail?.contains("10 秒") ?? false)
+        XCTAssertEqual(model.localServiceOperation, .idle)
+    }
+
+    @MainActor
+    func testLoadAllDoesNotWaitWhenAutoStartDisabled() async {
+        let probe = AutoStartReadinessProbe(localRunningSequence: [false, false])
+        let admin = AdminAPIClient(
+            accountsHandler: {
+                await probe.recordAccountsCall()
+                return []
+            },
+            getStatusHandler: { Self.makeProxyStatus(running: true) },
+            getStatsHandler: {
+                await probe.recordStatsCall()
+                return Self.makeStatsSummary(totalRequests: 0)
+            },
+            getSettingsHandler: { AppConfig(autoStart: false) },
+            getManagedProxySnapshotHandler: {
+                await probe.recordManagedProxySnapshotCall()
+                return ManagedProxySnapshot()
+            },
+            proxyAPIKeyUsageHandler: { _ in
+                await probe.recordProxyAPIKeyUsageCall()
+                return ProxyAPIKeyUsageReport(from: 0, to: 0)
+            }
+        )
+        let daemon = LocalDaemonController(
+            applyLaunchConfigurationHandler: { _, preserveRunningService in
+                await probe.recordApply(preserveRunningService: preserveRunningService)
+                return .appliedNow
+            },
+            sleepHandler: { duration in
+                await probe.recordSleep(duration)
+            },
+            statusHandler: {
+                let running = await probe.nextLocalRunning()
+                return Self.makeLocalServiceStatus(running: running)
+            }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+
+        await model.loadAll()
+
+        let sleepDurations = await probe.sleepDurations()
+        let applyPreserveFlags = await probe.applyPreserveFlags()
+        XCTAssertTrue(model.banners.isEmpty)
+        XCTAssertEqual(sleepDurations, [])
+        XCTAssertEqual(applyPreserveFlags, [false])
+    }
+
+    @MainActor
+    func testLoadAllStillReportsPrepareForLaunchErrorImmediately() async {
+        let probe = AutoStartReadinessProbe(localRunningSequence: [false])
+        let admin = AdminAPIClient(
+            accountsHandler: { [] },
+            getStatusHandler: { Self.makeProxyStatus(running: true) },
+            getStatsHandler: { Self.makeStatsSummary(totalRequests: 0) },
+            getSettingsHandler: { AppConfig(autoStart: true) },
+            getManagedProxySnapshotHandler: { ManagedProxySnapshot() },
+            proxyAPIKeyUsageHandler: { _ in ProxyAPIKeyUsageReport(from: 0, to: 0) }
+        )
+        let daemon = LocalDaemonController(
+            applyLaunchConfigurationHandler: { _, _ in
+                throw ProxyError.message("launchctl bootstrap failed")
+            },
+            sleepHandler: { duration in
+                await probe.recordSleep(duration)
+            },
+            statusHandler: {
+                let running = await probe.nextLocalRunning()
+                return Self.makeLocalServiceStatus(running: running)
+            }
+        )
+        let model = DesktopAppModel(admin: admin, daemon: daemon)
+
+        await model.loadAll()
+
+        let sleepDurations = await probe.sleepDurations()
+        XCTAssertEqual(sleepDurations, [])
+        XCTAssertEqual(model.banners.first?.tone, .error)
+        XCTAssertEqual(model.banners.first?.title, model.text(.errorDaemonControlFailed))
+        XCTAssertTrue(model.banners.first?.detail?.contains("launchctl bootstrap failed") ?? false)
+    }
+
+    @MainActor
     func testSaveSettingsPublishesRestartRequiredWarningWithoutStoppingRunningService() async {
         let probe = DaemonOperationProbe(running: true)
         let admin = AdminAPIClient(
@@ -18910,6 +19136,91 @@ private actor DaemonOperationProbe {
 
     func applyPreserveFlags() -> [Bool] {
         self.applyPreserveRunningServiceFlags
+    }
+}
+
+private actor AutoStartReadinessProbe {
+    private var localRunningSequence: [Bool]
+    private var lastLocalRunning: Bool
+    private var proxyRunningSequence: [Bool]
+    private var proxyStatusFailuresBeforeSuccess: Int
+    private var recordedSleepDurations: [Duration] = []
+    private var applyPreserveRunningServiceFlags: [Bool] = []
+    private var accountsCallCount = 0
+    private var statsCallCount = 0
+    private var proxyAPIKeyUsageCallCount = 0
+    private var managedProxySnapshotCallCount = 0
+    private var recordedProxyStatusCallCount = 0
+
+    init(localRunningSequence: [Bool], proxyStatusFailuresBeforeSuccess: Int = 0) {
+        self.localRunningSequence = localRunningSequence
+        self.lastLocalRunning = localRunningSequence.last ?? false
+        self.proxyRunningSequence = [true]
+        self.proxyStatusFailuresBeforeSuccess = proxyStatusFailuresBeforeSuccess
+    }
+
+    func nextLocalRunning() -> Bool {
+        if self.localRunningSequence.isEmpty == false {
+            self.lastLocalRunning = self.localRunningSequence.removeFirst()
+        }
+        return self.lastLocalRunning
+    }
+
+    func nextProxyRunning() throws -> Bool {
+        self.recordedProxyStatusCallCount += 1
+        if self.proxyStatusFailuresBeforeSuccess > 0 {
+            self.proxyStatusFailuresBeforeSuccess -= 1
+            throw ProxyError.message("connection refused")
+        }
+        if self.proxyRunningSequence.isEmpty == false {
+            return self.proxyRunningSequence.removeFirst()
+        }
+        return true
+    }
+
+    func recordSleep(_ duration: Duration) {
+        self.recordedSleepDurations.append(duration)
+    }
+
+    func recordApply(preserveRunningService: Bool) {
+        self.applyPreserveRunningServiceFlags.append(preserveRunningService)
+    }
+
+    func recordAccountsCall() {
+        self.accountsCallCount += 1
+    }
+
+    func recordStatsCall() {
+        self.statsCallCount += 1
+    }
+
+    func recordProxyAPIKeyUsageCall() {
+        self.proxyAPIKeyUsageCallCount += 1
+    }
+
+    func recordManagedProxySnapshotCall() {
+        self.managedProxySnapshotCallCount += 1
+    }
+
+    func sleepDurations() -> [Duration] {
+        self.recordedSleepDurations
+    }
+
+    func applyPreserveFlags() -> [Bool] {
+        self.applyPreserveRunningServiceFlags
+    }
+
+    func proxyStatusCallCount() -> Int {
+        self.recordedProxyStatusCallCount
+    }
+
+    func adminDataCallCounts() -> (accounts: Int, stats: Int, proxyAPIKeyUsage: Int, managedProxySnapshot: Int) {
+        (
+            accounts: self.accountsCallCount,
+            stats: self.statsCallCount,
+            proxyAPIKeyUsage: self.proxyAPIKeyUsageCallCount,
+            managedProxySnapshot: self.managedProxySnapshotCallCount
+        )
     }
 }
 #endif

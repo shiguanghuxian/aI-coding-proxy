@@ -2048,13 +2048,15 @@ public final class SQLiteStore: @unchecked Sendable {
         let providerPreset = fallbackProviderPreset
             .flatMap(OpenAICompatibleProviderPreset.init(rawValue:))
             ?? metadata.providerPreset
+        let storedUpstreamBaseURL = fallbackUpstreamBaseURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return (
             metadata.providerFamily,
             authMode,
             providerPreset,
             metadata.upstreamAdapter,
             metadata.chatCompatibilityProfile,
-            metadata.upstreamBaseURL ?? fallbackUpstreamBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+            storedUpstreamBaseURL?.isEmpty == false ? storedUpstreamBaseURL : metadata.upstreamBaseURL
         )
     }
 

@@ -445,13 +445,14 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertNil(model.codexProjectRouteDraft)
     }
 
-    func testSaveNewCodexProjectRouteDraftWritesProjectConfig() async throws {
+    func testSaveNewCodexProjectRouteDraftWritesProjectConfigAndModelCatalog() async throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
 
         let projectDirectory = context.root.appendingPathComponent("new-codex-project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDirectory, withIntermediateDirectories: true)
         let configURL = projectDirectory.appendingPathComponent(".codex/config.toml")
+        let catalogURL = projectDirectory.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
 
         let model = Self.makeProjectRouteModel(context: context)
         model.settings.proxyAPIKeys = [Self.proxyKey(id: "local-heavy", label: "Heavy", key: "sk-local-heavy")]
@@ -465,9 +466,13 @@ final class ClientConfigManagementTests: XCTestCase {
 
         let content = try String(contentsOf: configURL, encoding: .utf8)
         XCTAssertTrue(content.contains("model = \"cp-route-heavy-work\""))
+        XCTAssertTrue(content.contains("model_catalog_json = \"\(catalogURL.path)\""))
+        let catalogObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: catalogURL)) as? [String: Any])
+        let models = try XCTUnwrap(catalogObject["models"] as? [[String: Any]])
+        XCTAssertEqual(models.first?["slug"] as? String, "cp-route-heavy-work")
         XCTAssertNil(model.codexProjectRouteDraft)
         XCTAssertEqual(model.settings.codexProjectRoutes.map(\.routeModel), ["cp-route-heavy-work"])
-        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path])
+        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path, catalogURL.path])
         XCTAssertEqual(model.banners.first?.tone, .success)
         XCTAssertTrue(
             model.banners.first?.title.contains("项目路由已保存并写入项目配置") == true
@@ -566,7 +571,7 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertEqual(model.banners.first?.tone, .error)
     }
 
-    func testApplyCodexProjectRouteToProjectWritesOnlyProjectConfig() async throws {
+    func testApplyCodexProjectRouteToProjectWritesProjectConfigAndModelCatalog() async throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
 
@@ -576,6 +581,7 @@ final class ClientConfigManagementTests: XCTestCase {
             withIntermediateDirectories: true
         )
         let configURL = projectDirectory.appendingPathComponent(".codex/config.toml")
+        let catalogURL = projectDirectory.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
         try Self.write("model = \"old-model\"\napproval_policy = \"never\"\n", to: configURL)
 
         let model = DesktopAppModel(clientConfigFileService: context.service)
@@ -594,9 +600,14 @@ final class ClientConfigManagementTests: XCTestCase {
 
         let content = try String(contentsOf: configURL, encoding: .utf8)
         XCTAssertTrue(content.contains("model = \"cp-route-heavy-work\""))
+        XCTAssertTrue(content.contains("model_catalog_json = \"\(catalogURL.path)\""))
         XCTAssertTrue(content.contains("approval_policy = \"never\""))
+        let catalogObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: catalogURL)) as? [String: Any])
+        let models = try XCTUnwrap(catalogObject["models"] as? [[String: Any]])
+        XCTAssertEqual(models.first?["slug"] as? String, "cp-route-heavy-work")
+        XCTAssertEqual(models.first?["display_name"] as? String, "Heavy Project")
         XCTAssertEqual(model.banners.first?.tone, .success)
-        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path])
+        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path, catalogURL.path])
     }
 
     func testApplyClaudeProjectRouteToProjectWritesSelectedSettingsScope() async throws {
@@ -635,7 +646,7 @@ final class ClientConfigManagementTests: XCTestCase {
         XCTAssertEqual(context.service.listBackups(target: .claudeCode).first?.files.map(\.path), [settingsURL.path])
     }
 
-    func testClearCodexProjectRouteFromProjectRemovesOnlyProjectModel() async throws {
+    func testClearCodexProjectRouteFromProjectRemovesProjectModelAndManagedCatalog() async throws {
         let context = try Self.makeContext()
         defer { context.cleanup() }
 
@@ -645,7 +656,12 @@ final class ClientConfigManagementTests: XCTestCase {
             withIntermediateDirectories: true
         )
         let configURL = projectDirectory.appendingPathComponent(".codex/config.toml")
-        try Self.write("model = \"cp-route-heavy-work\"\napproval_policy = \"never\"\n", to: configURL)
+        let catalogURL = projectDirectory.appendingPathComponent(".codex/codex-proxy-model-catalog.json")
+        try Self.write(
+            "model = \"cp-route-heavy-work\"\nmodel_catalog_json = \"\(catalogURL.path)\"\napproval_policy = \"never\"\n",
+            to: configURL
+        )
+        try Self.write(#"{"models":[{"slug":"cp-route-heavy-work"}]}"#, to: catalogURL)
 
         let model = DesktopAppModel(clientConfigFileService: context.service)
         let rule = CodexProjectRouteRule(
@@ -663,9 +679,11 @@ final class ClientConfigManagementTests: XCTestCase {
 
         let content = try String(contentsOf: configURL, encoding: .utf8)
         XCTAssertFalse(content.contains("model = \"cp-route-heavy-work\""))
+        XCTAssertFalse(content.contains("model_catalog_json"))
         XCTAssertTrue(content.contains("approval_policy = \"never\""))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: catalogURL.path))
         XCTAssertEqual(model.banners.first?.tone, .success)
-        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path])
+        XCTAssertEqual(context.service.listBackups(target: .codex).first?.files.map(\.path), [configURL.path, catalogURL.path])
     }
 
     func testClearClaudeProjectRouteFromProjectRemovesOnlyProjectModel() async throws {

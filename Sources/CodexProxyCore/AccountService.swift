@@ -1243,6 +1243,7 @@ public final class AccountService: @unchecked Sendable {
         else {
             return nil
         }
+        let effectiveUpstreamBaseURL = record.upstreamBaseURL ?? extracted.upstreamBaseURL
 
         let normalizedRecord = AccountRecord(
             id: record.id,
@@ -1254,7 +1255,7 @@ public final class AccountService: @unchecked Sendable {
             providerFamily: extracted.providerFamily,
             authMode: extracted.authMode,
             providerPreset: extracted.providerPreset,
-            upstreamBaseURL: extracted.upstreamBaseURL,
+            upstreamBaseURL: effectiveUpstreamBaseURL,
             managedProxyNodeName: record.managedProxyNodeName,
             modelRouting: record.modelRouting,
             reasoningEffort: record.reasoningEffort,
@@ -1274,7 +1275,7 @@ public final class AccountService: @unchecked Sendable {
         )
         var repaired = normalizedRecord
         if let configurationError = self.manualAPIKeyConfigurationError(
-            baseURL: extracted.upstreamBaseURL ?? record.upstreamBaseURL ?? extracted.providerPreset.defaultBaseURL,
+            baseURL: effectiveUpstreamBaseURL ?? extracted.providerPreset.defaultBaseURL,
             providerPreset: extracted.providerPreset,
             apiKey: extracted.accessToken
         ) {

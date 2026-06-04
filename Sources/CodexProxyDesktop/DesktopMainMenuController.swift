@@ -31,6 +31,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
     let reload: String
     let helpWindowTitle: String
     let onboardingWindowTitle: String
+    let assistantWindowTitle: String
     let viewPageItems: [ViewPageItem]
 
     @MainActor
@@ -58,6 +59,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
         self.reload = model.text(.menuReload)
         self.helpWindowTitle = model.helpWindowTitle
         self.onboardingWindowTitle = model.onboardingWindowTitle
+        self.assistantWindowTitle = model.localized(zh: "AI 助手", en: "Assistant")
         self.viewPageItems = model.visiblePages.map { page in
             ViewPageItem(
                 pageRawValue: page.rawValue,
@@ -91,6 +93,7 @@ struct DesktopMenuLocalizationSnapshot: Equatable, Sendable {
             && self.reload == other.reload
             && self.helpWindowTitle == other.helpWindowTitle
             && self.onboardingWindowTitle == other.onboardingWindowTitle
+            && self.assistantWindowTitle == other.assistantWindowTitle
             && self.viewPageItems.map(\.pageRawValue) == other.viewPageItems.map(\.pageRawValue)
             && self.viewPageItems.map(\.title) == other.viewPageItems.map(\.title)
     }
@@ -321,6 +324,8 @@ final class DesktopMainMenuController: NSObject, NSMenuDelegate, NSMenuItemValid
         menu.delegate = self
         menu.addItem(self.item(snapshot.helpWindowTitle, action: #selector(openHelpWindow(_:))))
         menu.addItem(self.item(snapshot.onboardingWindowTitle, action: #selector(startOnboarding(_:))))
+        menu.addItem(.separator())
+        menu.addItem(self.item(snapshot.assistantWindowTitle, action: #selector(openAssistantWindow(_:))))
         return menu
     }
 
@@ -435,6 +440,10 @@ final class DesktopMainMenuController: NSObject, NSMenuDelegate, NSMenuItemValid
 
     @objc func openHelpWindow(_ sender: NSMenuItem) {
         self.model?.openHelpWindow()
+    }
+
+    @objc func openAssistantWindow(_ sender: NSMenuItem) {
+        self.model?.openAssistantWindow()
     }
 
     @objc func startOnboarding(_ sender: NSMenuItem) {

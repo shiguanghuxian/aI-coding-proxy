@@ -1287,6 +1287,10 @@ struct MainWindowTitlebarControls: View {
     let requestLogsTitle: String
     var requestLogsHelpText: String?
     let onRequestLogs: () -> Void
+    var assistantTitle: String? = nil
+    var assistantHelpText: String? = nil
+    var onAssistant: (() -> Void)? = nil
+    var assistantAccessibilityID: String = "titlebar-assistant-button"
     let keepAwakeTitle: String
     let keepAwakeSymbol: String
     let keepAwakeHelpText: String
@@ -1329,6 +1333,16 @@ struct MainWindowTitlebarControls: View {
                 helpText: self.requestLogsHelpText,
                 action: self.onRequestLogs
             )
+
+            if let assistantTitle, let onAssistant {
+                TitlebarActionButton(
+                    title: assistantTitle,
+                    symbol: "sparkles",
+                    accessibilityID: assistantAccessibilityID,
+                    helpText: assistantHelpText,
+                    action: onAssistant
+                )
+            }
 
             TitlebarActionButton(
                 title: self.keepAwakeTitle,

@@ -13,6 +13,18 @@ struct ChatCompletionsReasoningCacheEntry: Codable, Sendable, Equatable {
 
 struct ChatCompletionsReasoningCacheApplyReport: Sendable, Equatable {
     var restoredReasoningContentCount: Int = 0
+    var restoredByToolCallIDCount: Int = 0
+    var restoredByToolCallSignatureCount: Int = 0
+    var restoredByAssistantFingerprintCount: Int = 0
+    var restoredByUniqueToolReasoningCount: Int = 0
+    var restoredByLatestToolReasoningCount: Int = 0
+    var pinnedFallbackReasoningCount: Int = 0
+
+    var restoredExactReasoningContentCount: Int {
+        self.restoredByToolCallIDCount
+            + self.restoredByToolCallSignatureCount
+            + self.restoredByAssistantFingerprintCount
+    }
 }
 
 final class ChatCompletionsReasoningCache: @unchecked Sendable {
@@ -53,13 +65,12 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
             return (request, report)
         }
 
-        let entry = self.entry(
+        guard var entry = self.entry(
             cacheKey: cacheKey,
             accountKey: accountKey,
             sessionKey: sessionKey ?? "",
             now: now
-        )
-        guard let entry, entry.expiresAt > now else {
+        ), entry.expiresAt > now else {
             return (request, report)
         }
         guard var messages = request["messages"] as? [[String: Any]], messages.isEmpty == false else {
@@ -67,6 +78,7 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
         }
 
         var changed = false
+        var pinnedFallback = false
         for index in messages.indices {
             guard ((messages[index]["role"] as? String) ?? "").lowercased() == "assistant" else {
                 continue
@@ -74,12 +86,49 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
             guard Self.trimmedString(messages[index]["reasoning_content"]) == nil else {
                 continue
             }
-            guard let reasoningContent = self.reasoningContent(for: messages[index], entry: entry) else {
+            guard let restored = self.reasoningContent(for: messages[index], entry: entry) else {
                 continue
             }
-            messages[index]["reasoning_content"] = reasoningContent
+            messages[index]["reasoning_content"] = restored.content
             report.restoredReasoningContentCount += 1
+            switch restored.source {
+            case .toolCallID:
+                report.restoredByToolCallIDCount += 1
+            case .toolCallSignature:
+                report.restoredByToolCallSignatureCount += 1
+            case .assistantFingerprint:
+                report.restoredByAssistantFingerprintCount += 1
+            case .uniqueToolReasoning:
+                report.restoredByUniqueToolReasoningCount += 1
+            case .latestToolReasoning:
+                report.restoredByLatestToolReasoningCount += 1
+            }
+            if restored.source.shouldPinToMessage {
+                let pinned = Self.pinReasoningContent(
+                    restored.content,
+                    for: messages[index],
+                    entry: &entry
+                )
+                if pinned > 0 {
+                    report.pinnedFallbackReasoningCount += pinned
+                    pinnedFallback = true
+                }
+            }
             changed = true
+        }
+
+        if pinnedFallback {
+            self.lock.lock()
+            self.entries[cacheKey] = entry
+            self.enforceCapacityLocked()
+            self.lock.unlock()
+            try? self.store?.upsertChatCompletionsReasoningCacheEntry(
+                cacheKey: cacheKey,
+                accountKey: accountKey,
+                sessionKey: sessionKey ?? "",
+                entry: entry,
+                capacity: self.capacity
+            )
         }
 
         guard changed else {
@@ -306,18 +355,38 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
         return persistent
     }
 
-    private func reasoningContent(for message: [String: Any], entry: ChatCompletionsReasoningCacheEntry) -> String? {
+    private enum ReasoningRestoreSource {
+        case toolCallID
+        case toolCallSignature
+        case assistantFingerprint
+        case uniqueToolReasoning
+        case latestToolReasoning
+
+        var shouldPinToMessage: Bool {
+            switch self {
+            case .toolCallID, .toolCallSignature, .assistantFingerprint:
+                return false
+            case .uniqueToolReasoning, .latestToolReasoning:
+                return true
+            }
+        }
+    }
+
+    private func reasoningContent(
+        for message: [String: Any],
+        entry: ChatCompletionsReasoningCacheEntry
+    ) -> (content: String, source: ReasoningRestoreSource)? {
         let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
         for toolCall in toolCalls {
             guard let callID = Self.trimmedString(toolCall["id"]) else { continue }
             if let reasoningContent = entry.byToolCallID[callID] {
-                return reasoningContent
+                return (reasoningContent, .toolCallID)
             }
         }
         for toolCall in toolCalls {
             guard let signature = Self.toolCallSignature(toolCall) else { continue }
             if let reasoningContent = entry.byToolCallSignature[signature] {
-                return reasoningContent
+                return (reasoningContent, .toolCallSignature)
             }
         }
 
@@ -326,23 +395,61 @@ final class ChatCompletionsReasoningCache: @unchecked Sendable {
                 ? entry.byAssistantFingerprint[fingerprint]
                 : entry.byToolAssistantFingerprint[fingerprint]
             if let fingerprintReasoning {
-                return fingerprintReasoning
+                return (fingerprintReasoning, .assistantFingerprint)
             }
         }
 
         if toolCalls.isEmpty == false,
            let reasoningContent = Self.uniqueToolCallReasoningContent(in: entry)
         {
-            return reasoningContent
+            return (reasoningContent, .uniqueToolReasoning)
         }
 
         if toolCalls.isEmpty == false,
            let reasoningContent = entry.latestToolCallReasoningContent
         {
-            return reasoningContent
+            return (reasoningContent, .latestToolReasoning)
         }
 
         return nil
+    }
+
+    private static func pinReasoningContent(
+        _ reasoningContent: String,
+        for message: [String: Any],
+        entry: inout ChatCompletionsReasoningCacheEntry
+    ) -> Int {
+        let normalized = reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.isEmpty == false else { return 0 }
+
+        var pinned = 0
+        let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+        for toolCall in toolCalls {
+            if let callID = Self.trimmedString(toolCall["id"]),
+               entry.byToolCallID[callID] == nil
+            {
+                entry.byToolCallID[callID] = normalized
+                pinned += 1
+            }
+            if let signature = Self.toolCallSignature(toolCall),
+               entry.byToolCallSignature[signature] == nil
+            {
+                entry.byToolCallSignature[signature] = normalized
+                pinned += 1
+            }
+        }
+        if let fingerprint = Self.assistantFingerprint(forText: Self.assistantText(from: message)) {
+            if toolCalls.isEmpty {
+                if entry.byAssistantFingerprint[fingerprint] == nil {
+                    entry.byAssistantFingerprint[fingerprint] = normalized
+                    pinned += 1
+                }
+            } else if entry.byToolAssistantFingerprint[fingerprint] == nil {
+                entry.byToolAssistantFingerprint[fingerprint] = normalized
+                pinned += 1
+            }
+        }
+        return pinned
     }
 
     private static func uniqueToolCallReasoningContent(in entry: ChatCompletionsReasoningCacheEntry) -> String? {

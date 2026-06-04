@@ -260,34 +260,38 @@ private struct CodexProjectRouteDetailPanel: View {
 
     var body: some View {
         let palette = AppearanceStore.palette(for: self.colorScheme)
-        let currentFile = self.model.currentProjectRoutePreviewFile(for: self.rule)
-        let proposedFile = self.model.proposedProjectRoutePreviewFile(for: self.rule)
+        let currentFiles = self.model.currentProjectRoutePreviewFiles(for: self.rule)
+        let proposedFiles = self.model.proposedProjectRoutePreviewFiles(for: self.rule)
 
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 14) {
                 self.summary(palette: palette)
 
-                if let currentFile {
-                    CodexProjectRoutePreviewPanel(
-                        model: self.model,
-                        title: self.model.localized(zh: "当前项目配置", en: "Current Project Config"),
-                        subtitle: self.model.projectRouteFileActionSummary(self.rule, file: currentFile),
-                        file: currentFile
-                    )
+                if currentFiles.isEmpty == false {
+                    ForEach(currentFiles) { file in
+                        CodexProjectRoutePreviewPanel(
+                            model: self.model,
+                            title: self.model.localized(zh: "当前项目配置", en: "Current Project Config"),
+                            subtitle: self.model.projectRouteFileActionSummary(self.rule, file: file),
+                            file: file
+                        )
+                    }
                 } else {
                     self.missingPreviewPanel(title: self.model.localized(zh: "当前项目配置", en: "Current Project Config"), palette: palette)
                 }
 
-                if let proposedFile {
-                    CodexProjectRoutePreviewPanel(
-                        model: self.model,
-                        title: self.model.localized(zh: "将写入项目配置", en: "Proposed Project Config"),
-                        subtitle: self.model.localized(
-                            zh: "点击写入项目后会把下方内容写入对应配置文件。",
-                            en: "Writing the project will store the content below in the matching config file."
-                        ),
-                        file: proposedFile
-                    )
+                if proposedFiles.isEmpty == false {
+                    ForEach(proposedFiles) { file in
+                        CodexProjectRoutePreviewPanel(
+                            model: self.model,
+                            title: self.model.localized(zh: "将写入项目配置", en: "Proposed Project Config"),
+                            subtitle: self.model.localized(
+                                zh: "点击写入项目后会把下方内容写入对应配置文件。",
+                                en: "Writing the project will store the content below in the matching config file."
+                            ),
+                            file: file
+                        )
+                    }
                 } else {
                     self.missingPreviewPanel(title: self.model.localized(zh: "将写入项目配置", en: "Proposed Project Config"), palette: palette)
                 }

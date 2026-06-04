@@ -235,10 +235,10 @@ extension DesktopAppModel {
 
     func codexProjectRouteConfigStatus(_ rule: CodexProjectRouteRule) -> String {
         let preview = self.clientConfigFileService.previewCurrentProjectRoute(rule)
-        guard let file = preview.files.first, file.exists else {
+        guard preview.files.isEmpty == false, preview.files.allSatisfy({ $0.exists }) else {
             return self.localized(zh: "项目配置未写入", en: "Project config not written")
         }
-        if self.projectRouteConfigMatches(content: file.content, rule: rule) {
+        if preview.files.allSatisfy({ self.projectRouteConfigMatches(file: $0, rule: rule) }) {
             return self.localized(zh: "项目配置已匹配", en: "Project config matches")
         }
         return self.localized(zh: "项目配置与路由不一致", en: "Project config differs")
@@ -278,12 +278,20 @@ extension DesktopAppModel {
         return self.settings.codexProjectRoutes.first(where: { $0.id == id })
     }
 
+    func currentProjectRoutePreviewFiles(for rule: CodexProjectRouteRule) -> [ClientConfigFileTextSnapshot] {
+        self.clientConfigFileService.previewCurrentProjectRoute(rule).files
+    }
+
+    func proposedProjectRoutePreviewFiles(for rule: CodexProjectRouteRule) -> [ClientConfigFileTextSnapshot] {
+        self.clientConfigFileService.previewProposedProjectRoute(rule).files
+    }
+
     func currentProjectRoutePreviewFile(for rule: CodexProjectRouteRule) -> ClientConfigFileTextSnapshot? {
-        self.clientConfigFileService.previewCurrentProjectRoute(rule).files.first
+        self.currentProjectRoutePreviewFiles(for: rule).first
     }
 
     func proposedProjectRoutePreviewFile(for rule: CodexProjectRouteRule) -> ClientConfigFileTextSnapshot? {
-        self.clientConfigFileService.previewProposedProjectRoute(rule).files.first
+        self.proposedProjectRoutePreviewFiles(for: rule).first
     }
 
     func projectRoutePreviewDisplayContent(_ file: ClientConfigFileTextSnapshot) -> String {
@@ -319,7 +327,7 @@ extension DesktopAppModel {
                 en: "No project config exists yet; write to create it."
             )
         }
-        if self.projectRouteConfigMatches(content: file.content, rule: rule) {
+        if self.projectRouteConfigMatches(file: file, rule: rule) {
             return self.localized(
                 zh: "项目配置与当前路由一致。",
                 en: "Project config matches this route."
@@ -335,12 +343,15 @@ extension DesktopAppModel {
         rule.client == .codex ? .codex : .claudeCode
     }
 
-    private func projectRouteConfigMatches(content: String, rule: CodexProjectRouteRule) -> Bool {
+    private func projectRouteConfigMatches(file: ClientConfigFileTextSnapshot, rule: CodexProjectRouteRule) -> Bool {
         switch rule.client {
         case .codex:
-            return content.contains("model = \"\(rule.routeModel)\"")
+            if file.path.hasSuffix("codex-proxy-model-catalog.json") {
+                return self.codexProjectRouteModelCatalogMatches(content: file.content, rule: rule)
+            }
+            return self.codexProjectRouteConfigMatches(content: file.content, rule: rule)
         case .claudeCode:
-            guard let data = content.data(using: .utf8),
+            guard let data = file.content.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
                 return false
@@ -351,12 +362,36 @@ extension DesktopAppModel {
         }
     }
 
+    private func codexProjectRouteConfigMatches(content: String, rule: CodexProjectRouteRule) -> Bool {
+        guard content.contains("model = \"\(rule.routeModel)\"") else {
+            return false
+        }
+        return content.contains("model_catalog_json = \"\(self.codexProjectRouteModelCatalogPath(rule))\"")
+    }
+
+    private func codexProjectRouteModelCatalogMatches(content: String, rule: CodexProjectRouteRule) -> Bool {
+        guard let data = content.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = object["models"] as? [[String: Any]]
+        else {
+            return false
+        }
+        return models.contains { ($0["slug"] as? String) == rule.routeModel }
+    }
+
+    private func codexProjectRouteModelCatalogPath(_ rule: CodexProjectRouteRule) -> String {
+        URL(fileURLWithPath: rule.projectPath)
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("codex-proxy-model-catalog.json")
+            .path
+    }
+
     private func projectRouteWriteDetail(_ rule: CodexProjectRouteRule) -> String {
         switch rule.client {
         case .codex:
             return self.localized(
-                zh: "已把 \(rule.routeModel) 写入 \(rule.projectPath)/.codex/config.toml。",
-                en: "Wrote \(rule.routeModel) to \(rule.projectPath)/.codex/config.toml."
+                zh: "已把 \(rule.routeModel) 写入 \(rule.projectPath)/.codex/config.toml，并同步写入 Codex CLI 模型元数据 catalog。重新启动 Codex CLI 后不应再出现项目路由模型 metadata fallback 提示。",
+                en: "Wrote \(rule.routeModel) to \(rule.projectPath)/.codex/config.toml and synced the Codex CLI model metadata catalog. Restart Codex CLI to avoid the project route model metadata fallback warning."
             )
         case .claudeCode:
             return self.localized(

@@ -48,6 +48,7 @@ actor StickySessionBindingStore {
 
 enum PromptCacheSupport {
     static let stickySessionTTLSeconds: Int64 = 900
+    static let chatCompletionsAPIKeyStickySessionTTLSeconds: Int64 = 7_200
     private static let geminiCLITmpDirectoryPattern = try! NSRegularExpression(
         pattern: #"/\.gemini/tmp/([A-Fa-f0-9]{64})"#
     )
@@ -397,5 +398,110 @@ enum PromptCacheSupport {
         }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+actor ChatCompletionsPrefixStabilityStore {
+    struct Entry: Sendable, Equatable {
+        var prefixHash: String
+        var accountKey: String
+        var messageHashes: [String]
+        var providerShapeHash: String
+        var touchedAt: Int64
+    }
+
+    private let ttlSeconds: Int64
+    private var entries: [String: Entry] = [:]
+
+    init(ttlSeconds: Int64 = PromptCacheSupport.chatCompletionsAPIKeyStickySessionTTLSeconds) {
+        self.ttlSeconds = max(60, ttlSeconds)
+    }
+
+    func metadata(
+        sessionKey: String?,
+        model: String?,
+        accountKey: String,
+        prefixHash: String,
+        messageHashes: [String] = [],
+        providerShapeHash: String = "",
+        now: Int64 = Helpers.now()
+    ) -> [String: String] {
+        self.pruneExpired(now: now)
+        guard let sessionKey = self.trimmed(sessionKey),
+              let model = self.trimmed(model),
+              let accountKey = self.trimmed(accountKey),
+              let prefixHash = self.trimmed(prefixHash)
+        else {
+            return [
+                "chat_prefix_stability_tracked": "false",
+            ]
+        }
+
+        let key = "\(sessionKey)\n\(model)"
+        let previous = self.entries[key]
+        self.entries[key] = Entry(
+            prefixHash: prefixHash,
+            accountKey: accountKey,
+            messageHashes: messageHashes,
+            providerShapeHash: providerShapeHash,
+            touchedAt: now
+        )
+
+        guard let previous else {
+            return [
+                "chat_prefix_stability_tracked": "true",
+                "chat_prefix_same_as_previous": "unknown",
+                "chat_account_same_as_previous": "unknown",
+                "chat_previous_messages_are_prefix_of_current": "unknown",
+                "chat_common_message_prefix_count": "0",
+                "chat_previous_message_count": "0",
+                "chat_current_message_count": "\(messageHashes.count)",
+                "chat_provider_shape_same_as_previous": "unknown",
+            ]
+        }
+
+        let commonMessagePrefixCount = self.commonPrefixCount(
+            previous.messageHashes,
+            messageHashes
+        )
+        let hasMessageSequence = previous.messageHashes.isEmpty == false && messageHashes.isEmpty == false
+        let previousMessagesArePrefix = hasMessageSequence
+            && messageHashes.count >= previous.messageHashes.count
+            && commonMessagePrefixCount == previous.messageHashes.count
+        let providerShapeComparable = previous.providerShapeHash.isEmpty == false && providerShapeHash.isEmpty == false
+
+        return [
+            "chat_prefix_stability_tracked": "true",
+            "chat_prefix_same_as_previous": previous.prefixHash == prefixHash ? "true" : "false",
+            "chat_account_same_as_previous": previous.accountKey == accountKey ? "true" : "false",
+            "chat_previous_messages_prefix_sha256": previous.prefixHash,
+            "chat_previous_messages_are_prefix_of_current": hasMessageSequence
+                ? (previousMessagesArePrefix ? "true" : "false")
+                : "unknown",
+            "chat_common_message_prefix_count": "\(commonMessagePrefixCount)",
+            "chat_previous_message_count": "\(previous.messageHashes.count)",
+            "chat_current_message_count": "\(messageHashes.count)",
+            "chat_provider_shape_same_as_previous": providerShapeComparable
+                ? (previous.providerShapeHash == providerShapeHash ? "true" : "false")
+                : "unknown",
+        ]
+    }
+
+    private func pruneExpired(now: Int64) {
+        self.entries = self.entries.filter { now - $0.value.touchedAt < self.ttlSeconds }
+    }
+
+    private func trimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func commonPrefixCount(_ lhs: [String], _ rhs: [String]) -> Int {
+        var count = 0
+        for (left, right) in zip(lhs, rhs) {
+            guard left == right else { break }
+            count += 1
+        }
+        return count
     }
 }

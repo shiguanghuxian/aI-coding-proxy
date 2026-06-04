@@ -4949,9 +4949,13 @@ public enum ManualAPIKeyUpstreamAdapter: String, Codable, Sendable, Equatable, H
 public enum ChatCompletionsCompatibilityProfile: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
     case auto
     case generic
+    case genericStrict = "generic_strict"
     case deepSeekV4Thinking = "deep_seek_v4_thinking"
     case deepSeekLegacyReasoner = "deep_seek_legacy_reasoner"
     case mimoStrict = "mimo_strict"
+    case minimaxStrict = "minimax_strict"
+    case senseNovaStrict = "sensenova_strict"
+    case kimiStrict = "kimi_strict"
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -4961,12 +4965,20 @@ public enum ChatCompletionsCompatibilityProfile: String, Codable, Sendable, Equa
             self = .auto
         case Self.generic.rawValue:
             self = .generic
+        case Self.genericStrict.rawValue, "genericStrict":
+            self = .genericStrict
         case Self.deepSeekV4Thinking.rawValue, "deepSeekV4Thinking":
             self = .deepSeekV4Thinking
         case Self.deepSeekLegacyReasoner.rawValue, "deepSeekLegacyReasoner":
             self = .deepSeekLegacyReasoner
         case Self.mimoStrict.rawValue, "mimoStrict":
             self = .mimoStrict
+        case Self.minimaxStrict.rawValue, "minimaxStrict", "miniMaxStrict":
+            self = .minimaxStrict
+        case Self.senseNovaStrict.rawValue, "senseNovaStrict", "sensenovaStrict":
+            self = .senseNovaStrict
+        case Self.kimiStrict.rawValue, "kimiStrict":
+            self = .kimiStrict
         default:
             self = .auto
         }

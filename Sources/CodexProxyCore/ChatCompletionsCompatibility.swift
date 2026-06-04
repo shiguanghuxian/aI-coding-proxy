@@ -1,14 +1,25 @@
 import Foundation
 
 enum ChatCompletionsCompatibility {
-    static let missingReasoningPlaceholder = "(reasoning unavailable for this historical turn)"
-    static let missingToolOutputPlaceholder = "(tool output unavailable for this historical turn)"
+    static let missingReasoningPlaceholder = "(this turn ran without thinking mode)"
+    static let missingToolOutputPlaceholder = "[tool output missing - no function_call_output was provided for this call_id]"
 
     struct PrepareReport: Sendable, Equatable {
         var effectiveProfile: ChatCompletionsCompatibilityProfile = .auto
+        var providerID: ChatCompletionsProviderID = .generic
+        var providerDefaultsThinking: Bool = false
+        var providerDefaultReasoningEffort: String?
         var cacheRestoredReasoningCount: Int = 0
+        var cacheRestoredExactReasoningCount: Int = 0
+        var cacheRestoredByToolCallIDCount: Int = 0
+        var cacheRestoredByToolCallSignatureCount: Int = 0
+        var cacheRestoredByAssistantFingerprintCount: Int = 0
+        var cacheRestoredByUniqueToolReasoningCount: Int = 0
+        var cacheRestoredByLatestToolReasoningCount: Int = 0
+        var pinnedFallbackReasoningCount: Int = 0
         var placeholderReasoningCount: Int = 0
         var placeholderToolOutputCount: Int = 0
+        var omittedAssistantToolContentCount: Int = 0
         var finalAssistantToolCallCount: Int = 0
         var finalReasoningContentCount: Int = 0
         var finalMessagesCount: Int = 0
@@ -17,9 +28,20 @@ enum ChatCompletionsCompatibility {
         var metadata: [String: String] {
             [
                 "chat_compatibility_profile": self.effectiveProfile.rawValue,
+                "chat_provider_id": self.providerID.rawValue,
+                "chat_provider_defaults_thinking": self.providerDefaultsThinking ? "true" : "false",
+                "chat_provider_default_reasoning_effort": self.providerDefaultReasoningEffort ?? "",
                 "reasoning_source_cache_count": "\(max(0, self.cacheRestoredReasoningCount))",
+                "reasoning_source_cache_exact_count": "\(max(0, self.cacheRestoredExactReasoningCount))",
+                "reasoning_source_cache_tool_call_id_count": "\(max(0, self.cacheRestoredByToolCallIDCount))",
+                "reasoning_source_cache_tool_signature_count": "\(max(0, self.cacheRestoredByToolCallSignatureCount))",
+                "reasoning_source_cache_fingerprint_count": "\(max(0, self.cacheRestoredByAssistantFingerprintCount))",
+                "reasoning_source_cache_unique_tool_count": "\(max(0, self.cacheRestoredByUniqueToolReasoningCount))",
+                "reasoning_source_cache_latest_tool_count": "\(max(0, self.cacheRestoredByLatestToolReasoningCount))",
+                "reasoning_source_cache_pinned_fallback_count": "\(max(0, self.pinnedFallbackReasoningCount))",
                 "reasoning_placeholder_count": "\(max(0, self.placeholderReasoningCount))",
                 "tool_output_placeholder_count": "\(max(0, self.placeholderToolOutputCount))",
+                "assistant_tool_content_omitted_by_provider_count": "\(max(0, self.omittedAssistantToolContentCount))",
                 "assistant_tool_call_count": "\(max(0, self.finalAssistantToolCallCount))",
                 "reasoning_content_count": "\(max(0, self.finalReasoningContentCount))",
                 "final_messages_count": "\(max(0, self.finalMessagesCount))",
@@ -54,6 +76,27 @@ enum ChatCompletionsCompatibility {
         {
             return .mimoStrict
         }
+        if host.contains("minimaxi.com")
+            || host.contains("minimax.chat")
+            || lowerModel.hasPrefix("minimax-")
+            || lowerModel.hasPrefix("abab")
+        {
+            return .minimaxStrict
+        }
+        if host.contains("sensenova.cn")
+            || lowerModel.hasPrefix("sensenova-")
+            || lowerModel.hasPrefix("deepseek-v4-flash")
+        {
+            return .senseNovaStrict
+        }
+        if host.contains("moonshot.cn")
+            || host.contains("moonshot.ai")
+            || host.contains("platform.kimi")
+            || lowerModel.hasPrefix("kimi-")
+            || lowerModel.hasPrefix("moonshot-v1-")
+        {
+            return .kimiStrict
+        }
         if host.contains("deepseek")
             || lowerModel.contains("deepseek-v4")
             || lowerModel.contains("deepseek_chat")
@@ -66,6 +109,20 @@ enum ChatCompletionsCompatibility {
             return .generic
         }
         return .generic
+    }
+
+    static func providerStrategy(
+        configured: ChatCompletionsCompatibilityProfile,
+        baseURL: String?,
+        providerPreset: OpenAICompatibleProviderPreset,
+        model: String?
+    ) -> ChatCompletionsProviderStrategy {
+        ChatCompletionsProviderStrategy.resolve(
+            configured: configured,
+            baseURL: baseURL,
+            providerPreset: providerPreset,
+            model: model
+        )
     }
 
     static func prepareRequest(
@@ -100,23 +157,30 @@ enum ChatCompletionsCompatibility {
         sessionKey: String?,
         now: Int64 = Helpers.now()
     ) -> (request: [String: Any], report: PrepareReport) {
-        let effectiveProfile = self.resolvedProfile(
+        let strategy = self.providerStrategy(
             configured: configuredProfile,
             baseURL: baseURL,
             providerPreset: providerPreset,
             model: request["model"] as? String
         )
-        var report = PrepareReport(effectiveProfile: effectiveProfile)
+        var report = PrepareReport(
+            effectiveProfile: strategy.profile,
+            providerID: strategy.providerID,
+            providerDefaultsThinking: strategy.defaultsThinkingEnabled,
+            providerDefaultReasoningEffort: strategy.defaultReasoningEffort
+        )
 
         var prepared = request
         prepared.removeValue(forKey: "enable_thinking")
 
-        if effectiveProfile == .deepSeekV4Thinking {
+        prepared = self.requestByApplyingProviderDefaults(prepared, strategy: strategy)
+        if strategy.normalizesDeepSeekThinkingParameters {
             prepared = self.prepareDeepSeekV4Parameters(prepared)
         }
         if self.isStreaming(prepared) {
             prepared = self.requestByIncludingStreamingUsage(prepared)
         }
+        prepared = self.requestByApplyingProviderParameterCompatibility(prepared, strategy: strategy)
 
         if let reasoningCache {
             let applied = reasoningCache.applyWithReport(
@@ -127,25 +191,39 @@ enum ChatCompletionsCompatibility {
             )
             prepared = applied.request
             report.cacheRestoredReasoningCount += applied.report.restoredReasoningContentCount
+            report.cacheRestoredExactReasoningCount += applied.report.restoredExactReasoningContentCount
+            report.cacheRestoredByToolCallIDCount += applied.report.restoredByToolCallIDCount
+            report.cacheRestoredByToolCallSignatureCount += applied.report.restoredByToolCallSignatureCount
+            report.cacheRestoredByAssistantFingerprintCount += applied.report.restoredByAssistantFingerprintCount
+            report.cacheRestoredByUniqueToolReasoningCount += applied.report.restoredByUniqueToolReasoningCount
+            report.cacheRestoredByLatestToolReasoningCount += applied.report.restoredByLatestToolReasoningCount
+            report.pinnedFallbackReasoningCount += applied.report.pinnedFallbackReasoningCount
         }
 
-        prepared = self.requestBySanitizingTools(prepared)
+        prepared = self.requestBySanitizingTools(
+            prepared,
+            dropNonFunctionTools: strategy.dropsNonFunctionTools
+        )
 
-        if effectiveProfile == .deepSeekLegacyReasoner {
+        if strategy.removesHistoricalReasoningContent {
             prepared = self.requestByRemovingReasoningContent(prepared)
             report = self.finalizeReport(report, request: prepared)
             return (prepared, report)
         }
 
-        let strictThinkingHistory = effectiveProfile == .deepSeekV4Thinking || effectiveProfile == .mimoStrict
         let sanitized = self.requestBySanitizingMessages(
             prepared,
-            injectMissingReasoning: strictThinkingHistory,
-            injectMissingToolOutputs: strictThinkingHistory
+            injectMissingReasoning: strategy.injectMissingToolReasoning,
+            injectMissingAssistantReasoning: strategy.injectMissingPlainAssistantReasoning,
+            injectMissingToolOutputs: strategy.injectMissingToolOutputs,
+            deferSystemDeveloperInterruptions: strategy.deferSystemDeveloperInterruptions,
+            omitEmptyAssistantToolContent: strategy.omitsEmptyAssistantToolContent
         )
         prepared = sanitized.request
+        prepared = self.requestByApplyingProviderMessageCompatibility(prepared, strategy: strategy)
         report.placeholderReasoningCount += sanitized.placeholderReasoningCount
         report.placeholderToolOutputCount += sanitized.placeholderToolOutputCount
+        report.omittedAssistantToolContentCount += sanitized.omittedAssistantToolContentCount
         report = self.finalizeReport(report, request: prepared)
         return (prepared, report)
     }
@@ -190,10 +268,66 @@ enum ChatCompletionsCompatibility {
         return next
     }
 
+    private static func requestByApplyingProviderDefaults(
+        _ request: [String: Any],
+        strategy: ChatCompletionsProviderStrategy
+    ) -> [String: Any] {
+        var updated = request
+        if strategy.defaultsThinkingEnabled && updated["thinking"] == nil {
+            updated["thinking"] = ["type": "enabled"]
+        }
+        if let defaultReasoningEffort = strategy.defaultReasoningEffort,
+           updated["reasoning_effort"] == nil,
+           self.isThinkingDisabled(updated["thinking"]) == false
+        {
+            updated["reasoning_effort"] = defaultReasoningEffort
+        }
+        return updated
+    }
+
+    private static func requestByApplyingProviderParameterCompatibility(
+        _ request: [String: Any],
+        strategy: ChatCompletionsProviderStrategy
+    ) -> [String: Any] {
+        var updated = request
+        let hadDisabledThinking = self.isThinkingDisabled(updated["thinking"])
+        if strategy.removesThinkingParameters {
+            updated.removeValue(forKey: "thinking")
+            updated.removeValue(forKey: "enable_thinking")
+        }
+        if strategy.setsDisabledReasoningEffortNone, hadDisabledThinking {
+            updated["reasoning_effort"] = "none"
+        }
+        if strategy.dropsToolChoiceAuto,
+           self.trimmedString(updated["tool_choice"])?.lowercased() == "auto"
+        {
+            updated.removeValue(forKey: "tool_choice")
+        }
+        if strategy.dropsStreamOptions {
+            updated.removeValue(forKey: "stream_options")
+        }
+        if strategy.dropsParallelToolCalls {
+            updated.removeValue(forKey: "parallel_tool_calls")
+        }
+        if strategy.dropsResponseFormat {
+            updated.removeValue(forKey: "response_format")
+        }
+        if strategy.dropsReasoningEffort {
+            updated.removeValue(forKey: "reasoning_effort")
+        }
+        return updated
+    }
+
     private static func prepareDeepSeekV4Parameters(_ request: [String: Any]) -> [String: Any] {
         var updated = request
         if updated["reasoning_effort"] != nil && updated["thinking"] == nil {
             updated["thinking"] = ["type": "enabled"]
+        }
+        if self.isThinkingDisabled(updated["thinking"]) {
+            if (updated["reasoning_effort"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "none" {
+                updated.removeValue(forKey: "reasoning_effort")
+            }
+            return updated
         }
         if self.isThinkingEnabled(updated["thinking"]) {
             updated.removeValue(forKey: "temperature")
@@ -212,7 +346,10 @@ enum ChatCompletionsCompatibility {
         return updated
     }
 
-    private static func requestBySanitizingTools(_ request: [String: Any]) -> [String: Any] {
+    private static func requestBySanitizingTools(
+        _ request: [String: Any],
+        dropNonFunctionTools: Bool
+    ) -> [String: Any] {
         guard let tools = request["tools"] as? [[String: Any]], tools.isEmpty == false else {
             return request
         }
@@ -220,6 +357,11 @@ enum ChatCompletionsCompatibility {
         var seen = Set<String>()
         var sanitized: [[String: Any]] = []
         for tool in tools {
+            let type = self.trimmedString(tool["type"])?.lowercased() ?? "function"
+            if dropNonFunctionTools, type != "function", type != "custom" {
+                continue
+            }
+
             let key = self.toolDeduplicationKey(tool)
             guard seen.contains(key) == false else { continue }
             seen.insert(key)
@@ -238,8 +380,67 @@ enum ChatCompletionsCompatibility {
         }
 
         var updated = request
-        updated["tools"] = sanitized
+        if sanitized.isEmpty {
+            updated.removeValue(forKey: "tools")
+        } else {
+            updated["tools"] = sanitized
+        }
         return updated
+    }
+
+    private static func requestByApplyingProviderMessageCompatibility(
+        _ request: [String: Any],
+        strategy: ChatCompletionsProviderStrategy
+    ) -> [String: Any] {
+        guard var messages = request["messages"] as? [[String: Any]], messages.isEmpty == false else {
+            return request
+        }
+
+        var changed = false
+        if strategy.dropsNullAssistantContent {
+            for index in messages.indices
+                where self.role(of: messages[index]) == "assistant"
+                    && messages[index]["content"] is NSNull
+            {
+                messages[index].removeValue(forKey: "content")
+                changed = true
+            }
+        }
+        if strategy.mergesSystemMessages {
+            let merged = self.messagesByMergingSystemMessages(messages)
+            if self.normalizedJSONString(merged) != self.normalizedJSONString(messages) {
+                messages = merged
+                changed = true
+            }
+        }
+
+        guard changed else { return request }
+        var updated = request
+        updated["messages"] = messages
+        return updated
+    }
+
+    private static func messagesByMergingSystemMessages(_ messages: [[String: Any]]) -> [[String: Any]] {
+        let systemMessages = messages.filter { self.role(of: $0) == "system" }
+        guard systemMessages.isEmpty == false else {
+            return messages
+        }
+        if systemMessages.count == 1, self.role(of: messages.first ?? [:]) == "system" {
+            return messages
+        }
+
+        let contents = systemMessages.compactMap { self.trimmedString($0["content"]) }
+        let nonSystemMessages = messages.filter { self.role(of: $0) != "system" }
+        guard contents.isEmpty == false else {
+            return nonSystemMessages
+        }
+
+        var merged: [[String: Any]] = [[
+            "role": "system",
+            "content": contents.joined(separator: "\n\n"),
+        ]]
+        merged.append(contentsOf: nonSystemMessages)
+        return merged
     }
 
     private static func requestByRemovingReasoningContent(_ request: [String: Any]) -> [String: Any] {
@@ -261,12 +462,16 @@ enum ChatCompletionsCompatibility {
         var request: [String: Any]
         var placeholderReasoningCount: Int = 0
         var placeholderToolOutputCount: Int = 0
+        var omittedAssistantToolContentCount: Int = 0
     }
 
     private static func requestBySanitizingMessages(
         _ request: [String: Any],
         injectMissingReasoning: Bool,
-        injectMissingToolOutputs: Bool
+        injectMissingAssistantReasoning: Bool,
+        injectMissingToolOutputs: Bool,
+        deferSystemDeveloperInterruptions: Bool,
+        omitEmptyAssistantToolContent: Bool
     ) -> MessageSanitizationResult {
         var result = MessageSanitizationResult(request: request)
         guard let messages = request["messages"] as? [[String: Any]], messages.isEmpty == false else {
@@ -293,6 +498,14 @@ enum ChatCompletionsCompatibility {
                   let rawToolCalls = message["tool_calls"] as? [[String: Any]],
                   rawToolCalls.isEmpty == false
             else {
+                if injectMissingAssistantReasoning,
+                   role == "assistant",
+                   self.trimmedString(message["reasoning_content"]) == nil
+                {
+                    message["reasoning_content"] = self.missingReasoningPlaceholder
+                    result.placeholderReasoningCount += 1
+                    changed = true
+                }
                 sanitized.append(message)
                 index += 1
                 continue
@@ -308,6 +521,13 @@ enum ChatCompletionsCompatibility {
             }
 
             message["tool_calls"] = toolCalls
+            if omitEmptyAssistantToolContent,
+               self.isEmptyAssistantToolContent(message["content"])
+            {
+                message.removeValue(forKey: "content")
+                result.omittedAssistantToolContentCount += 1
+                changed = true
+            }
             if injectMissingReasoning, self.trimmedString(message["reasoning_content"]) == nil {
                 message["reasoning_content"] = self.missingReasoningPlaceholder
                 result.placeholderReasoningCount += 1
@@ -335,6 +555,7 @@ enum ChatCompletionsCompatibility {
                     continue
                 }
                 if injectMissingToolOutputs,
+                   deferSystemDeveloperInterruptions,
                    (nextRole == "system" || nextRole == "developer"),
                    self.hasRemainingToolOutput(for: callIDs, in: messages, after: scan)
                 {
@@ -411,6 +632,33 @@ enum ChatCompletionsCompatibility {
         return false
     }
 
+    private static func isEmptyAssistantToolContent(_ value: Any?) -> Bool {
+        guard let value else { return true }
+        if value is NSNull {
+            return true
+        }
+        if let string = value as? String {
+            return string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if let array = value as? [Any] {
+            return array.isEmpty
+        }
+        return false
+    }
+
+    private static func isThinkingDisabled(_ value: Any?) -> Bool {
+        guard let object = value as? [String: Any] else {
+            return false
+        }
+        if let enabled = object["enabled"] as? Bool {
+            return enabled == false
+        }
+        if let type = self.trimmedString(object["type"])?.lowercased() {
+            return type == "disabled" || type == "off" || type == "false"
+        }
+        return false
+    }
+
     private static func sanitizedToolCalls(
         _ toolCalls: [[String: Any]],
         emittedCallIDs: inout Set<String>
@@ -459,6 +707,16 @@ enum ChatCompletionsCompatibility {
             return false
         }
         return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    private static func normalizedJSONString(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return ""
+        }
+        return text
     }
 
     private static func toolDeduplicationKey(_ tool: [String: Any]) -> String {

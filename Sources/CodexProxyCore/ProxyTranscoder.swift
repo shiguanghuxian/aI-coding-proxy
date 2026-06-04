@@ -7,30 +7,75 @@ public enum ProxyTranscoder {
         public var summaryReasoningContentCount: Int
         public var contentReasoningCount: Int
         public var assistantItemReasoningContentCount: Int
+        public var chatAssemblyMode: String
+        public var deepSeekStableAssemblyEnabled: Bool
+        public var assembledAssistantTurnCount: Int
+        public var assistantToolContentOmittedCount: Int
+        public var forwardedReasoningEffortCount: Int
 
         public init(
             encryptedContentReasoningCount: Int = 0,
             directReasoningContentCount: Int = 0,
             summaryReasoningContentCount: Int = 0,
             contentReasoningCount: Int = 0,
-            assistantItemReasoningContentCount: Int = 0
+            assistantItemReasoningContentCount: Int = 0,
+            chatAssemblyMode: String = "standard",
+            deepSeekStableAssemblyEnabled: Bool = false,
+            assembledAssistantTurnCount: Int = 0,
+            assistantToolContentOmittedCount: Int = 0,
+            forwardedReasoningEffortCount: Int = 0
         ) {
             self.encryptedContentReasoningCount = max(0, encryptedContentReasoningCount)
             self.directReasoningContentCount = max(0, directReasoningContentCount)
             self.summaryReasoningContentCount = max(0, summaryReasoningContentCount)
             self.contentReasoningCount = max(0, contentReasoningCount)
             self.assistantItemReasoningContentCount = max(0, assistantItemReasoningContentCount)
+            self.chatAssemblyMode = chatAssemblyMode
+            self.deepSeekStableAssemblyEnabled = deepSeekStableAssemblyEnabled
+            self.assembledAssistantTurnCount = max(0, assembledAssistantTurnCount)
+            self.assistantToolContentOmittedCount = max(0, assistantToolContentOmittedCount)
+            self.forwardedReasoningEffortCount = max(0, forwardedReasoningEffortCount)
         }
 
         public var metadata: [String: String] {
             [
+                "chat_assembly_mode": self.chatAssemblyMode,
                 "used_encrypted_content": self.encryptedContentReasoningCount > 0 ? "true" : "false",
                 "reasoning_source_encrypted_content_count": "\(self.encryptedContentReasoningCount)",
                 "reasoning_source_direct_count": "\(self.directReasoningContentCount)",
                 "reasoning_source_summary_count": "\(self.summaryReasoningContentCount)",
                 "reasoning_source_content_count": "\(self.contentReasoningCount)",
                 "assistant_item_reasoning_content_count": "\(self.assistantItemReasoningContentCount)",
+                "assembled_assistant_turn_count": "\(self.assembledAssistantTurnCount)",
+                "assistant_tool_content_omitted_count": "\(self.assistantToolContentOmittedCount)",
+                "forwarded_reasoning_effort_count": "\(self.forwardedReasoningEffortCount)",
             ]
+        }
+    }
+
+    public enum ChatCompletionsAssemblyMode: Sendable, Equatable {
+        case standard
+        case providerStableAssembly
+        case deepSeekStableAssembly
+
+        var usesStableAssembly: Bool {
+            switch self {
+            case .standard:
+                return false
+            case .providerStableAssembly, .deepSeekStableAssembly:
+                return true
+            }
+        }
+
+        var metadataValue: String {
+            switch self {
+            case .standard:
+                return "standard"
+            case .providerStableAssembly:
+                return "provider_stable"
+            case .deepSeekStableAssembly:
+                return "deep_seek_stable"
+            }
         }
     }
 
@@ -197,26 +242,115 @@ public enum ProxyTranscoder {
     public static func upstreamChatCompletionsRequest(
         from normalizedRequest: [String: Any],
         upstreamModel: String,
-        stream: Bool
+        stream: Bool,
+        assemblyMode: ChatCompletionsAssemblyMode = .standard,
+        forwardResponsesReasoningEffort: Bool = false
     ) -> [String: Any] {
         self.upstreamChatCompletionsRequestWithDiagnostics(
             from: normalizedRequest,
             upstreamModel: upstreamModel,
-            stream: stream
+            stream: stream,
+            assemblyMode: assemblyMode,
+            forwardResponsesReasoningEffort: forwardResponsesReasoningEffort
         ).request
     }
 
     public static func upstreamChatCompletionsRequestWithDiagnostics(
         from normalizedRequest: [String: Any],
         upstreamModel: String,
-        stream: Bool
+        stream: Bool,
+        assemblyMode: ChatCompletionsAssemblyMode = .standard,
+        forwardResponsesReasoningEffort: Bool = false
     ) -> (request: [String: Any], diagnostics: ChatCompletionsRequestBuildDiagnostics) {
+        var diagnostics = ChatCompletionsRequestBuildDiagnostics(
+            chatAssemblyMode: assemblyMode.metadataValue,
+            deepSeekStableAssemblyEnabled: assemblyMode == .deepSeekStableAssembly
+        )
+        let instructions = (normalizedRequest["instructions"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let input = normalizedRequest["input"] as? [[String: Any]] ?? []
+        let messages: [[String: Any]]
+        switch assemblyMode {
+        case .standard:
+            messages = self.standardChatCompletionMessages(
+                input: input,
+                instructions: instructions,
+                diagnostics: &diagnostics
+            )
+        case .providerStableAssembly, .deepSeekStableAssembly:
+            messages = self.deepSeekStableChatCompletionMessages(
+                input: input,
+                instructions: instructions,
+                diagnostics: &diagnostics
+            )
+        }
+
+        var request: [String: Any] = [
+            "model": upstreamModel,
+            "messages": messages,
+            "stream": stream,
+        ]
+        if let maxTokens = normalizedRequest["max_output_tokens"] {
+            if assemblyMode.usesStableAssembly {
+                request["max_completion_tokens"] = maxTokens
+            } else {
+                request["max_tokens"] = maxTokens
+            }
+        } else if let maxTokens = normalizedRequest["max_tokens"] {
+            request["max_tokens"] = maxTokens
+        }
+        if let temperature = normalizedRequest["temperature"] {
+            request["temperature"] = temperature
+        }
+        if let topP = normalizedRequest["top_p"] {
+            request["top_p"] = topP
+        }
+        if let presencePenalty = normalizedRequest["presence_penalty"] {
+            request["presence_penalty"] = presencePenalty
+        }
+        if let frequencyPenalty = normalizedRequest["frequency_penalty"] {
+            request["frequency_penalty"] = frequencyPenalty
+        }
+        if let user = normalizedRequest["user"] {
+            request["user"] = user
+        }
+        if let parallelToolCalls = normalizedRequest["parallel_tool_calls"] {
+            request["parallel_tool_calls"] = parallelToolCalls
+        }
+        if let responseFormat = normalizedRequest["response_format"] {
+            request["response_format"] = responseFormat
+        }
+        if let tools = self.chatCompletionTools(
+            from: normalizedRequest["tools"],
+            useDeepSeekCompatibleMapping: assemblyMode == .deepSeekStableAssembly
+        ), !tools.isEmpty {
+            request["tools"] = tools
+        }
+        if let toolChoice = self.chatCompletionToolChoice(from: normalizedRequest["tool_choice"]) {
+            request["tool_choice"] = toolChoice
+        }
+        if let thinking = normalizedRequest["thinking"] {
+            request["thinking"] = thinking
+        }
+        if forwardResponsesReasoningEffort,
+           request["reasoning_effort"] == nil,
+           let effort = self.chatCompletionReasoningEffort(from: normalizedRequest)
+        {
+            request["reasoning_effort"] = effort
+            diagnostics.forwardedReasoningEffortCount += 1
+        }
+        return (request, diagnostics)
+    }
+
+    private static func standardChatCompletionMessages(
+        input: [[String: Any]],
+        instructions: String,
+        diagnostics: inout ChatCompletionsRequestBuildDiagnostics
+    ) -> [[String: Any]] {
         var messages: [[String: Any]] = []
         var lastAssistantMessageIndex: Int?
         var pendingReasoningContent: String?
-        var diagnostics = ChatCompletionsRequestBuildDiagnostics()
-        let instructions = (normalizedRequest["instructions"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !instructions.isEmpty {
             messages.append([
                 "role": "system",
@@ -225,7 +359,7 @@ public enum ProxyTranscoder {
         }
 
         for item in self.sanitizedChatCompletionToolHistory(
-            normalizedRequest["input"] as? [[String: Any]] ?? []
+            input
         ) {
             let type = item["type"] as? String ?? ""
             switch type {
@@ -325,36 +459,144 @@ public enum ProxyTranscoder {
                 continue
             }
         }
+        return messages
+    }
 
-        var request: [String: Any] = [
-            "model": upstreamModel,
-            "messages": messages,
-            "stream": stream,
-        ]
-        if let maxTokens = normalizedRequest["max_output_tokens"] {
-            request["max_tokens"] = maxTokens
-        } else if let maxTokens = normalizedRequest["max_tokens"] {
-            request["max_tokens"] = maxTokens
+    private struct StableChatCompletionAssistantState {
+        var reasoningContent: String?
+        var toolCalls: [[String: Any]] = []
+        var assistantText: String?
+    }
+
+    private static func deepSeekStableChatCompletionMessages(
+        input: [[String: Any]],
+        instructions: String,
+        diagnostics: inout ChatCompletionsRequestBuildDiagnostics
+    ) -> [[String: Any]] {
+        var messages: [[String: Any]] = []
+        var state = StableChatCompletionAssistantState()
+
+        func flushAssistant() {
+            let hasReasoning = self.trimmedString(state.reasoningContent) != nil
+            let hasTools = state.toolCalls.isEmpty == false
+            let hasText = state.assistantText != nil
+            guard hasReasoning || hasTools || hasText else { return }
+
+            var message: [String: Any] = [
+                "role": "assistant",
+            ]
+            if let assistantText = state.assistantText {
+                message["content"] = assistantText
+            } else if hasTools == false {
+                message["content"] = ""
+            } else {
+                diagnostics.assistantToolContentOmittedCount += 1
+            }
+            if hasTools {
+                message["tool_calls"] = state.toolCalls
+            }
+            if let reasoningContent = self.trimmedString(state.reasoningContent) {
+                message["reasoning_content"] = reasoningContent
+            }
+            messages.append(message)
+            diagnostics.assembledAssistantTurnCount += 1
+            state = StableChatCompletionAssistantState()
         }
-        if let temperature = normalizedRequest["temperature"] {
-            request["temperature"] = temperature
+
+        if !instructions.isEmpty {
+            messages.append([
+                "role": "system",
+                "content": instructions,
+            ])
         }
-        if let topP = normalizedRequest["top_p"] {
-            request["top_p"] = topP
+
+        for item in input {
+            let type = ((item["type"] as? String) ?? "").lowercased()
+            switch type {
+            case "reasoning":
+                if let extracted = self.reasoningContentWithSource(fromOutputItem: item) {
+                    switch extracted.source {
+                    case .encryptedContent:
+                        diagnostics.encryptedContentReasoningCount += 1
+                    case .direct:
+                        diagnostics.directReasoningContentCount += 1
+                    case .summary:
+                        diagnostics.summaryReasoningContentCount += 1
+                    case .content:
+                        diagnostics.contentReasoningCount += 1
+                    }
+                    state.reasoningContent = self.joinReasoningContent(
+                        state.reasoningContent,
+                        extracted.content
+                    )
+                }
+
+            case "message":
+                let role = ((item["role"] as? String) ?? "user").lowercased()
+                let chatRole = self.chatCompletionRole(for: role)
+                if chatRole == "assistant" {
+                    if state.assistantText != nil {
+                        flushAssistant()
+                    }
+                    if let reasoningContent = self.trimmedString(item["reasoning_content"]) {
+                        diagnostics.assistantItemReasoningContentCount += 1
+                        state.reasoningContent = self.joinReasoningContent(
+                            state.reasoningContent,
+                            reasoningContent
+                        )
+                    }
+                    let assistantText = self.chatCompletionMessageContent(from: item["content"])
+                    state.assistantText = assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? nil
+                        : assistantText
+                } else {
+                    flushAssistant()
+                    messages.append([
+                        "role": chatRole,
+                        "content": self.chatCompletionMessageContentValue(
+                            from: item["content"],
+                            chatRole: chatRole
+                        ),
+                    ])
+                }
+
+            case "function_call":
+                let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let name = (item["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "tool"
+                guard !callID.isEmpty else { continue }
+                if let reasoningContent = self.trimmedString(item["reasoning_content"]) {
+                    diagnostics.assistantItemReasoningContentCount += 1
+                    state.reasoningContent = self.joinReasoningContent(
+                        state.reasoningContent,
+                        reasoningContent
+                    )
+                }
+                state.toolCalls.append([
+                    "id": callID,
+                    "type": "function",
+                    "function": [
+                        "name": name,
+                        "arguments": self.stringValue(item["arguments"]),
+                    ],
+                ])
+
+            case "function_call_output":
+                flushAssistant()
+                let callID = (item["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !callID.isEmpty else { continue }
+                messages.append([
+                    "role": "tool",
+                    "tool_call_id": callID,
+                    "content": self.stringValue(item["output"]),
+                ])
+
+            default:
+                flushAssistant()
+            }
         }
-        if let user = normalizedRequest["user"] {
-            request["user"] = user
-        }
-        if let tools = self.chatCompletionTools(from: normalizedRequest["tools"]), !tools.isEmpty {
-            request["tools"] = tools
-        }
-        if let toolChoice = self.chatCompletionToolChoice(from: normalizedRequest["tool_choice"]) {
-            request["tool_choice"] = toolChoice
-        }
-        if let thinking = normalizedRequest["thinking"] {
-            request["thinking"] = thinking
-        }
-        return (request, diagnostics)
+
+        flushAssistant()
+        return messages
     }
 
     private struct PendingChatToolCallGroup {
@@ -556,12 +798,18 @@ public enum ProxyTranscoder {
     public static func completedResponse(
         fromChatCompletion payload: [String: Any],
         requestedModel: String,
-        input: Any? = nil
+        input: Any? = nil,
+        extractInlineThinkTags: Bool = false
     ) -> [String: Any] {
         let choice = (payload["choices"] as? [[String: Any]])?.first ?? [:]
         let message = choice["message"] as? [String: Any] ?? [:]
-        let text = self.chatCompletionMessageText(from: message["content"])
-        let reasoningContent = self.trimmedString(message["reasoning_content"])
+        let rawText = self.chatCompletionMessageText(from: message["content"])
+        let inlineThink = extractInlineThinkTags ? self.splitInlineThink(rawText) : nil
+        let text = inlineThink?.content ?? rawText
+        let reasoningContent = self.joinReasoningContent(
+            self.trimmedString(message["reasoning_content"]),
+            inlineThink?.reasoning
+        )
         let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
         var output: [[String: Any]] = []
         if let reasoningContent {
@@ -613,7 +861,8 @@ public enum ProxyTranscoder {
         fromChatCompletionEvent event: SSEEvent,
         state: inout OpenAIChatSyntheticStreamState,
         requestedModel: String,
-        input: Any? = nil
+        input: Any? = nil,
+        extractInlineThinkTags: Bool = false
     ) throws -> [String] {
         let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !state.isCompleted else { return [] }
@@ -621,7 +870,8 @@ public enum ProxyTranscoder {
             let chunks = self.finalizeResponseSSEChunks(
                 fromChatCompletionState: state,
                 requestedModel: requestedModel,
-                input: input
+                input: input,
+                extractInlineThinkTags: extractInlineThinkTags
             )
             state.isCompleted = true
             return chunks
@@ -748,11 +998,28 @@ public enum ProxyTranscoder {
     public static func finalizeResponseSSEChunks(
         fromChatCompletionState state: OpenAIChatSyntheticStreamState,
         requestedModel: String,
-        input: Any? = nil
+        input: Any? = nil,
+        extractInlineThinkTags: Bool = false
     ) -> [String] {
         guard !state.isCompleted else { return [] }
         var chunks: [String] = []
         var mutableState = state
+        let inlineThink = extractInlineThinkTags ? self.splitInlineThink(mutableState.textBuffer) : nil
+        let finalTextBuffer = inlineThink?.content ?? mutableState.textBuffer
+        let finalReasoningBuffer = self.joinReasoningContent(
+            mutableState.reasoningContentBuffer,
+            inlineThink?.reasoning
+        ) ?? ""
+        let shouldEmitInlineReasoning = extractInlineThinkTags
+            && state.reasoningItemAdded == false
+            && self.trimmedString(finalReasoningBuffer) != nil
+        if extractInlineThinkTags {
+            mutableState.textBuffer = finalTextBuffer
+            mutableState.reasoningContentBuffer = finalReasoningBuffer
+            if self.trimmedString(finalReasoningBuffer) != nil {
+                mutableState.reasoningItemAdded = true
+            }
+        }
         chunks.append(contentsOf: self.initialSyntheticResponseSSEChunks(
             state: &mutableState,
             requestedModel: requestedModel,
@@ -798,6 +1065,27 @@ public enum ProxyTranscoder {
                             "text": mutableState.textBuffer,
                         ]],
                     ],
+                ])
+            )
+        }
+        if shouldEmitInlineReasoning {
+            chunks.append(
+                self.sseData([
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": [
+                        "id": mutableState.reasoningItemID,
+                        "type": "reasoning",
+                    ],
+                ])
+            )
+            chunks.append(
+                self.sseData([
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": mutableState.reasoningItemID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": mutableState.reasoningContentBuffer,
                 ])
             )
         }
@@ -863,7 +1151,8 @@ public enum ProxyTranscoder {
                 "response": self.completedResponse(
                     fromChatCompletionState: mutableState,
                     requestedModel: requestedModel,
-                    input: input
+                    input: input,
+                    extractInlineThinkTags: false
                 ),
             ])
         )
@@ -1531,6 +1820,54 @@ public enum ProxyTranscoder {
         return uniqueParts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func splitInlineThink(_ text: String) -> (reasoning: String?, content: String) {
+        guard text.isEmpty == false else {
+            return (nil, text)
+        }
+
+        var reasoningParts: [String] = []
+        var contentParts: [String] = []
+        var searchStart = text.startIndex
+        let openTag = "<think>"
+        let closeTag = "</think>"
+
+        while let openRange = text.range(
+            of: openTag,
+            options: [],
+            range: searchStart..<text.endIndex
+        ) {
+            contentParts.append(String(text[searchStart..<openRange.lowerBound]))
+            let afterOpen = openRange.upperBound
+            guard let closeRange = text.range(
+                of: closeTag,
+                options: [],
+                range: afterOpen..<text.endIndex
+            ) else {
+                contentParts.append(String(text[openRange.lowerBound..<text.endIndex]))
+                searchStart = text.endIndex
+                break
+            }
+
+            let reasoning = String(text[afterOpen..<closeRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if reasoning.isEmpty == false {
+                reasoningParts.append(reasoning)
+            }
+            searchStart = closeRange.upperBound
+        }
+
+        if searchStart < text.endIndex {
+            contentParts.append(String(text[searchStart..<text.endIndex]))
+        }
+
+        let reasoning = reasoningParts.joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            reasoning.isEmpty ? nil : reasoning,
+            contentParts.joined()
+        )
+    }
+
     private static func joinReasoningContent(_ lhs: String?, _ rhs: String?) -> String? {
         let parts = [lhs, rhs].compactMap {
             $0?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1539,9 +1876,34 @@ public enum ProxyTranscoder {
         return parts.joined(separator: "\n\n")
     }
 
-    private static func chatCompletionTools(from tools: Any?) -> [[String: Any]]? {
+    private static func chatCompletionReasoningEffort(from normalizedRequest: [String: Any]) -> String? {
+        let rawEffort = self.trimmedString(
+            (normalizedRequest["reasoning"] as? [String: Any])?["effort"]
+        ) ?? self.trimmedString(normalizedRequest["reasoning_effort"])
+        guard let rawEffort else {
+            return nil
+        }
+        return rawEffort == "minimal" ? "low" : rawEffort
+    }
+
+    private static func chatCompletionTools(
+        from tools: Any?,
+        useDeepSeekCompatibleMapping: Bool = false
+    ) -> [[String: Any]]? {
         guard let tools = tools as? [[String: Any]] else { return nil }
-        let normalized = tools.compactMap { tool -> [String: Any]? in
+        let mapped = tools.flatMap { tool -> [[String: Any]] in
+            if useDeepSeekCompatibleMapping {
+                return self.deepSeekCompatibleChatCompletionTools(from: tool)
+            }
+            return self.standardChatCompletionTools(from: tool)
+        }
+        let normalized = useDeepSeekCompatibleMapping
+            ? self.deduplicatedChatCompletionTools(mapped)
+            : mapped
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func standardChatCompletionTools(from tool: [String: Any]) -> [[String: Any]] {
             let type = (tool["type"] as? String)?.lowercased() ?? ""
             if type == "function", let function = tool["function"] as? [String: Any] {
                 var normalizedFunction = function
@@ -1554,10 +1916,10 @@ public enum ProxyTranscoder {
                         "properties": [:],
                     ]
                 }
-                return [
+                return [[
                     "type": "function",
                     "function": normalizedFunction,
-                ]
+                ]]
             }
             if ["web_search", "code_interpreter", "file_search"].contains(type) {
                 let name = ((tool["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
@@ -1577,10 +1939,10 @@ public enum ProxyTranscoder {
                         "required": ["query"],
                     ],
                 ]
-                return [
+                return [[
                     "type": "function",
                     "function": function,
-                ]
+                ]]
             }
             let name = (tool["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown_tool"
             let function: [String: Any] = [
@@ -1591,12 +1953,140 @@ public enum ProxyTranscoder {
                     "properties": [:],
                 ],
             ]
-            return [
+            return [[
                 "type": "function",
                 "function": function,
+            ]]
+    }
+
+    private static func deepSeekCompatibleChatCompletionTools(from tool: [String: Any]) -> [[String: Any]] {
+        let type = (tool["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        switch type {
+        case "function":
+            return self.deepSeekCompatibleFunctionTool(from: tool)
+        case "local_shell":
+            return [[
+                "type": "function",
+                "function": [
+                    "name": "shell",
+                    "description": "Execute a shell command on the local machine. Returns stdout, stderr and exit code.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "command": [
+                                "type": "array",
+                                "items": ["type": "string"],
+                                "description": "Argv array, e.g. [\"ls\", \"-la\"]. The first element is the program; remaining elements are arguments.",
+                            ],
+                            "workdir": [
+                                "type": "string",
+                                "description": "Working directory to run the command in (optional).",
+                            ],
+                            "timeout_ms": [
+                                "type": "number",
+                                "description": "Timeout in milliseconds (optional, default 30000).",
+                            ],
+                        ],
+                        "required": ["command"],
+                    ],
+                ],
+            ]]
+        case "custom":
+            guard let name = self.trimmedString(tool["name"]) else { return [] }
+            let format = tool["format"] as? [String: Any]
+            let formatType = self.trimmedString(format?["type"])
+            let baseDescription = self.trimmedString(tool["description"]) ?? ""
+            let suffix = formatType.map {
+                "(originally a \"\($0)\"-format custom tool; output should follow that format)."
+            } ?? ""
+            let description = [baseDescription, suffix]
+                .filter { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
+                .joined(separator: " ")
+            var function: [String: Any] = [
+                "name": name,
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "input": [
+                            "type": "string",
+                            "description": "Input text for the tool.",
+                        ],
+                    ],
+                    "additionalProperties": true,
+                ],
             ]
+            if description.isEmpty == false {
+                function["description"] = description
+            }
+            return [[
+                "type": "function",
+                "function": function,
+            ]]
+        case "namespace":
+            let nestedTools = tool["tools"] as? [[String: Any]] ?? []
+            return nestedTools.flatMap { self.deepSeekCompatibleChatCompletionTools(from: $0) }
+        case "tool_search":
+            var function: [String: Any] = ["name": "tool_search"]
+            if let description = tool["description"] {
+                function["description"] = description
+            }
+            if let parameters = tool["parameters"] {
+                function["parameters"] = parameters
+            }
+            return [[
+                "type": "function",
+                "function": function,
+            ]]
+        case "web_search", "web_search_preview", "code_interpreter", "file_search",
+             "image_generation", "computer_use_preview", "computer_use", "mcp":
+            return []
+        default:
+            return []
         }
-        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func deepSeekCompatibleFunctionTool(from tool: [String: Any]) -> [[String: Any]] {
+        let rawFunction = tool["function"] as? [String: Any] ?? tool
+        guard let name = self.trimmedString(rawFunction["name"]) else { return [] }
+        var function: [String: Any] = ["name": name]
+        if let description = rawFunction["description"] {
+            function["description"] = description
+        }
+        if let parameters = rawFunction["parameters"] {
+            function["parameters"] = parameters
+        }
+        if let strict = rawFunction["strict"] as? Bool {
+            function["strict"] = strict
+        }
+        return [[
+            "type": "function",
+            "function": function,
+        ]]
+    }
+
+    private static func deduplicatedChatCompletionTools(_ tools: [[String: Any]]) -> [[String: Any]] {
+        var seen = Set<String>()
+        var result: [[String: Any]] = []
+        for tool in tools {
+            let key = self.chatCompletionToolDeduplicationKey(tool)
+            guard seen.contains(key) == false else { continue }
+            seen.insert(key)
+            result.append(tool)
+        }
+        return result
+    }
+
+    private static func chatCompletionToolDeduplicationKey(_ tool: [String: Any]) -> String {
+        let type = self.trimmedString(tool["type"])?.lowercased() ?? "function"
+        if type == "function" {
+            let function = tool["function"] as? [String: Any] ?? [:]
+            let name = self.trimmedString(function["name"])?.lowercased() ?? "tool"
+            return "function:\(name)"
+        }
+        if let name = self.trimmedString(tool["name"])?.lowercased() {
+            return "\(type):\(name)"
+        }
+        return type
     }
 
     private static func chatCompletionToolChoice(from toolChoice: Any?) -> Any? {
@@ -1623,20 +2113,27 @@ public enum ProxyTranscoder {
     public static func completedResponse(
         fromChatCompletionState state: OpenAIChatSyntheticStreamState,
         requestedModel: String,
-        input: Any? = nil
+        input: Any? = nil,
+        extractInlineThinkTags: Bool = false
     ) -> [String: Any] {
         var output: [[String: Any]] = []
-        if state.reasoningItemAdded {
-            output.append(self.reasoningOutputItem(state.reasoningContentBuffer))
+        let inlineThink = extractInlineThinkTags ? self.splitInlineThink(state.textBuffer) : nil
+        let textBuffer = inlineThink?.content ?? state.textBuffer
+        let reasoningContent = self.joinReasoningContent(
+            state.reasoningContentBuffer,
+            inlineThink?.reasoning
+        )
+        if self.trimmedString(reasoningContent) != nil {
+            output.append(self.reasoningOutputItem(reasoningContent ?? ""))
         }
-        if !state.textBuffer.isEmpty || !state.reasoningItemAdded {
+        if !textBuffer.isEmpty || self.trimmedString(reasoningContent) == nil {
             let messageItem: [String: Any] = [
                 "id": state.textItemID,
                 "type": "message",
                 "role": "assistant",
                 "content": [[
                     "type": "output_text",
-                    "text": state.textBuffer,
+                    "text": textBuffer,
                 ]],
             ]
             output.append(messageItem)
